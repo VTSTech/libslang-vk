@@ -25,4 +25,5 @@ SOFTWARE.
 Third-party components vendored or fetched by the build retain their own
 licenses (see PROVENANCE.md): glslang (Apache-2.0 / BSD, Khronos Group),
 Vulkan-Headers (Apache-2.0 OR MIT) and Vulkan Memory Allocator (MIT) are
-planned dependencies of the M1 Vulkan runner.
+dependencies of the Vulkan runner; stb_image.h (public domain / MIT dual)
+decodes LUT images (see PROVENANCE.md).

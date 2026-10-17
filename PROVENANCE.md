@@ -1,6 +1,9 @@
 # PROVENANCE
 
-libslang-vk v0.1.0 (M0) — port of the reference host's preset layer.
+libslang-vk v0.1.0 — provenance ledger for the M0 port of the reference
+host's preset layer and for the M1–M4 runner milestones authored in this
+repository (working milestone numbers; see docs/PLAN.md §11 for the mapping
+onto the plan's milestones).
 
 **Reference host:** `VTSTech/DevilutionX`, branch `master`, commit
 `96af9b5fc8f5a4e4aef13e5276ebc604c3eaf299` (docs commit `c665d3b00` carries the
@@ -390,7 +393,8 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
 - Debug + ASan/UBSan build: **19/19 tests pass** (sanitizers active across
   the swapchain + present path on lavapipe).
 - Core-only build (`SLANGVK_ENABLE_VK=OFF`): **14/14 tests pass**.
-- Hardware half of the DevilutionX-mode exit: exercised by the fork's
-  M4 adapter spike (dual-path with the SDL_GPU runner) and its field loop on
-  Windows + Linux; the headless swapchain test is the device-agnostic CI
-  gate for the same code path.
+- Hardware half of the DevilutionX-mode exit: owned by the fork's M4
+  adapter spike, underway on branch `libslang-vk` (dual-path with the
+  SDL_GPU runner; field loop on Windows + Linux). The headless swapchain
+  test is the device-agnostic CI gate for the same code path; the hardware
+  sweep closes the spike per plan §11.

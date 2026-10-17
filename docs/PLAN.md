@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | Draft v0.1 for review |
-| **Date** | 2026-10-17 |
+| **Status** | v0.2 — living plan. Lib milestones M0–M4 complete; DevilutionX adapter spike in progress (see §11 status) |
+| **Date** | 2026-10-18 |
 | **Author** | VTSTech · drafted with Super Z |
 | **License** | MIT |
 | **Repo (proposed)** | `github.com/VTSTech/libslang-vk` |
 | **Language / Standard** | C++23 (matches DevilutionX fork's `CMAKE_CXX_STANDARD 23`) |
-| **Source lineage** | `VTSTech/DevilutionX` branch `gpu-shaders-combined` — preset layer |
+| **Source lineage** | `VTSTech/DevilutionX` — preset layer ported from `master` @ `96af9b5fc` (see PROVENANCE.md); adapter spike on branch [`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk) |
 | **Audit baseline** | `docs/audit.md` round 16 (2026-10-17): 31 open findings — **0 High / 0 Medium / 31 Low** |
 
 ---
@@ -169,6 +169,15 @@ One scope note: the fork's translator hard-fails on a handful of constructs (ver
 
 The library stays SDL-free; surface creation remains host-side. On the fork's SDL3 build, `gpu_scaler` keeps its public interface (`ScalerWanted` / `IsActive` / `HasFailed` / `WindowHasSwapchainHistory`) and swaps its SDL_GPU runner for a libslang-vk `Chain` when the backend is Vulkan: the SDL window is created with `SDL_WINDOW_VULKAN`, `SDL_Vulkan_CreateSurface` + instance are handed to `Device::adopt`, and the preset browser, ini persistence, OSD overlay, and `(Unavailable)` fallback flows continue unchanged on top.
 
+**Status (2026-10-18).** The adapter spike is underway on the fork's
+[`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)
+branch (a separate agent works the integration there; this repository stays
+library-only). It targets exactly the contract above — `gpu_scaler`
+interface preserved, host context adopted, dual-path with the SDL_GPU
+runner until corpus parity (§12 risk 5). The spike closes when the lib path
+passes the hardware field sweep on Windows + Linux (§11 M4); library-side
+M0–M4 gates it consumes are green (PROVENANCE.md verification record).
+
 Two integration consequences are worth stating openly. First, **dual-path period**: the fork will run both its SDL_GPU runner (Metal, and as a safety net) and the libslang-vk runner (Vulkan) behind the same scaler interface until the lib reaches corpus parity — whether the SDL_GPU runner is then retired is an open question (§13). Second, **upstream merge leverage**: `docs/merge-plan-draft-r2.md` gates its PR series on shader-stack findings; once the preset layer and runner live in an MIT library, the mod's mergeable surface shrinks to a thin adapter, which is exactly the shape upstream review tolerates best.
 
 One honest caveat on the "static + dylib" decision: the API uses C++23 vocabulary types (`std::expected`, `std::span`, `std::string_view`, `std::variant`), so **ABI stability across toolchains is explicitly not promised**. Shared builds are distributed the way the fork's releases are — built in CI per platform/toolchain — and the docs will say so.
@@ -189,10 +198,27 @@ One honest caveat on the "static + dylib" decision: the API uses C++23 vocabular
 | **M1** | Vulkan runner skeleton: `Device` adopt/create, single-pass offscreen execution, blit round-trip | Single-pass preset renders headless on lavapipe *and* a real GPU; golden blit matches | 2 wk |
 | **M2** | Full chain semantics: multipass, aliases, feedback, history rings, wrap/mipmap, FBO formats/scaling, runtime parameters | Fork's field-preset set (feedback / history / format / include / cycle) passes; parameter updates live | 3–4 wk |
 | **M3** | Conformance + perf: full-corpus sweep in CI, golden-image suite, perf budgets | Sweep ledger ≥ fork's current coverage; no validation-layer errors; ScaleFX 4x ≥ 240 fps @1080p, crt-royale ≥ 60 fps @4K on the reference GPU | 2 wk |
-| **M4** | DevilutionX spike: adapter on `gpu-shaders-combined` lineage; menu/persistence/OSD unchanged; fallback verified | Vulkan path through the lib passes a hardware field sweep on Windows + Linux; SDL_GPU path untouched | 2 wk |
+| **M4** | DevilutionX spike: adapter on fork branch `libslang-vk` (§9); menu/persistence/OSD unchanged; fallback verified | Vulkan path through the lib passes a hardware field sweep on Windows + Linux; SDL_GPU path untouched | 2 wk |
 | **M5** | 1.0: API freeze, packaging (CMake config + pkg-config), `docs/API.md`, tagged release + example app | Third-party project can `FetchContent` and run the example against its own swapchain | 1 wk |
 
 Durations assume the solo-maintainer + AI-assisted audit loop that produced the fork's round-1..16 ledger; M2 and M4 are the risk-carrying phases.
+
+**Implementation status (2026-10-18).** The runner landed under its own
+working milestone numbers (M1 skeleton → M2 chain semantics → M3 LUTs +
+corpus-sweep scaffolding → M4 presentation, per PROVENANCE.md). Mapped onto
+this table:
+
+| Plan milestone | Status | Notes |
+|---|---|---|
+| M0 scaffolding | ✅ done | Ported core trio, MIT + provenance ledger, CI, vendored deps |
+| M1 runner skeleton | ✅ done | Headless golden blit on lavapipe, zero validation errors |
+| M2 chain semantics | ✅ done | Field canaries pass on the Vulkan runner (`test_runner_m2`) |
+| M3 conformance + perf | 🔶 partial | LUT upload + `corpus_sweep` tool shipped (repo "M3"); full-corpus CI ledger, golden-image suite and perf budgets still open |
+| M4 DevilutionX spike | 🔶 in progress | Presentation half done — plan §8 mode (a) shipped as repo "M4" (`SwapchainFrame`, letterbox, rotation); adapter spike underway on fork branch `libslang-vk`, hardware field sweep is the exit gate |
+| M5 1.0 release | ⬜ not started | API freeze, packaging, `docs/API.md` |
+
+Where a working milestone label and this table disagree on scope,
+PROVENANCE.md's per-milestone sections are authoritative.
 
 ## 12. Risk Register
 

@@ -14,15 +14,26 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4 (presentation).** The M0 core suite passes and the M1
-runner skeleton (Device adopt/create, offscreen `Chain::render`, golden blit
-round-trips) is joined by the M2 execution contract: history rings
-(`OriginalHistory#`), feedback double-buffering (`PassFeedback#` /
-`<name>Feedback`), per-pass FBO formats (`#pragma format`, srgb/float
-framebuffers), `mipmap_input` refill, FBO recreation on resize and live
-parameters, M3 LUT uploads, and — since M4 — swapchain presentation:
-the final pass draws into an acquired swapchain image with letterbox
-rect and orientation handled by the library (plan §8 output mode (a)).
+**Status: M4 (presentation) — library milestones complete.** The M0 core
+suite passes and the M1 runner skeleton (Device adopt/create, offscreen
+`Chain::render`, golden blit round-trips) is joined by the M2 execution
+contract: history rings (`OriginalHistory#`), feedback double-buffering
+(`PassFeedback#` / `<name>Feedback`), per-pass FBO formats
+(`#pragma format`, srgb/float framebuffers), `mipmap_input` refill, FBO
+recreation on resize and live parameters, M3 LUT uploads, and — since M4 —
+swapchain presentation: the final pass draws into an acquired swapchain
+image with letterbox rect and orientation handled by the library (plan §8
+output mode (a)). All library-side M0–M4 gates are green — 19/19 ctest,
+byte-exact goldens, zero validation-layer errors on lavapipe (verification
+record in [PROVENANCE.md](PROVENANCE.md)).
+
+**DevilutionX integration (plan §11 M4) is underway** on the fork's
+[`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)
+branch: `gpu_scaler` keeps its public interface and runs the library's
+Vulkan runner dual-path with the SDL_GPU runner — preset browser, ini
+persistence, OSD overlay and the `(Unavailable)` fallback continue unchanged
+on top (plan §9). Hardware field sweeps on Windows + Linux are the spike's
+exit gate.
 
 ## Consuming
 
@@ -57,8 +68,8 @@ if (slv::preset::ParsePreset(slv::preset::ResolvePresetPath("crt-royale.slangp")
 ```
 
 The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
-fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
-Vulkan runner consumes; a host rolling its own pipeline can use them too.
+fragment textures set 2, fragment UBOs set 3) are exactly what the Vulkan
+runner consumes; a host rolling its own pipeline can use them too.
 
 ## Vulkan runner (M1 + M2 + M3 + M4)
 
@@ -132,7 +143,7 @@ Hosts adopting a context keep owning their instance/device/queue.
 end-to-end demo in ~180 lines: it loads a `.slangp`, prints the pass chain,
 scale rules, aliases and parameters, then translates and compiles every pass
 to SPIR-V with glslang — printing the per-stage bytecode sizes and the dense
-texture bindings the M1 Vulkan runner will create. Two demo presets are
+texture bindings the Vulkan runner creates. Two demo presets are
 bundled under [`examples/presets/`](examples/presets): a single-pass
 brightness shader (`demo-bright`) and a two-pass glow chain exercising
 per-pass scale rules, linear filtering and pass aliases (`demo-glow`).
@@ -181,7 +192,7 @@ pass 1 shaders/demo_glow_combine.slang: OK
   parameters:
     GLOW = 0.600 (default 0.500, range 0.000..2.000 step 0.050) [preset]
 
-result: 2/2 pass(es) compiled to SPIR-V — ready for the M1 Vulkan runner.
+result: 2/2 pass(es) compiled to SPIR-V — ready for the Vulkan runner.
 ```
 
 ## Building and testing

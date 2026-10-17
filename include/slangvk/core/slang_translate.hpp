@@ -95,7 +95,7 @@ struct SlangTranslation {
  * glslang Vulkan compilation, with descriptors rewritten to the libslang-vk
  * descriptor conventions (inherited from the reference host: vertex UBOs set
  * 1, fragment textures set 2, fragment UBOs set 3) and the push-constant
- * block re-homed as a std140 UBO. The upcoming Vulkan runner consumes exactly
+ * block re-homed as a std140 UBO. The Vulkan runner consumes exactly
  * these set/binding assignments.
  *
  * @param shaderPath Absolute path of the .slang file (include base + diagnostics).

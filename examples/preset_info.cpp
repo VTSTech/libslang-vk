@@ -2,7 +2,7 @@
 //
 // The M0 "hello world": load a .slangp preset, print its pass chain,
 // parameters and textures, then translate and compile every pass to SPIR-V
-// exactly the way the M1 Vulkan runner will consume them (translated stage
+// exactly the way the Vulkan runner consumes them (translated stage
 // GLSL -> glslang -> bytecode with dense set/binding assignments).
 //
 // Usage:
@@ -171,7 +171,7 @@ int main(int argc, char *argv[])
 			std::printf("  warning: %s\n", warning.c_str());
 	}
 
-	std::printf("\nresult: %u/%u pass(es) compiled to SPIR-V — ready for the M1 Vulkan runner.\n", compiled,
+	std::printf("\nresult: %u/%u pass(es) compiled to SPIR-V — ready for the Vulkan runner.\n", compiled,
 	    static_cast<unsigned>(preset.passes.size()));
 	return compiled == preset.passes.size() ? 0 : 2;
 }
