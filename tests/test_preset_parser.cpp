@@ -294,6 +294,51 @@ int main()
                 std::filesystem::remove_all(root);
         }
 
+        // --- Pass-count cap (ROB-02 boundary, raised 2026-10-18 for the
+        // crt-adamant family: field load failed at the old cap of 32 with
+        // "preset pass index 93 exceeds the limit of 32"). Positive: 40
+        // sparse, out-of-order shaderN keys must parse (the lazy resize
+        // path). Negative: the exact new cap must still reject, and an
+        // in-int-range absurd index must keep failing (ROB-02). Shader files
+        // need not exist — parse stores paths only. ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_passcap");
+                SetShaderRootDir(root.string());
+                // Out of order: shader39 first, then the rest — exercises the
+                // sparse resize instead of an appends-only path.
+                std::string sparse = "shader39=\"p.slang\"\n";
+                for (int i = 38; i >= 0; --i)
+                        sparse += "shader" + std::to_string(i) + "=\"p.slang\"\n";
+                WriteText(root / "sparse.slangp", sparse);
+                Preset preset;
+                std::string error;
+                const bool ok = ParsePreset((root / "sparse.slangp").string(), preset, error);
+                Check(ok, "40 sparse out-of-order passes parse (cap raised to 128)");
+                if (!ok) {
+                        std::printf("  error: %s\n", error.c_str());
+                } else {
+                        Check(preset.passes.size() == 40, "sparse keys materialize 40 passes");
+                        Check(preset.passes[0].shaderPath == "p.slang"
+                                && preset.passes[39].shaderPath == "p.slang",
+                            "sparse resize stores pass paths");
+                }
+                // Boundary: index == cap rejects with the existing message shape.
+                WriteText(root / "atcap.slangp", "shader0=\"p.slang\"\nshader128=\"p.slang\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "atcap.slangp").string(), preset, error),
+                    "shader128 (= cap) rejected");
+                Check(error.find("exceeds the limit of 128") != std::string::npos,
+                    "cap error keeps the documented message shape");
+                // ROB-02 regression: in-int-range absurd index must not allocate.
+                WriteText(root / "absurd.slangp", "shader0=\"p.slang\"\nshader2147483647=\"p.slang\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "absurd.slangp").string(), preset, error),
+                    "shader2147483647 rejected (ROB-02 intact)");
+                Check(error.find("preset pass index 2147483647 exceeds the limit") != std::string::npos,
+                    "ROB-02 error names the absurd index");
+                std::filesystem::remove_all(root);
+        }
+
         std::printf("\n%s (%d failures)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures);
         return failures == 0 ? 0 : 1;
 }

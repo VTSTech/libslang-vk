@@ -30,8 +30,14 @@ SLANGVK_API bool ParsePreset(const std::string &path, Preset &out, std::string &
  * Returns entries sorted by relative path (deterministic menu ordering).
  * The scan is not cached; call sparingly (startup and when the settings
  * menu opens).
+ *
+ * `maxDepth` bounds directory recursion (default 3: tuned for the settings
+ * browser against real shader packs). Full-corpus tooling passes a deeper
+ * bound — stock slang-shaders keeps presets up to 7 levels below the root
+ * (Mega_Bezel alone is a deep forest); the default cap leaves those
+ * unlisted on purpose so browser scans stay O(shallow).
  */
-SLANGVK_API std::vector<PresetEntry> ScanPresets(const std::string &rootDir);
+SLANGVK_API std::vector<PresetEntry> ScanPresets(const std::string &rootDir, int maxDepth = 3);
 
 /**
  * @brief Lists subdirectories and .slangp presets directly inside

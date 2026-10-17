@@ -3,11 +3,13 @@
 // Walks one or more preset directories, loads every .slangp through the
 // real library (parse -> translate -> glslang compile -> LUT upload) and
 // optionally renders frames on the Vulkan device. Emits a per-preset
-// ledger plus totals; the exit code follows --fail-on-broken.
+// ledger plus totals; the exit code follows --fail-on-broken and the
+// --baseline regression gate.
 //
 // Usage:
 //   corpus_sweep <root> [<root> ...] [--render] [--frames N]
 //                [--lut] [--fail-on-broken] [--max-report K]
+//                [--ledger FILE] [--baseline FILE] [--corpus-rev SHA]
 //
 //   --render         execute each chain on the Vulkan device after load
 //                    (needs an ICD; presets whose final pass does not
@@ -18,6 +20,25 @@
 //   --lut            upload LUT images (default: compile-only, noLutImages)
 //   --fail-on-broken exit 1 when any preset fails to load or render
 //   --max-report K   cap the printed failure list (default 25)
+//   --ledger FILE    write a machine-readable per-preset ledger (see below)
+//   --baseline FILE  diff the run against a previous ledger: the no-
+//                    regression gate (plan §10). Fails (exit 1) only on
+//                    REGRESSIONS — presets that loaded in the baseline but
+//                    fail now. Pre-existing broken presets, newly-added
+//                    presets, removals and fixes are reported and tolerated.
+//   --corpus-rev SHA record the swept corpus revision in the ledger header
+//                    (the corpus.yml nightly passes `git rev-parse HEAD`)
+//
+// Machine ledger format (--ledger / --baseline): one '# '-prefixed header
+// (tool, corpus revision, mode, UTC date, totals) then one TAB-separated
+// line per preset:
+//
+//   LOAD\t<passes>\t<parameters>\t<relative/path.slangp>
+//   FAIL\t0\t0\t<relative/path.slangp>
+//
+// Lines are sorted by path so consecutive ledgers diff cleanly. Error text
+// stays on stdout only (it can embed tool-specific strings; the ledger
+// carries statuses and counts). The regression gate compares statuses only.
 //
 // The shader root follows the first preset directory of the sweep and is
 // retargeted per root (SEC-01 sandbox resolves pack-internal references).
@@ -25,6 +46,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -42,10 +65,21 @@ struct SweepEntry {
         uint32_t parameters = 0;
 };
 
+struct LedgerDiff {
+        uint32_t regressions = 0;   // baseline LOAD -> now FAIL (the gate)
+        uint32_t stillBroken = 0;   // FAIL -> FAIL (tolerated)
+        uint32_t improved = 0;      // FAIL -> LOAD
+        uint32_t added = 0;         // path not in baseline
+        uint32_t addedBroken = 0;   // added and failing (review, not a regression)
+        uint32_t gone = 0;          // baseline path absent now (corpus drift)
+        std::vector<const SweepEntry *> regressionList;
+};
+
 void PrintUsage()
 {
         std::printf("usage: corpus_sweep <root> [<root> ...] [--render] [--frames N] [--lut] "
-                    "[--fail-on-broken] [--max-report K]\n");
+                    "[--fail-on-broken] [--max-report K] [--ledger FILE] [--baseline FILE] "
+                    "[--corpus-rev SHA]\n");
 }
 
 std::vector<uint8_t> MakePattern(uint32_t width, uint32_t height)
@@ -62,6 +96,104 @@ std::vector<uint8_t> MakePattern(uint32_t width, uint32_t height)
         return pixels;
 }
 
+// Baselines and fresh ledgers share one reader: '# ' lines are comments,
+// everything else must be TAB-separated LOAD/FAIL records; malformed lines
+// are skipped so a hand-edited or truncated baseline degrades to "not
+// tracked" instead of failing the whole gate.
+std::map<std::string, bool> ReadLedger(const char *path)
+{
+        std::map<std::string, bool> statuses;
+        FILE *file = std::fopen(path, "r");
+        if (file == nullptr)
+                return statuses;
+        char line[4096];
+        while (std::fgets(line, sizeof(line), file) != nullptr) {
+                std::string text(line);
+                while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+                        text.pop_back();
+                if (text.empty() || text.rfind("# ", 0) == 0)
+                        continue;
+                const size_t firstTab = text.find('\t');
+                if (firstTab == std::string::npos)
+                        continue;
+                const std::string status = text.substr(0, firstTab);
+                const size_t secondTab = text.find('\t', firstTab + 1);
+                const size_t thirdTab = secondTab == std::string::npos
+                    ? std::string::npos
+                    : text.find('\t', secondTab + 1);
+                if (thirdTab == std::string::npos)
+                        continue;
+                const std::string presetPath = text.substr(thirdTab + 1);
+                if (presetPath.empty())
+                        continue;
+                statuses[presetPath] = (status == "LOAD");
+        }
+        std::fclose(file);
+        return statuses;
+}
+
+LedgerDiff DiffLedgers(const std::vector<SweepEntry> &ledger, const std::map<std::string, bool> &baseline)
+{
+        LedgerDiff diff;
+        std::map<std::string, bool> remaining(baseline);
+        for (const SweepEntry &record : ledger) {
+                const auto it = remaining.find(record.relativePath);
+                if (it == remaining.end()) {
+                        ++diff.added;
+                        if (!record.loaded)
+                                ++diff.addedBroken;
+                        continue;
+                }
+                const bool wasLoaded = it->second;
+                remaining.erase(it);
+                if (wasLoaded && !record.loaded) {
+                        ++diff.regressions;
+                        diff.regressionList.push_back(&record);
+                } else if (!wasLoaded && record.loaded) {
+                        ++diff.improved;
+                } else if (!wasLoaded && !record.loaded) {
+                        ++diff.stillBroken;
+                }
+        }
+        diff.gone = static_cast<uint32_t>(remaining.size());
+        return diff;
+}
+
+bool WriteLedgerFile(const char *path, const std::vector<SweepEntry> &ledger, const std::string &corpusRev,
+    bool render, uint32_t loaded, uint32_t failed)
+{
+        std::vector<const SweepEntry *> sorted;
+        sorted.reserve(ledger.size());
+        for (const SweepEntry &record : ledger)
+                sorted.push_back(&record);
+        std::sort(sorted.begin(), sorted.end(),
+            [](const SweepEntry *a, const SweepEntry *b) { return a->relativePath < b->relativePath; });
+
+        std::FILE *file = std::fopen(path, "w");
+        if (file == nullptr)
+                return false;
+        std::time_t now = std::time(nullptr);
+        char dateStamp[16];
+        std::tm utc {};
+#ifdef _WIN32
+        gmtime_s(&utc, &now);
+#else
+        gmtime_r(&now, &utc);
+#endif
+        std::strftime(dateStamp, sizeof(dateStamp), "%Y-%m-%d", &utc);
+        std::fprintf(file, "# libslang-vk corpus ledger (corpus_sweep)\n");
+        std::fprintf(file, "# corpus revision: %s\n", corpusRev.empty() ? "unrecorded" : corpusRev.c_str());
+        std::fprintf(file, "# mode: %s\n", render ? "render" : "compile-only (noLutImages)");
+        std::fprintf(file, "# generated: %s\n", dateStamp);
+        std::fprintf(file, "# totals: %zu presets, %u loaded, %u failed\n", ledger.size(), loaded, failed);
+        for (const SweepEntry *record : sorted) {
+                std::fprintf(file, "%s\t%u\t%u\t%s\n", record->loaded ? "LOAD" : "FAIL", record->passes,
+                    record->parameters, record->relativePath.c_str());
+        }
+        std::fclose(file);
+        return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -72,6 +204,9 @@ int main(int argc, char **argv)
         bool failOnBroken = false;
         int frames = 2;
         int maxReport = 25;
+        const char *ledgerPath = nullptr;
+        const char *baselinePath = nullptr;
+        std::string corpusRev;
         for (int i = 1; i < argc; ++i) {
                 const std::string arg = argv[i];
                 if (arg == "--render")
@@ -80,6 +215,12 @@ int main(int argc, char **argv)
                         lut = true;
                 else if (arg == "--fail-on-broken")
                         failOnBroken = true;
+                else if (arg == "--ledger" && i + 1 < argc)
+                        ledgerPath = argv[++i];
+                else if (arg == "--baseline" && i + 1 < argc)
+                        baselinePath = argv[++i];
+                else if (arg == "--corpus-rev" && i + 1 < argc)
+                        corpusRev = argv[++i];
                 else if (arg == "--frames" && i + 1 < argc)
                         frames = std::atoi(argv[++i]);
                 else if (arg == "--max-report" && i + 1 < argc)
@@ -135,7 +276,10 @@ int main(int argc, char **argv)
         std::vector<SweepEntry> ledger;
         for (const std::string &root : roots) {
                 slv::preset::SetShaderRootDir(root);
-                const std::vector<slv::preset::PresetEntry> presets = slv::preset::ScanPresets(root);
+                // Full-depth scan: the stock corpus keeps presets up to 7
+                // levels deep (the browser's default cap of 3 covers 1253 of
+                // 2658 — the ledger must see them all).
+                const std::vector<slv::preset::PresetEntry> presets = slv::preset::ScanPresets(root, 12);
                 std::printf("root %s: %zu presets\n", root.c_str(), presets.size());
                 for (const slv::preset::PresetEntry &entry : presets) {
                         SweepEntry record;
@@ -219,6 +363,45 @@ int main(int argc, char **argv)
         if (reported < ledger.size() && reported == maxReport)
                 std::printf("  ... (%u more)\n", static_cast<uint32_t>(ledger.size()) - reported);
 
+        // No-regression gate (plan §10): with a baseline, only baseline-ok ->
+        // now-broken transitions fail the run; every other drift class is
+        // reported for review and tolerated.
+        int gate = 0;
+        if (baselinePath != nullptr) {
+                const std::map<std::string, bool> baseline = ReadLedger(baselinePath);
+                if (baseline.empty()) {
+                        std::printf("\nbaseline %s: EMPTY OR UNREADABLE — gate not evaluable\n", baselinePath);
+                        gate = 1;
+                } else {
+                        const LedgerDiff diff = DiffLedgers(ledger, baseline);
+                        std::printf("\nbaseline diff vs %s (%zu tracked): regressions %u, still-broken %u, "
+                                    "improved %u, new %u (%u broken), gone %u\n",
+                            baselinePath, baseline.size(), diff.regressions, diff.stillBroken, diff.improved,
+                            diff.added, diff.addedBroken, diff.gone);
+                        uint32_t shown = 0;
+                        for (const SweepEntry *record : diff.regressionList) {
+                                if (shown >= maxReport)
+                                        break;
+                                ++shown;
+                                std::printf("  REGRESSION %s: %s\n", record->relativePath.c_str(),
+                                    record->error.c_str());
+                        }
+                        if (diff.regressions > shown)
+                                std::printf("  ... (%u more regressions)\n", diff.regressions - shown);
+                        if (diff.regressions > 0) {
+                                std::printf("no-regression gate: FAILED (%u preset(s) that loaded in the "
+                                            "baseline now fail)\n",
+                                    diff.regressions);
+                                gate = 1;
+                        } else {
+                                std::printf("no-regression gate: PASSED\n");
+                        }
+                }
+        }
+
+        if (ledgerPath != nullptr && !WriteLedgerFile(ledgerPath, ledger, corpusRev, render, loaded, failed))
+                std::printf("WARNING: could not write ledger %s\n", ledgerPath);
+
         const auto validation = device->validationErrors();
         if (!validation.empty()) {
                 std::printf("VALIDATION ERRORS: %zu\n", validation.size());
@@ -226,6 +409,8 @@ int main(int argc, char **argv)
                         std::printf("  %s\n", message.c_str());
                 return 1;
         }
+        if (gate != 0)
+                return 1;
         if (failOnBroken && failed > 0)
                 return 1;
         return 0;

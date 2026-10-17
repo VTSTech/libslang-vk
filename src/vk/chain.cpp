@@ -1569,7 +1569,8 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 // plain UBO or the re-homed push-constant block).
                 for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
                         if (block.binding >= 2)
-                                continue; // Translator caps blocks at bindings 0..1.
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "vertex uniform block binding out of range: " + block.instanceName));
                         uint32_t bytes = 16;
                         for (const UniformMember &member : block.members)
                                 bytes = std::max(bytes, member.offset + member.size);
@@ -1588,7 +1589,8 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 }
                 for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
                         if (block.binding >= 2)
-                                continue; // Translator caps blocks at bindings 0..1.
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "fragment uniform block binding out of range: " + block.instanceName));
                         uint32_t bytes = 16;
                         for (const UniformMember &member : block.members)
                                 bytes = std::max(bytes, member.offset + member.size);
@@ -1974,7 +1976,8 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         ctx.vertexStage = true;
                         for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
                                 if (block.binding >= 2)
-                                        continue;
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            "vertex uniform block binding out of range: " + block.instanceName));
                                 const std::vector<uint8_t> bytes = vk::FillBlockBytes(
                                     block, pass.def, pass.translation, effectiveOverrides, ctx);
                                 const Chain::Impl::Ubo &ubo = pass.vertexUbos[block.binding];
@@ -1988,7 +1991,8 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         ctx.vertexStage = false;
                         for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
                                 if (block.binding >= 2)
-                                        continue;
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            "fragment uniform block binding out of range: " + block.instanceName));
                                 const std::vector<uint8_t> bytes = vk::FillBlockBytes(
                                     block, pass.def, pass.translation, effectiveOverrides, ctx);
                                 const Chain::Impl::Ubo &ubo = pass.fragmentUbos[block.binding];

@@ -2,17 +2,30 @@
 #
 # Nightly compile-sweep over the full libretro/slang-shaders corpus: parse +
 # translate + glslang-compile every preset headlessly on lavapipe and upload
-# the ledger as an artifact. Deliberately NOT part of ci.yml — the checkout is
-# ~400 MB and the sweep minutes are wasted on every push.
+# the fresh ledger as an artifact — with the no-regression gate ON since
+# 2026-10-18: the run fails when a preset that LOADS in the pinned baseline
+# fails now (REGRESSION). Pre-existing broken presets, new presets, removals
+# and fixes are reported in the diff summary and tolerated (review material,
+# not gate input).
 #
-# No-regression policy (plan §10): a preset that loaded in the previous
-# release must not regress without an audit-documented reason. Bootstrap
-# order: this workflow first accumulates baseline ledgers (green, no
-# --fail-on-broken). Once a baseline artifact is pinned, add
-# `--fail-on-broken` to the sweep invocation to flip the job red on any
-# load/compile regression, and diff consecutive ledgers in review.
+# Deliberately NOT part of ci.yml — the corpus checkout is ~400 MB and the
+# sweep minutes are wasted on every push.
 #
-# Knobs left off the nightly baseline on purpose (flip when needed):
+# The corpus is PINNED to the revision recorded in the committed baseline
+# (`corpus/baseline-ledger.txt` header) so the nightly measures library
+# regressions deterministically instead of mixing in upstream corpus drift.
+#
+# Baseline refresh procedure (deliberate, reviewed):
+#   1. Locally: build examples, clone slang-shaders (or move your checkout to
+#      the wanted revision), then
+#        corpus_sweep slang-shaders --ledger corpus/baseline-ledger.txt \
+#            --corpus-rev "$(git -C slang-shaders rev-parse HEAD)" --max-report 60
+#   2. Review the IMPROVED / NEW / STILL-BROKEN lists from a diff against the
+#      old baseline (run once with --baseline <old> before overwriting it).
+#   3. Commit the refreshed baseline + new revision together. Library-side
+#      causes for any LOAD->FAIL flip must be fixed, not baselined.
+#
+# Knobs left off the nightly on purpose (flip when needed):
 #   --render   execute each chain on lavapipe too (slower, catches runner
 #              regressions, not just compile ones)
 #   --lut      upload LUT images instead of noLutImages mode
@@ -30,7 +43,7 @@ concurrency:
 
 jobs:
   ledger:
-    name: full-corpus compile ledger
+    name: full-corpus compile ledger (no-regression gate)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -41,8 +54,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
 
-      - name: Check out the libretro shader corpus
-        run: git clone --depth 1 https://github.com/libretro/slang-shaders.git slang-shaders
+      - name: Resolve the baseline-pinned corpus revision
+        id: corpus
+        run: |
+          REV=$(sed -n 's/^# corpus revision: //p' corpus/baseline-ledger.txt | head -1)
+          if [ -z "$REV" ]; then
+            echo "baseline ledger has no '# corpus revision:' header" >&2
+            exit 1
+          fi
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the libretro shader corpus at the pinned revision
+        run: |
+          git init slang-shaders
+          git -C slang-shaders remote add origin https://github.com/libretro/slang-shaders.git
+          git -C slang-shaders fetch --depth 1 origin "${{ steps.corpus.outputs.rev }}"
+          git -C slang-shaders checkout FETCH_HEAD
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSLANGVK_BUILD_TESTS=OFF
@@ -50,15 +77,23 @@ jobs:
       - name: Build corpus_sweep
         run: cmake --build build --target corpus_sweep
 
-      - name: Sweep (baseline mode — ledger, no gate)
+      - name: Sweep (no-regression gate vs committed baseline)
         run: |
-          ./build/examples/corpus_sweep slang-shaders --max-report 100 2>&1 | tee ledger.txt
-          # Bootstrapping note: append --fail-on-broken above once the first
-          # baseline ledger is pinned as the no-regression reference.
+          ./build/examples/corpus_sweep slang-shaders \
+            --ledger ledger-fresh.txt \
+            --baseline corpus/baseline-ledger.txt \
+            --corpus-rev "${{ steps.corpus.outputs.rev }}" \
+            --max-report 100 2>&1 | tee sweep.log
+          grep -q "no-regression gate: PASSED" sweep.log || {
+            echo "::error::No-regression gate FAILED — presets that load in the pinned baseline now fail. Fix the regression or refresh the baseline (see workflow header)." >&2
+            exit 1
+          }
 
-      - name: Upload ledger artifact
+      - name: Upload ledger artifacts
         uses: actions/upload-artifact@v4
         with:
           name: corpus-ledger-${{ github.run_id }}
-          path: ledger.txt
+          path: |
+            ledger-fresh.txt
+            sweep.log
           if-no-files-found: error

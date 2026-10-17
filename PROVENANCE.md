@@ -506,6 +506,56 @@ acquire-semaphore present restructure, and these docs. Post-integration
 verification on `6e693ec` + overlay: Run A 20/20, Run B (syncval) 20/20
 with zero validation messages, ASan/UBSan 17/17.
 
+### Pass-cap field fix + corpus baseline pinned (2026-10-18)
+
+**Field fix: preset pass cap (ROB-02) raised 32 → 128.** A hardware session
+(AMD RX 560, Windows, nonstatic fork build) failed to load the
+tool-generated mega-preset `crt-adamant-default-ntsc` with
+"preset pass index 93 exceeds the limit of 32"; the rest of the session was
+healthy. The bound's real job is ROB-02 (a hostile `shader2000000000 = x`
+key must not drive the lazy `passes.resize()` into a multi-gigabyte
+allocation), but the corpus now contains generated chains far beyond the
+old sanity value, so the guard was hitting real content. The cap moves to
+128 (known corpus max ≈ 93–94, headroom included), the comment records why,
+the `#reference` merge path stays intentionally unbounded (RetroArch
+parity; resource failures already produce named errors), and boundary
+tests pin the semantics: a sparse out-of-order 40-pass preset parses
+(exercising the lazy resize), `shader128` still rejects with the documented
+message shape, and `shader2147483647` keeps failing (ROB-02 regression
+check). A sweep of chain.cpp's refactored UBO loops turned up four silent
+`if (block.binding >= 2) continue;` guards (two write, two fill — the fill
+ones index `vertexUbos[]`/`fragmentUbos[]` and would have been OOB, not
+just skipped); they are hard `std::unexpected` errors now, so a future
+translator emitting an out-of-range binding fails loudly instead of
+re-creating the inscrutable-driver-rejection failure mode.
+
+**Miss list #5 closed: corpus baseline pinned, nightly gate on.** The
+`corpus_sweep` tool grew machine ledger support — `--ledger FILE` (sorted
+TAB records: status, pass count, parameter count, path; `#` header carries
+tool, corpus revision, mode, UTC date, totals; error text stays on stdout
+so the committed file is stable and provenance-safe), `--baseline FILE`
+(no-regression diff: fails only baseline-LOAD → now-FAIL transitions;
+STILL-BROKEN / IMPROVED / NEW / GONE are reported for review), and
+`--corpus-rev SHA` (recorded in the header). It also scans the corpus at
+full depth now: `ScanPresets` gained a `maxDepth` parameter (default 3
+keeps the settings-browser contract; the stock corpus keeps presets up to
+7 levels deep and the old fixed cap listed only 1,253 of 2,658). The
+baseline ledger was generated locally over the full corpus at revision
+`e1d7563` (SwiftShader user-space stack, validation + syncval active, zero
+validation errors): 2,658 presets, 826 load+compile clean, 1,832
+pre-existing broken. Failure taxonomy spot-verified as corpus-side —
+Mega_Bezel references a `resource/param_values/base/auto-settings.params`
+tree that does not exist in the snapshot, the smaa presets `#include
+"SMAA.hlsl"` with the file absent, plus tool-generated junk presets. The
+nightly workflow pins the corpus to the baseline's revision (fetch-by-SHA)
+so the gate measures library regressions deterministically, runs the
+`--baseline` gate (with a belt-and-braces log grep, because Actions' default
+shell has no pipefail and the tool's exit code would be swallowed by
+`tee`), and uploads the fresh ledger + log. Baseline refreshes are a
+documented reviewed procedure (workflow header): regenerate locally,
+diff-review IMPROVED/NEW/STILL-BROKEN, commit ledger + revision together,
+and never baseline away a library-side regression.
+
 ### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
 
 Verbatim-log summaries from the fork's field loop — the hardware half of

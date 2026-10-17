@@ -136,11 +136,13 @@ std::string StripQuotes(const std::string &s)
         return s;
 }
 
-/** @brief Upper bound on the shader chain length (ROB-02). Generous beyond
- *         any real preset (RetroArch chains top out far lower); bounds the
- *         lazy `passes` vector growth so a hostile `shader2000000000 = x`
- *         key fails the preset with an error instead of allocating. */
-constexpr int kMaxPresetPasses = 32;
+/** @brief Upper bound on the shader chain length (ROB-02). Covers the
+ *         libretro corpus's tool-generated mega-presets (the crt-adamant
+ *         family declares ~94 passes — a real field load failed at the old
+ *         cap of 32); also bounds the lazy `passes` vector growth so a
+ *         hostile `shader2000000000 = x` key fails the preset with an error
+ *         instead of allocating. */
+constexpr int kMaxPresetPasses = 128;
 
 bool ParseBool(const std::string &value, bool defaultValue)
 {
@@ -595,6 +597,9 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
                                     " exceeds the limit of ", kMaxPresetPasses, ": ", path);
                                 return false;
                         }
+                        // NOTE: the #reference merge path is intentionally NOT
+                        // pass-capped (merged chains are unbounded like
+                        // RetroArch); only direct shaderN keys hit the bound.
                         if (static_cast<int>(preset.passes.size()) <= passIndex)
                                 preset.passes.resize(static_cast<size_t>(passIndex) + 1);
                         ApplyPassKey(preset.passes[static_cast<size_t>(passIndex)], baseKey, value);
@@ -703,14 +708,15 @@ bool ParsePreset(const std::string &path, Preset &out, std::string &error)
         }
 }
 
-std::vector<PresetEntry> ScanPresets(const std::string &rootDir)
+std::vector<PresetEntry> ScanPresets(const std::string &rootDir, int maxDepth)
 {
         std::vector<PresetEntry> entries;
         std::error_code ec;
         if (!std::filesystem::is_directory(rootDir, ec))
                 return entries;
 
-        constexpr int kMaxDepth = kPresetScanDepth;
+        constexpr int kMaxDepthFloor = 0;
+        const int kMaxDepth = std::max(maxDepth, kMaxDepthFloor);
         std::filesystem::recursive_directory_iterator it(rootDir, std::filesystem::directory_options::skip_permission_denied, ec);
         if (ec)
                 return entries;
