@@ -402,19 +402,20 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
 ### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
 
 Verbatim-log summaries from the fork's field loop — the hardware half of
-the M4 exit above. Host: Windows, Radeon RX 560 Series, adapter build
-Oct 17 2026 18:21:36, exe `1.6.0-dev-Release-338827ff4`, vsync on,
-game + swapchain 1920x1080 (equal-size direct present path). "0 skipped"
-in every heartbeat of both sessions; no `(Unavailable)` fallback, no
-validation output, clean shutdowns throughout.
+the M4 exit above. Host: Windows, Radeon RX 560 Series, vsync on,
+game + swapchain 1920x1080 (equal-size direct present path). The adapter
+build advances between sessions (`338827ff4` Oct 17 18:21:36 →
+`ff3999a6f` Oct 17 18:57:45); builds are recorded per session. "0 skipped"
+in every heartbeat of every session so far; no `(Unavailable)` fallback,
+no validation output, clean shutdowns throughout.
 
-**Session 1 — preset hot-swap matrix (7 presets).** anamorphic (1 pass),
+**Session 1 — preset hot-swap matrix (7 presets, build `338827ff4`).** anamorphic (1 pass),
 fxaa (1), fxaa+linear (2), smaa (4 — libretro preset declaring LUT
 textures, so the M3 decode/upload/bind path ran on hardware),
 smaa+sharpen (5), smaa+linear (5), crt-1tap-bloom (26 passes). Steady-state
 ~44–49 fps on the 26-pass chain; 1,836 frames total, no skipped.
 
-**Session 2 — startup + heavy suite (4 presets).** Cold start with
+**Session 2 — startup + heavy suite (4 presets, build `338827ff4`).** Cold start with
 crt-1tap-bloom: device ready 104 ms after scaler init, preset loaded 466 ms
 in, first present ~1.5 s in. Hot-swap to crt-maximus-royale (25 passes):
 **4.05 s synchronous load** (parse + translate + glslang x25 + LUT uploads
@@ -425,8 +426,26 @@ heavy suites is an open M3 validation item, plan §11 perf budgets).
 crt-nobody (1 pass, 141 ms) and crt-hyllian-ntsc (5 passes, 281 ms)
 followed; 1,330 frames total, no skipped.
 
+**Session 3 — edge-smoothing families + in-game level loads (12 preset
+loads across two host runs, build `ff3999a6f`).** Run A: crt-1tap-bloom
+(26), crt-guest-advanced-hd (12 passes, **905 ms load** — second-heaviest
+after maximus-royale), crt-geom-deluxe (5), crt-CreativeForce-SharpSmooth
+(2); 1,228 frames. Run B (cold start on SharpSmooth, first present ~1.1 s
+in): hq2x/hq3x/hq4x (5 passes each — source-multiplier scale rules x2/x3/x4
+exercised on hardware), scalefx (6), 2x/4xScaleHQ (3), fsr (2, 331 ms).
+Steady state ~52–58 fps on SharpSmooth and fsr, ~35–44 fps on scalefx
+(heaviest edge smoother, as expected); warm-cache loads collapse
+(hq2x 196 ms first-run → hq4x 73 ms). The chain also survived two in-game
+level loads (ShowProgress transitions; the frame dips there are the game's
+own loading screens) with no Reinit and no fallback; 4,699 frames, clean
+shutdown.
+
 **Still open in the sweep:** Linux session; history-ring presets
 (`OriginalHistory#`), feedback double-buffering readers, srgb/float FBO
 formats, `mipmap_input` chains, resize/fullscreen-toggle FBO + swapchain
 recreation, live parameter updates, and a long preset-swap soak for
 chain-teardown VRAM stability.
+
+**Cumulative after 3 sessions (4 host runs):** 23 preset loads over 20
+unique presets — max 26 passes — 9,093 frames, zero skipped, zero
+fallbacks, zero validation output, clean shutdowns.
