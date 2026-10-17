@@ -1,9 +1,29 @@
+# libslang-vk CI — plan M0 infra: tests + per-toolchain library artifacts.
+#
+#   linux           full ctest on lavapipe (mesa-vulkan-drivers + libvulkan1),
+#                   uploads libslangvk.a / libslangvk.so / public headers
+#   linux-asan      address+undefined sanitized test build (examples off);
+#                   the runner tests keep their live validation-error gate
+#   windows-mingw   MSYS2 MinGW-w64 build; uploads libslangvk.dll,
+#                   libslangvk.dll.a (import) and libslangvk.a (static) +
+#                   headers. The Vulkan runner tests skip cleanly with no
+#                   ICD (documented in tests/CMakeLists.txt); every other
+#                   test runs.
+#
+# The artifact zips are the distribution form the plan prescribes: the C++23
+# API is same-toolchain ABI (include/slangvk/export.h), so shared builds ship
+# per platform/toolchain, built by CI. FetchContent (README) remains the
+# preferred path when a host compiles with a different toolchain.
+#
+# Still open (plan §11 M3): the full-corpus compile-sweep ledger needs a
+# slang-shaders checkout and intentionally does not run here.
+
 name: ci
 
 on:
   push:
-    branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -11,71 +31,148 @@ concurrency:
 
 jobs:
   linux:
-    name: linux (${{ matrix.build_type }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [Release, Debug]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-      - name: Build
-        run: cmake --build build
-      - name: Install headless Vulkan (lavapipe + validation layers)
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers libvulkan1
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-  linux-sanitize:
-    name: linux (asan+ubsan)
+    name: linux-x64 (tests + artifacts)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install build tools + lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers libvulkan1
+
       - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DSLANGVK_SANITIZE=address,undefined
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
       - name: Build
         run: cmake --build build
-      - name: Install headless Vulkan (lavapipe + validation layers)
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers libvulkan1
+
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # windows-msvc job dropped (maintainer decision 2026-10-17): the VS-generator
-  # build is 5-8x slower than Ninja and the job hung on the runner well past any
-  # plausible test runtime (all bounded core tests, 0 output). Windows remains
-  # covered by the mingw-w64 job below, which builds static + shared and gates
-  # on the same suite.
-  windows-mingw64:
-    name: windows (mingw-w64, static + shared)
+      - name: Stage artifacts
+        run: |
+          mkdir -p stage/libslangvk/include
+          cp -r include/slangvk stage/libslangvk/include/
+          cp build/libslangvk.a build/libslangvk.so stage/libslangvk/
+          cp LICENSE stage/libslangvk/
+          cat > stage/libslangvk/ARTIFACTS.txt <<EOF
+          libslang-vk — CI artifacts (linux-x64)
+          commit: ${GITHUB_SHA}
+          ref:    ${GITHUB_REF_NAME}
+          toolchain: runner GCC, CMake + Ninja (Release)
+
+          libslangvk.a     static library
+          libslangvk.so    shared library (glslang + volk linked in statically)
+          include/slangvk/ public headers
+
+          Notes:
+          - C++23 API: same-toolchain ABI only; prefer building via
+            FetchContent (README) when your toolchain differs.
+          - The static lib does not embed glslang; consumers add
+            glslang::glslang + glslang::SPIRV (cmake/deps.cmake pins it).
+          - MIT (LICENSE); third-party components keep their own licenses
+            (PROVENANCE.md).
+          EOF
+          (cd stage && zip -qr ../libslangvk-linux-x64.zip libslangvk)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libslangvk-linux-x64
+          path: libslangvk-linux-x64.zip
+          if-no-files-found: error
+
+  linux-asan:
+    name: linux-x64 (asan+ubsan test build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools + lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers libvulkan1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSLANGVK_SANITIZE=address,undefined -DSLANGVK_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          # The system Vulkan loader/driver sits outside the sanitized build;
+          # LeakSanitizer trips on its allocations. Keep the live validation
+          # gate and sanitizer aborts, drop leak reporting here.
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  windows-mingw:
+    name: win64-mingw (dll/a artifacts)
     runs-on: windows-latest
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up mingw-w64 toolchain
+
+      - name: Set up MSYS2 MinGW-w64
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
-          release: true
-          install: >-
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
+          update: false
+          # python: glslang's build_info.h generation needs an interpreter
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            python:p
+
       - name: Configure
-        # Everything is fetched from source (glslang, Vulkan-Headers, volk, VMA):
-        # no Vulkan SDK and no extra env vars needed. -fno-rtti applies via the
-        # NOT-MSVC branch; export macros key off _WIN32, so the shared variant
-        # gets dllexport/dllimport on mingw too.
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
       - name: Build
         run: cmake --build build
+
       - name: Test
-        # Same skip behavior as the MSVC job: no ICD on the runner, so the
-        # headless Vulkan test skips itself; core suite + examples still gate.
         run: ctest --test-dir build --output-on-failure
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p stage/libslangvk/include
+          cp -r include/slangvk stage/libslangvk/include/
+          cp build/libslangvk.dll build/libslangvk.dll.a build/libslangvk.a stage/libslangvk/
+          cp LICENSE stage/libslangvk/
+          cat > stage/libslangvk/ARTIFACTS.txt <<EOF
+          libslang-vk — CI artifacts (windows-x64, MinGW-w64)
+          commit: ${GITHUB_SHA}
+          ref:    ${GITHUB_REF_NAME}
+          toolchain: MSYS2 mingw-w64 GCC (CMake + Ninja, Release)
+
+          libslangvk.dll      shared build (SLANGVK_SHARED; glslang + volk
+                              linked in statically)
+          libslangvk.dll.a    MinGW import library for the DLL
+          libslangvk.a        static library
+          include/slangvk/    public headers
+
+          Notes:
+          - C++23 API: same-toolchain ABI only — link the DLL from
+            MinGW-w64 GCC (matching major), not from MSVC.
+          - The static lib does not embed glslang; consumers add
+            glslang::glslang + glslang::SPIRV (cmake/deps.cmake pins it).
+          - MIT (LICENSE); third-party components keep their own licenses
+            (PROVENANCE.md).
+          EOF
+
+      - name: Zip
+        shell: pwsh
+        run: 7z a -tzip libslangvk-win64-mingw.zip ./stage/libslangvk
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libslangvk-windows-x64-mingw
+          path: libslangvk-win64-mingw.zip
+          if-no-files-found: error

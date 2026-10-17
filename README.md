@@ -1,5 +1,7 @@
 # libslang-vk
 
+[![ci](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml/badge.svg)](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml)
+
 Parse, translate and compile **libretro slang shader presets** (`.slangp` /
 `.slang`) as an embeddable C++23 library, with a **Vulkan** execution path.
 
@@ -210,6 +212,26 @@ alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
 core-only build), `SLANGVK_SANITIZE=address,undefined` (test builds).
 glslang, Vulkan-Headers, volk and VMA are fetched and built automatically
 (SHA-256 pinned; see [PROVENANCE.md](PROVENANCE.md)).
+
+## CI artifacts
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) tests every
+push and uploads the built libraries as workflow artifacts — the
+per-toolchain distribution the plan prescribes for the C++23
+same-toolchain-ABI API (`include/slangvk/export.h`):
+
+- **`libslangvk-windows-x64-mingw`** — `libslangvk.dll` (glslang + volk
+  linked in), `libslangvk.dll.a` MinGW import library, `libslangvk.a`
+  static library, `include/slangvk/` headers. MSYS2 MinGW-w64 GCC build;
+  link the DLL from MinGW-w64, not MSVC.
+- **`libslangvk-linux-x64`** — `libslangvk.a`, `libslangvk.so`, headers;
+  GCC Release build with the full ctest suite on lavapipe.
+
+A sanitized (address + undefined) Linux test build runs alongside the
+Release jobs. The Vulkan runner tests execute against lavapipe on Linux;
+on Windows they skip cleanly when no ICD is present and everything else
+still runs. The full-corpus compile-sweep ledger (plan §11 M3) intentionally
+stays out of CI — it needs a slang-shaders checkout.
 
 ## License
 

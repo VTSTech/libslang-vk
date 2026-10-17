@@ -219,7 +219,7 @@ this table:
 
 | Plan milestone | Status | Notes |
 |---|---|---|
-| M0 scaffolding | ✅ done | Ported core trio, MIT + provenance ledger, CI, vendored deps |
+| M0 scaffolding | ✅ done | Ported core trio, MIT + provenance ledger, CI (`.github/workflows/ci.yml`: Linux tests on lavapipe + asan/ubsan build, Windows MinGW `libslangvk.dll/.a` artifacts), vendored deps |
 | M1 runner skeleton | ✅ done | Headless golden blit on lavapipe, zero validation errors |
 | M2 chain semantics | ✅ done | Field canaries pass on the Vulkan runner (`test_runner_m2`) |
 | M3 conformance + perf | 🔶 partial | LUT upload + `corpus_sweep` tool shipped (repo "M3"); full-corpus CI ledger, golden-image suite and perf budgets still open |

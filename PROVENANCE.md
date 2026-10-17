@@ -423,6 +423,11 @@ in, first present ~1.5 s in. Hot-swap to crt-maximus-royale (25 passes):
 trade-off (plan §13); rendered with zero skipped frames, post-load
 heartbeat window ≈19 fps (single short window — steady-state fps on the
 heavy suites is an open M3 validation item, plan §11 perf budgets).
+Beyond presentation, the preset's declarations exercised M2 semantics on
+hardware: srgb + float framebuffers (`srgb_framebuffer1`,
+`float_framebuffer2`), a pass alias (`maximus_refpass`),
+`frame_count_mod`, and absolute pass scaling. Its src shaders declare no
+history/feedback taps, so those were NOT covered by this run.
 crt-nobody (1 pass, 141 ms) and crt-hyllian-ntsc (5 passes, 281 ms)
 followed; 1,330 frames total, no skipped.
 
@@ -430,9 +435,13 @@ followed; 1,330 frames total, no skipped.
 loads across two host runs, build `ff3999a6f`).** Run A: crt-1tap-bloom
 (26), crt-guest-advanced-hd (12 passes, **905 ms load** — second-heaviest
 after maximus-royale), crt-geom-deluxe (5), crt-CreativeForce-SharpSmooth
-(2); 1,228 frames. Run B (cold start on SharpSmooth, first present ~1.1 s
+(2); 1,228 frames. crt-guest-advanced-hd's chain includes the guest
+afterglow pass, which taps `OriginalHistory` (7 references) — **history
+rings ran on hardware** in this session. Run B (cold start on SharpSmooth,
+first present ~1.1 s
 in): hq2x/hq3x/hq4x (5 passes each — source-multiplier scale rules x2/x3/x4
-exercised on hardware), scalefx (6), 2x/4xScaleHQ (3), fsr (2, 331 ms).
+and viewport-type scaling exercised on hardware), scalefx (6),
+2x/4xScaleHQ (3), fsr (2, 331 ms).
 Steady state ~52–58 fps on SharpSmooth and fsr, ~35–44 fps on scalefx
 (heaviest edge smoother, as expected); warm-cache loads collapse
 (hq2x 196 ms first-run → hq4x 73 ms). The chain also survived two in-game
@@ -440,11 +449,14 @@ level loads (ShowProgress transitions; the frame dips there are the game's
 own loading screens) with no Reinit and no fallback; 4,699 frames, clean
 shutdown.
 
-**Still open in the sweep:** Linux session; history-ring presets
-(`OriginalHistory#`), feedback double-buffering readers, srgb/float FBO
-formats, `mipmap_input` chains, resize/fullscreen-toggle FBO + swapchain
-recreation, live parameter updates, and a long preset-swap soak for
-chain-teardown VRAM stability.
+**Still open in the sweep:** Linux session; feedback double-buffering
+readers (named `<name>Feedback` / numeric `PassFeedback#` forms),
+`mipmap_input` chains, live parameter updates, resize/fullscreen-toggle
+FBO + swapchain recreation, and a long preset-swap soak for
+chain-teardown VRAM stability. Field-verified with no regressions:
+integer-scaling on/off (explicit `outputRect` path) and vsync on/off.
+Corpus note: the `histories` key and `max_fbo_*` clamps have **zero**
+users across all 2,658 presets — lib-tested paths, not field paths.
 
 **Cumulative after 3 sessions (4 host runs):** 23 preset loads over 20
 unique presets — max 26 passes — 9,093 frames, zero skipped, zero
