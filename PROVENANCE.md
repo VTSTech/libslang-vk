@@ -134,16 +134,87 @@ fixtures reused verbatim; no RetroArch or reference-host code copied).
 
 ### M2 documented divergences
 
-1. **LUT textures remain load-gated.** Presets declaring `textures =`
-   still fail `Preset::load` (M3: decode + upload path with the corpus
-   sweep that exercises them); `noLutImages` keeps compile-only sweeps
-   working.
+1. **LUT textures were load-gated (lifted in M3).** Presets declaring
+   `textures =` failed `Preset::load` during M2; M3 ships the decode +
+   upload path (next section).
 2. **`Rotation` semantic stays 0.** The UBO member is filled with the
    identity value 0 (ported semantic); `InputFrame::rotation != None`
    returns `unsupported_feature` until the M4 presentation path.
 3. **Non-causal alias taps fall back.** A plain alias / `#pragma name`
    tap of a LATER pass binds the current source texture with a one-shot
    stderr warning (SPEC 4.5 runtime fallback, "never a null bind").
+
+## M3 — LUT texture upload + conformance scaffolding (all new code, MIT, authored for this repo)
+
+M3 wires the deferred M2 capability (SPEC §3.5 lookup textures) into the
+runner and adds the plan's M3 conformance scaffolding (corpus sweep tool).
+The implementation is spec-driven and clean-room: decode + RGBA8 upload +
+mip generation + name/`User#` binding semantics are written from the SPEC
+text, not from RetroArch or the reference host.
+
+### Vendored dependencies (M3)
+
+| Dependency | Version | License | Purpose |
+|---|---|---|---|
+| `stb_image.h` | v2.30 (SHA-256 `594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3`, pinned copy in `vendor/stb/`) | Public domain / MIT dual | LUT image decode (PNG/JPEG/BMP/TGA/PSD/GIF/PNM → RGBA8) |
+
+### M3 semantics
+
+1. **Upload (SPEC 3.5).** LUT files decode to tightly packed RGBA8 and
+   upload as `R8G8B8A8_UNORM`, sampled with the LUT's own
+   `name_linear`/`name_wrap_mode` options. `name_mipmap = true` generates
+   the full mip chain at upload (linear blit chain, shared with the M2
+   `mipmap_input` machinery); LUTs are static, so the chain is built once
+   at load, never per frame.
+2. **Binding (SPEC 4.5/5.4, F9).** Fragment samplers resolve by declared
+   LUT name case-insensitively, or positionally via `User#` over the
+   declared list. The parser now materializes `preset.textures` in
+   FIRST-DECLARATION order (it previously sorted by the lowercase map,
+   which silently renumbered `User#` on unsorted lists) — pinned by a core
+   parser test and the `lut_user.slangp` golden ("zeta;alpha": User0 must
+   bind zeta, not the alphabetically-first alpha).
+3. **`<LutName>Size` uniforms (SPEC 4.7).** The params UBO resolves
+   LUT-size members (w, h, 1/w, 1/h) from the uploaded image. `User#Size`
+   resolves to the positional LUT's size — an extension over the reference
+   host, which left it at (0, 0) (SPEC 4.7 "Unimplemented"; no corpus
+   preset observed using it).
+4. **Load-path hardening.** The translator's known-name universe now
+   carries lowercase forms alongside declared spellings (the translator
+   validates against lowercased names; only-lowercase fixtures had masked
+   the gap for mixed-case LUT names — F9 case-insensitive matching), plus
+   `User#` aliases. `git-lfs` pointer files fail the load with the SPEC
+   3.5 "POINTER file, not image data" diagnostic; missing/oversized/corrupt
+   files fail with named errors (256 MiB cap, ROB-style).
+5. **Validation-gate fix (M1 latent bug).** `Device::create` never enabled
+   `VK_EXT_debug_utils`, and `Device::adopt` created its messenger before
+   `volkLoadInstance` — in both paths the debug messenger silently never
+   existed, so layer output reached stderr while `validationErrors()`
+   stayed empty and the tests' zero-validation gate was vacuously green
+   (proven by a deliberate-error probe that collected 2 VUIDs). Both paths
+   now create the messenger after the volk tables bind and request the
+   extension when validation is on; the gate is live for all runner tests.
+6. **Corpus sweep (`examples/corpus_sweep.cpp`).** The plan §11 M3
+   conformance tool: walks preset directories through the real load path
+   (parse → translate → compile → LUT upload), optionally renders frames
+   on the device (`--render`, 2 frames to exercise feedback), prints a
+   per-preset ledger with named errors, and fails on any validation-layer
+   error. Bundled-fixture smoke runs in ctest; the full shader-pack corpus
+   sweep runs out of CI against a slang-shaders checkout.
+
+### M3 documented divergences
+
+1. **Decode surface.** stb_image replaces SDL_image: PNG/JPEG/BMP/TGA/PSD/
+   GIF/PNM decode; `.dds`/`.webp`/`.exr` LUTs fail with an explicit error
+   listing the supported formats (the reference host's SDL_image accepted
+   them; corpus impact not observed).
+2. **8-bit precision.** LUTs upload as R8G8B8A8_UNORM (matching the
+   reference host's shipping path); float LUT preservation is a post-1.0
+   lever (SPEC 3.5 "Partial").
+3. **`User#Size` resolves.** Extension over the reference host (see
+   semantics §3); SPEC matrix updated accordingly.
+4. **LUT views are borrowed by chains.** A `Preset` must outlive every
+   `Chain` created from it (new documented API contract; LUT GPU objects
+   live in `Preset::Impl`, chains reference the views).
 
 ## Documented divergences (v1 decisions, plan §2/§5/§13)
 
@@ -198,3 +269,24 @@ fixtures reused verbatim; no RetroArch or reference-host code copied).
 - Debug + ASan/UBSan build: **16/16 tests pass** (sanitizers active across
   the Vulkan execution path on lavapipe).
 - Core-only build (`SLANGVK_ENABLE_VK=OFF`): **12/12 tests pass**.
+
+### M3 exit
+- Release build (static + shared), Linux GCC 14.2, CMake Ninja: **18/18 tests
+  pass** (M2 suite + new `runner_m3` + `corpus_sweep` smoke).
+- `runner_m3` on **lavapipe**, byte-exact goldens: named-LUT 1:1 sample ==
+  tint.png texels; `User0` binds the FIRST declared texture (declaration-order
+  golden, catches the map-order regression); `<tint4>Size` UBO fill encodes
+  vec4(4, 4, 0.25, 0.25); mipmap LUT explicit LOD 1 = 1x1 average (±1); missing
+  file / git-lfs POINTER / `noLutImages` bind all fail with named errors;
+  **zero validation-layer errors with the now-live collector**.
+- Validation-gate integrity: a deliberate-error probe collects 2 VUIDs through
+  `Device::validationErrors()` (the gate previously never fired — see M3
+  semantics §5); the M1/M2 render paths were re-verified clean under the live
+  gate.
+- `corpus_sweep --render --lut` on the LUT fixtures: 4/4 load, 4/4 render on
+  lavapipe, no validation errors; compile-only smoke over bundled fixtures in
+  ctest (--fail-on-broken).
+- Debug + ASan/UBSan build: **18/18 tests pass**.
+- Core-only build (`SLANGVK_ENABLE_VK=OFF`): **14/14 tests pass** (runner
+  tests + corpus_sweep correctly excluded; Vulkan headers now propagate for
+  the public header in core-only builds).

@@ -14,8 +14,12 @@
 // (PassFeedback# / <name>Feedback), mipmap refill, per-pass FBO formats,
 // FBO recreation on resize and live parameters — plus host image helpers
 // for headless use (tests, golden images, CI).
-// LUT image upload lands in M3 (corpus sweep); rotation and swapchain
-// output in M4; those paths return slv::Errc::unsupported_feature for now.
+// M3 adds LUT texture upload: image files decode to RGBA8 and upload as
+// R8G8B8A8_UNORM (full mip chain when `name_mipmap` is set); bindings
+// resolve by declared name (case-insensitive) and positionally via `User#`,
+// each LUT sampled with its own linear/wrap/mipmap options (SPEC 3.5/4.5/5.4).
+// Rotation and swapchain output land in M4; those paths return
+// slv::Errc::unsupported_feature for now.
 
 #include <cstdint>
 #include <expected>
@@ -279,6 +283,9 @@ using OutputTarget = std::variant<SwapchainFrame, Offscreen>;
  * @brief Per-device runtime state for one preset: pipelines, FBOs, samplers,
  * descriptor sets and the per-pass uniform buffers. Single-threaded per
  * Chain (documented API behavior, plan §5).
+ *
+ * The Preset must outlive every Chain created from it: LUT texture views
+ * are borrowed from the preset's uploads (M3).
  */
 class Chain {
 public:

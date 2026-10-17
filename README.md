@@ -59,7 +59,7 @@ The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
 Vulkan runner consumes; a host rolling its own pipeline can use them too.
 
-## Vulkan runner (M1 + M2)
+## Vulkan runner (M1 + M2 + M3)
 
 The runner executes compiled presets on a Vulkan device. The host either
 adopts its own context or goes headless; errors come back as
@@ -93,11 +93,23 @@ alias/`#pragma name` sizes resolve to the owning pass), history rings
 demand-driven feedback double-buffering with a final-pass resolve blit
 (SPEC 5.3), per-pass target formats, mip-chain refill for `mipmap_input`
 readers (F1), FBO recreation on resize, and case-insensitive live
-parameters. LUT image upload, rotation and swapchain targets return
-`slv::Errc::unsupported_feature` until M3/M4. Gates: golden blit + full
-chain semantics headless on lavapipe with validation layers clean —
-`tests/test_runner_headless.cpp` (M1) and `tests/test_runner_m2.cpp` (M2,
-the fork's field canaries: feedback / history / format / include-cycle).
+parameters.
+
+M3 adds lookup textures (SPEC 3.5): image files decode to RGBA8 and
+upload as `R8G8B8A8_UNORM` with the LUT's own filter/wrap options and a
+full mip chain generated at upload when `name_mipmap = true`. Bindings
+resolve by declared name (case-insensitive, F9) or positionally via
+`User#` (first-declared order), `<LutName>Size` uniforms carry the
+uploaded size, and git-lfs pointer files fail the load with an explicit
+diagnostic. `PresetLoadOptions::noLutImages` keeps compile-only sweeps
+(no device work); chains then fail at bind time with a named error. A
+`Preset` must outlive the `Chain`s created from it (LUT views are
+borrowed). Rotation and swapchain targets return
+`slv::Errc::unsupported_feature` until M4. Gates: golden blit + full
+chain semantics + LUT goldens headless on lavapipe with a **live**
+validation-error gate — `tests/test_runner_headless.cpp` (M1),
+`tests/test_runner_m2.cpp` (M2 field canaries) and
+`tests/test_runner_m3.cpp` (M3).
 
 Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
 (no link-time libvulkan); memory comes from vendored
@@ -125,6 +137,24 @@ cmake --build build --target preset_info
 Each demo preset also runs as a ctest smoke test (`example_preset_info_*`),
 so the example path is covered by CI. Exit code is 0 only when every pass
 parses, translates and compiles — convenient for checking foreign presets.
+
+[`examples/corpus_sweep.cpp`](examples/corpus_sweep.cpp) is the M3
+conformance harness: it walks preset directories through the real load
+path and reports a per-preset ledger (parse/translate/compile/LUT upload),
+optionally executing chains on the Vulkan device:
+
+```sh
+cmake --build build --target corpus_sweep
+./build/examples/corpus_sweep path/to/shader-pack          # compile-only sweep
+./build/examples/corpus_sweep pack --render --lut          # + render 2 frames per chain
+./build/examples/corpus_sweep pack --fail-on-broken        # nonzero exit on failures
+```
+
+`--render` reports presets whose final pass does not resolve to the output
+size as size-skips (final-pass letterbox lands in M4) and fails the run on
+any validation-layer error. The bundled-fixture smoke runs as a ctest
+(`example_corpus_sweep_smoke`); the full shader-pack corpus sweep runs
+out of CI against a slang-shaders checkout.
 
 Sample output (`demo-glow`, trimmed):
 

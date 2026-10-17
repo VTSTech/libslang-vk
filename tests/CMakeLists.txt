@@ -67,4 +67,10 @@ if(SLANGVK_ENABLE_VK)
         target_compile_definitions(test_runner_m2 PRIVATE
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_m2 COMMAND test_runner_m2)
+
+        add_executable(test_runner_m3 test_runner_m3.cpp)
+        target_link_libraries(test_runner_m3 PRIVATE slangvk)
+        target_compile_definitions(test_runner_m3 PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_m3 COMMAND test_runner_m3)
 endif()

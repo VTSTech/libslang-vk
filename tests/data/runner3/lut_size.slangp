@@ -1,0 +1,9 @@
+# libslang-vk M3 headless test: <LutName>Size uniform fill from the uploaded
+# texture (4x4 -> vec4(4, 4, 0.25, 0.25)).
+textures = "tint4"
+tint4 = "tint4.png"
+
+shader0 = shaders/lut_size.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

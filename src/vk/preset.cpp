@@ -7,6 +7,7 @@
 // preset's own directory is adopted implicitly.
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <unordered_set>
 
@@ -53,7 +54,7 @@ auto MergeParameters(const Preset::Impl &impl) -> std::vector<ParameterInfo>
 
 } // namespace
 
-auto Preset::load(Device & /*device*/, const std::filesystem::path &slangp, const PresetLoadOptions &options)
+auto Preset::load(Device &device, const std::filesystem::path &slangp, const PresetLoadOptions &options)
     -> std::expected<Preset, Error>
 {
         namespace fs = std::filesystem;
@@ -74,26 +75,36 @@ auto Preset::load(Device & /*device*/, const std::filesystem::path &slangp, cons
         Preset out;
         out.impl_ = std::make_unique<Impl>();
         Impl &impl = *out.impl_;
+        impl.device = &device;
 
         // 1. Parse the .slangp (order-independent, RetroArch semantics).
         std::string parseError;
         if (!core::ParsePreset(slangp.generic_string(), impl.parsed, parseError))
                 return std::unexpected(SLV_ERROR(Errc::preset_parse, parseError));
 
-        // Sampler name universe: LUT texture names + pass aliases.
+        // Sampler name universe: LUT texture names + pass aliases + User#
+        // positional aliases (SPEC 4.5). Both the declared spelling and the
+        // lowercase form are admitted: the translator validates against
+        // lowercased names (F9 case-insensitive matching), while GLSL binds
+        // by the declared spelling (case-sensitive identifiers).
+        const auto toLower = [](std::string s) {
+                for (char &c : s)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s;
+        };
         std::unordered_set<std::string> knownTextureNames;
-        for (const core::TextureDef &texture : impl.parsed.textures)
+        for (const core::TextureDef &texture : impl.parsed.textures) {
                 knownTextureNames.insert(texture.name);
-        for (const core::PassDef &pass : impl.parsed.passes)
-                if (!pass.alias.empty())
-                        knownTextureNames.insert(pass.alias);
-
-        // LUT images are an M3 capability (corpus sweep needs the decode +
-        // upload path): declared textures are recorded and size-resolvable,
-        // but pixel upload is not wired yet (plan §8/§11).
-        if (!impl.parsed.textures.empty() && !options.noLutImages)
-                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                    "Preset::load: LUT texture image upload lands in M3; pass noLutImages for compile-only sweeps"));
+                knownTextureNames.insert(toLower(texture.name));
+        }
+        for (const core::PassDef &pass : impl.parsed.passes) {
+                if (pass.alias.empty())
+                        continue;
+                knownTextureNames.insert(pass.alias);
+                knownTextureNames.insert(toLower(pass.alias));
+        }
+        for (size_t i = 0; i < impl.parsed.textures.size(); ++i)
+                knownTextureNames.insert("User" + std::to_string(i));
 
         // 2. Per pass: translate to stage GLSL, compile to SPIR-V.
         const int passCount = static_cast<int>(impl.parsed.passes.size());
@@ -130,6 +141,22 @@ auto Preset::load(Device & /*device*/, const std::filesystem::path &slangp, cons
         }
 
         impl.parameters = MergeParameters(impl);
+
+        // 3. Upload LUT textures (M3): decode to RGBA8, upload as
+        // R8G8B8A8_UNORM, mip chain at upload when `name_mipmap` is set.
+        // noLutImages keeps the load compile-only (corpus sweeps, no-ICD
+        // hosts); chains then fail at bind time with an explicit error.
+        if (!impl.parsed.textures.empty() && !options.noLutImages) {
+                for (const core::TextureDef &texture : impl.parsed.textures) {
+                        const std::string resolved = core::ResolvePresetFilePath(impl.parsed.dir, texture.path);
+                        Preset::Impl::LutGpu lut;
+                        lut.name = texture.name;
+                        auto uploaded = vk::UploadLutTexture(device, texture, resolved, lut);
+                        if (!uploaded)
+                                return std::unexpected(uploaded.error());
+                        impl.luts.push_back(std::move(lut));
+                }
+        }
         return out;
 }
 

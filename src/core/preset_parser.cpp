@@ -424,14 +424,20 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
         // Declared texture names, keyed by lowercase form. The original spelling
         // is preserved because GLSL identifiers are case-sensitive: the shader
         // sampler name must keep matching the binding name byte for byte.
+        // textureDeclOrder keeps FIRST-DECLARATION order (spec 3.5: User# is
+        // positional over the declared list — materializing from the map would
+        // impose alphabetical order and silently renumber User#).
         std::map<std::string, std::string> textureNames;
+        std::vector<std::pair<std::string, std::string>> textureDeclOrder;
         {
                 std::istringstream texStream(texturesList);
                 std::string token;
                 while (std::getline(texStream, token, ';')) {
                         const std::string orig = Trim(token);
-                        if (!orig.empty())
-                                textureNames.emplace(ToLower(orig), orig);
+                        if (!orig.empty()) {
+                                if (textureNames.emplace(ToLower(orig), orig).second)
+                                        textureDeclOrder.emplace_back(ToLower(orig), orig);
+                        }
                 }
         }
 
@@ -638,10 +644,11 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
         // Materialize declared texture names and validate that every texture
         // carries a path.
         if (!texturesList.empty()) {
-                // Materialize with the original spelling from the list (the map keys
-                // are lowercase; the values carry the declared case).
-                for (const auto &[_, orig] : textureNames)
-                        textureByName(orig);
+                // Materialize in declaration order (the map keys are lowercase and
+                // sorted; the decl-order vector preserves the declared sequence so
+                // User# positional access matches RetroArch).
+                for (const auto &decl : textureDeclOrder)
+                        textureByName(decl.second);
         }
         for (TextureDef &tex : preset.textures) {
                 if (tex.name.empty() || tex.path.empty()) {

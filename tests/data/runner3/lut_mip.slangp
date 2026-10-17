@@ -1,0 +1,11 @@
+# libslang-vk M3 headless test: mipmap LUT — the full mip chain is generated
+# at upload; the shader samples explicit LOD 1 (1x1 average).
+textures = "avg"
+avg = "avg.png"
+avg_linear = "false"
+avg_mipmap = "true"
+
+shader0 = shaders/lut_mip.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

@@ -119,6 +119,35 @@ int main()
                 std::filesystem::remove_all(root);
         }
 
+        // --- Texture declaration order (M3): the materialized list keeps the
+        // declared sequence so User# positional access matches spec 3.5
+        // (User0 = first declared, NOT the alphabetically sorted first) ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_tex_order");
+                SetShaderRootDir(root.string());
+                WriteText(root / "order.slangp",
+                    "shader0=\"p.slang\"\n"
+                    "textures = \"zeta;alpha\"\n"
+                    "zeta = \"z.png\"\n"
+                    "alpha = \"a.png\"\n");
+                WriteText(root / "p.slang", "#pragma name p\n");
+                Preset preset;
+                std::string error;
+                const bool ok = ParsePreset((root / "order.slangp").string(), preset, error);
+                Check(ok, "texture list parses");
+                if (!ok) {
+                        std::printf("  error: %s\n", error.c_str());
+                } else {
+                        Check(preset.textures.size() == 2, "declared list materializes both textures");
+                        if (preset.textures.size() == 2) {
+                                Check(preset.textures[0].name == "zeta",
+                                    "declaration order: zeta first (User0 binds it)");
+                                Check(preset.textures[1].name == "alpha", "declaration order: alpha second (User1)");
+                        }
+                }
+                std::filesystem::remove_all(root);
+        }
+
         // --- Recursive scan: subfolders listed, hidden + cache skipped ---
         {
                 const std::filesystem::path root = MakeTempRoot("libslang_vk_test_scan");

@@ -44,20 +44,11 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  windows-msvc:
-    name: windows (msvc, static + shared)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --config Release
-      - name: Test
-        # No Vulkan ICD on Windows runners: the headless runner test skips
-        # itself; the core suite + example smoke tests still gate the build.
-        run: ctest --test-dir build -C Release --output-on-failure
-
+  # windows-msvc job dropped (maintainer decision 2026-10-17): the VS-generator
+  # build is 5-8x slower than Ninja and the job hung on the runner well past any
+  # plausible test runtime (all bounded core tests, 0 output). Windows remains
+  # covered by the mingw-w64 job below, which builds static + shared and gates
+  # on the same suite.
   windows-mingw64:
     name: windows (mingw-w64, static + shared)
     runs-on: windows-latest

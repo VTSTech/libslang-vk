@@ -152,12 +152,14 @@ auto Device::adopt(VkInstance instance, VkPhysicalDevice physicalDevice, VkDevic
         impl.graphicsFamily = graphicsFamily;
         if (physicalDevice != VK_NULL_HANDLE)
                 vkGetPhysicalDeviceProperties(physicalDevice, &impl.properties);
-        impl.messenger = EnableValidation(instance, impl.validation);
 
         // Bind the global volk tables to this context (one device per process
-        // for M1 — documented limitation).
+        // for M1 — documented limitation). The messenger must be created AFTER
+        // this: vkCreateDebugUtilsMessengerEXT is a volk instance function and
+        // is null until volkLoadInstance runs.
         volkLoadInstance(instance);
         volkLoadDevice(device);
+        impl.messenger = EnableValidation(instance, impl.validation);
 
         VmaAllocatorCreateInfo allocInfo{};
         allocInfo.physicalDevice = physicalDevice;
@@ -211,11 +213,32 @@ auto Device::create(const DeviceOptions &options) -> std::expected<Device, Error
                 }
         }
 
+        std::vector<const char *> extensions;
+        if (!layers.empty()) {
+                // The ValidationLog collector needs the messenger, and the
+                // messenger needs VK_EXT_debug_utils enabled on the instance —
+                // without it vkCreateDebugUtilsMessengerEXT fails and validation
+                // output would only ever reach the layer's own stderr log.
+                uint32_t count = 0;
+                if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) == VK_SUCCESS && count > 0) {
+                        std::vector<VkExtensionProperties> available(count);
+                        if (vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data()) == VK_SUCCESS) {
+                                for (const VkExtensionProperties &ext : available)
+                                        if (std::strcmp(ext.extensionName, "VK_EXT_debug_utils") == 0) {
+                                                extensions.push_back("VK_EXT_debug_utils");
+                                                break;
+                                        }
+                        }
+                }
+        }
+
         VkInstanceCreateInfo instanceInfo{};
         instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         instanceInfo.pApplicationInfo = &appInfo;
         instanceInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
         instanceInfo.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
+        instanceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        instanceInfo.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
 
         VkInstance instance = VK_NULL_HANDLE;
         SLV_VK(vkCreateInstance(&instanceInfo, nullptr, &instance), Errc::vk_init_failed);

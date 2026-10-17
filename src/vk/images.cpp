@@ -1,6 +1,9 @@
 // libslang-vk — Image helpers (M1): owning 2D images + pixel readback for
 // hosts/tests without their own allocator (headless CI, golden images).
+// M3: hosts the shared mip-chain / barrier / staging utilities consumed by
+// the chain (pass targets, history ring, mip refill) and the LUT uploader.
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -8,6 +11,96 @@
 #include "impls.hpp"
 
 namespace slv {
+
+namespace vk {
+
+void BarrierMipLevel(VkCommandBuffer cmd, VkImage image, uint32_t level, uint32_t levelCount, VkImageLayout oldLayout,
+    VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess,
+    VkAccessFlags dstAccess)
+{
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, levelCount, 0, 1};
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+// Refills a full mip chain from level 0 (F1 mip plan; linear blits between
+// consecutive levels). Level 0 starts in SHADER_READ_ONLY (render pass
+// finalLayout) or TRANSFER_DST (freshly blitted/copied); every level rests
+// in SHADER_READ_ONLY afterwards. Shared by pass targets, the pass-0 input
+// copy and mipmap LUT uploads (M3).
+void RecordMipChain(VkCommandBuffer cmd, VkImage image, uint32_t levels, uint32_t width, uint32_t height,
+    bool level0InTransferDst)
+{
+        if (levels <= 1)
+                return;
+        constexpr VkPipelineStageFlags kTransfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        constexpr VkPipelineStageFlags kAll = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+        if (level0InTransferDst)
+                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+        else
+                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+
+        int32_t mipW = static_cast<int32_t>(width);
+        int32_t mipH = static_cast<int32_t>(height);
+        for (uint32_t l = 1; l < levels; ++l) {
+                BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkImageBlit blit{};
+                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
+                blit.srcOffsets[1] = {std::max(1, mipW), std::max(1, mipH), 1};
+                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+                blit.dstOffsets[1] = {std::max(1, mipW >> 1), std::max(1, mipH >> 1), 1};
+                vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                // The source level is consumed: rest it in SHADER_READ_ONLY.
+                BarrierMipLevel(cmd, image, l - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_SHADER_READ_BIT);
+                if (l + 1 < levels)
+                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_READ_BIT);
+                else
+                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT);
+                mipW = std::max(1, mipW >> 1);
+                mipH = std::max(1, mipH >> 1);
+        }
+}
+
+auto CreateStagingBuffer(Device &device, VkDeviceSize bytes, VkBuffer *outBuffer, VmaAllocation *outAllocation,
+    void **outMapped) -> std::expected<void, Error>
+{
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = bytes;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+            | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo mappedInfo{};
+        if (vmaCreateBuffer(device.impl().allocator, &bufferInfo, &allocInfo, outBuffer, outAllocation, &mappedInfo)
+            != VK_SUCCESS)
+                return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "staging buffer allocation failed"));
+        *outMapped = mappedInfo.pMappedData;
+        return {};
+}
+
+} // namespace vk
 
 struct Image::Impl {
         Device *device = nullptr;
@@ -26,34 +119,6 @@ struct Image::Impl {
                         vmaDestroyImage(device->impl().allocator, obj.image, obj.allocation);
         }
 };
-
-namespace {
-
-struct StagingBuffer {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-        void *mapped = nullptr;
-};
-
-auto CreateStaging(Device &device, VkDeviceSize bytes, StagingBuffer &out) -> std::expected<void, Error>
-{
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = bytes;
-        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-            | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo mappedInfo{};
-        if (vmaCreateBuffer(device.impl().allocator, &bufferInfo, &allocInfo, &out.buffer, &out.allocation, &mappedInfo)
-            != VK_SUCCESS)
-                return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "staging buffer allocation failed"));
-        out.mapped = mappedInfo.pMappedData;
-        return {};
-}
-
-} // namespace
 
 auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Image, Error>
 {
@@ -103,13 +168,17 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
         SLV_VK(vkCreateImageView(device.device(), &viewInfo, nullptr, &impl.obj.view), Errc::vk_error);
 
         // Upload + transition through a one-shot command buffer.
-        StagingBuffer staging;
         const bool upload = info.pixels != nullptr;
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+        void *stagingMapped = nullptr;
         if (upload) {
-                auto stagingOk = CreateStaging(device, static_cast<VkDeviceSize>(info.pixelBytes), staging);
+                auto stagingOk = vk::CreateStagingBuffer(
+                    device, static_cast<VkDeviceSize>(info.pixelBytes), &stagingBuffer, &stagingAllocation,
+                    &stagingMapped);
                 if (!stagingOk)
                         return std::unexpected(stagingOk.error());
-                std::memcpy(staging.mapped, info.pixels, info.pixelBytes);
+                std::memcpy(stagingMapped, info.pixels, info.pixelBytes);
         }
 
         auto recorded = device.impl().SubmitAndWait([&](VkCommandBuffer cmd) {
@@ -132,7 +201,7 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
                         VkBufferImageCopy copy{};
                         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                         copy.imageExtent = {info.desc.width, info.desc.height, 1};
-                        vkCmdCopyBufferToImage(cmd, staging.buffer, impl.obj.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        vkCmdCopyBufferToImage(cmd, stagingBuffer, impl.obj.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             1, &copy);
 
                         VkImageMemoryBarrier toFinal = barrier;
@@ -143,7 +212,7 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
                 }
         });
         if (upload)
-                vmaDestroyBuffer(device.impl().allocator, staging.buffer, staging.allocation);
+                vmaDestroyBuffer(device.impl().allocator, stagingBuffer, stagingAllocation);
         if (!recorded)
                 return std::unexpected(recorded.error());
         return out;

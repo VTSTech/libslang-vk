@@ -1,0 +1,10 @@
+# libslang-vk M3 headless test: LUT sampling by declared name (nearest).
+# Golden contract: output pixels byte-identical to tint.png's texels.
+textures = "tint"
+tint = "tint.png"
+tint_linear = "false"
+
+shader0 = shaders/lut.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

@@ -86,6 +86,37 @@ auto DeriveViewportSize(uint32_t targetWidth, uint32_t targetHeight, uint32_t ga
     -> std::pair<uint32_t, uint32_t>;
 
 // ---------------------------------------------------------------------------
+// Image utilities shared by the chain (pass targets, history ring, mip
+// refill) and the LUT uploader (M3): classic-barrier mip chain generation,
+// per-level barriers, full-chain level counts and staging uploads.
+
+inline uint32_t MipLevelsForExtent(uint32_t width, uint32_t height)
+{
+        uint32_t levels = 1;
+        uint32_t size = width > height ? width : height;
+        while (size > 1) {
+                size >>= 1;
+                ++levels;
+        }
+        return levels;
+}
+
+void BarrierMipLevel(VkCommandBuffer cmd, VkImage image, uint32_t level, uint32_t levelCount, VkImageLayout oldLayout,
+    VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess,
+    VkAccessFlags dstAccess);
+
+// Refills a full mip chain from level 0 (F1 mip plan): level 0 starts in
+// SHADER_READ_ONLY (render pass finalLayout) or TRANSFER_DST (freshly
+// blitted/copied); every level rests in SHADER_READ_ONLY afterwards.
+void RecordMipChain(VkCommandBuffer cmd, VkImage image, uint32_t levels, uint32_t width, uint32_t height,
+    bool level0InTransferDst);
+
+// Mapped host-visible staging buffer for one-shot uploads (Image::create,
+// LUT upload). Destroy with vmaDestroyBuffer(allocator, buffer, allocation).
+auto CreateStagingBuffer(Device &device, VkDeviceSize bytes, VkBuffer *outBuffer, VmaAllocation *outAllocation,
+    void **outMapped) -> std::expected<void, Error>;
+
+// ---------------------------------------------------------------------------
 // UBO fill — semantics ported from the reference host's Runner::FillBlockBytes
 // (PROVENANCE.md): SourceSize/OutputSize/OriginalSize/FinalViewportSize as
 // vec4(w, h, 1/w, 1/h), FrameCount with frame_count_mod, FrameDirection,
@@ -119,6 +150,12 @@ struct BlockFillContext {
                 uint32_t height = 0;
         };
         const std::vector<AliasSize> *aliasSizes = nullptr;
+        struct LutSize {                                                             // LUT name / User# -> uploaded image size.
+                std::string name;
+                uint32_t width = 0;
+                uint32_t height = 0;
+        };
+        const std::vector<LutSize> *lutSizes = nullptr;
 };
 
 auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const SlangTranslation &translation,

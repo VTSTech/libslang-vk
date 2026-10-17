@@ -92,11 +92,50 @@ struct Device::Impl {
 };
 
 struct Preset::Impl {
+        // Uploaded LUT texture (M3): RGBA8, R8G8B8A8_UNORM, full mip chain
+        // when the .slangp sets `name_mipmap = true`. Owned here so chains
+        // from the same preset share one upload; views are borrowed by
+        // Chain::Impl::luts (Preset must outlive its Chains).
+        struct LutGpu {
+                std::string name; // Declared spelling (case-sensitive GLSL name).
+                uint32_t width = 0;
+                uint32_t height = 0;
+                uint32_t mipLevels = 1;
+                vk::VkImageWithView img;
+        };
+
+        Device *device = nullptr; // Borrowed; the host must destroy the Preset before the Device.
         std::vector<PassDef> passDefs;
         std::vector<SlangTranslation> translations;
         std::vector<PassSpirv> spirv;
         std::vector<ParameterInfo> parameters;
+        std::vector<LutGpu> luts;
         slv::preset::Preset parsed; // Core data model (textures, feedback, histories).
+
+        ~Impl()
+        {
+                if (device == nullptr)
+                        return;
+                VkDevice dev = device->device();
+                for (LutGpu &lut : luts) {
+                        if (lut.img.view != VK_NULL_HANDLE)
+                                vkDestroyImageView(dev, lut.img.view, nullptr);
+                        if (lut.img.image != VK_NULL_HANDLE)
+                                vmaDestroyImage(device->impl().allocator, lut.img.image, lut.img.allocation);
+                }
+        }
 };
+
+// LUT upload (M3; defined in lut.cpp). LoadLutPixels decodes an image file
+// to tightly packed RGBA8 (stb_image; git-lfs pointer files and unsupported
+// formats fail with a named error). UploadLutTexture uploads it as
+// R8G8B8A8_UNORM with the TextureDef's own options (full mip chain when
+// `name_mipmap = true`) and fills `out` (name/width/height/mipLevels/img).
+namespace vk {
+auto LoadLutPixels(const std::string &absolutePath, std::vector<uint8_t> &outRgba, uint32_t &outWidth,
+    uint32_t &outHeight, std::string &error) -> bool;
+auto UploadLutTexture(Device &device, const slv::preset::TextureDef &def, const std::string &resolvedPath,
+    Preset::Impl::LutGpu &out) -> std::expected<void, Error>;
+} // namespace vk
 
 } // namespace slv

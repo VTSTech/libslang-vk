@@ -1,0 +1,12 @@
+# libslang-vk M3 headless test: User0 positional access. "zeta" is declared
+# FIRST but sorts after "alpha" — if the parser materialized the texture list
+# alphabetically (the old map-order bug), User0 would bind avg.png and the
+# golden would flip to near-black.
+textures = "zeta;alpha"
+zeta = "tint.png"
+alpha = "avg.png"
+
+shader0 = shaders/lut_user.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

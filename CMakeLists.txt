@@ -46,6 +46,7 @@ if(SLANGVK_ENABLE_VK)
         list(APPEND SLANGVK_CORE_SOURCES
             src/vk/device.cpp
             src/vk/images.cpp
+            src/vk/lut.cpp
             src/vk/preset.cpp
             src/vk/chain.cpp
             src/vk/vma_impl.cpp)
@@ -65,10 +66,16 @@ function(slangvk_add_library target shared)
         target_include_directories(${target} PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>)
+        # Vendored single-header image decoder for LUT uploads (public domain;
+        # see PROVENANCE.md). Implementation TU: src/vk/lut.cpp.
+        target_include_directories(${target} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/vendor/stb)
+        # Raw Vulkan handle types in runner.hpp need the Khronos headers at the
+        # boundary — in BOTH configurations (the public header is consumed by
+        # core-only hosts too); volk + VMA stay private implementation details
+        # of the ENABLE_VK build.
+        target_link_libraries(${target} PUBLIC slv-headers-only)
         if(SLANGVK_ENABLE_VK)
-                # Raw Vulkan handle types in runner.hpp need the Khronos headers
-                # at the boundary; volk + VMA stay private implementation details.
-                target_link_libraries(${target} PUBLIC slv-headers-only)
                 target_compile_definitions(${target} PUBLIC SLANGVK_ENABLE_VK=1)
                 target_link_libraries(${target} PRIVATE slv-volk slv-vma-headers)
         endif()

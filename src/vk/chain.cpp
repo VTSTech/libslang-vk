@@ -245,7 +245,17 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                                                 h = entry.height;
                                                 break;
                                         }
-                                // LUT sizes resolve with LUT upload (M3).
+                                if (w == 0 && h == 0 && ctx.lutSizes != nullptr) {
+                                        // LUT textures (M3): uploaded size; User# aliases
+                                        // resolve to their positional LUT (extension over
+                                        // the reference host, which left User#Size at 0).
+                                        for (const BlockFillContext::LutSize &entry : *ctx.lutSizes)
+                                                if (CaseInsensitiveEqual(entry.name, texName)) {
+                                                        w = entry.width;
+                                                        h = entry.height;
+                                                        break;
+                                                }
+                                }
                         }
                         const auto [x, y, z, ww] = sizeVec(w, h);
                         writeVec4(member, x, y, z, ww);
@@ -297,6 +307,9 @@ using slv::preset::UniformBlock;
 using slv::preset::UniformMember;
 using slv::preset::UniformType;
 using slv::preset::WrapMode;
+using vk::BarrierMipLevel;
+using vk::MipLevelsForExtent;
+using vk::RecordMipChain;
 using vk::VkImageWithView;
 
 struct Chain::Impl {
@@ -343,7 +356,18 @@ struct Chain::Impl {
 
         Device *device = nullptr;
         std::vector<PassRuntime> passes;
-        std::vector<slv::preset::TextureDef> presetTextures;   // Recorded LUT declarations (M2 uploads them).
+        // Uploaded LUT textures (M3): borrowed views into Preset::Impl's images
+        // (read-only, so sharing across chains of the same preset is safe) plus
+        // a copy of the TextureDef for the LUT's own sampler options. User#
+        // resolves positionally over this list (SPEC 4.5, declaration order).
+        struct LutBinding {
+                std::string name;
+                uint32_t width = 0;
+                uint32_t height = 0;
+                VkImageView view = VK_NULL_HANDLE;
+                slv::preset::TextureDef def;
+        };
+        std::vector<LutBinding> luts;
         std::vector<ParamOverride> presetParameterOverrides;   // From the .slangp parameters list.
         std::unordered_map<std::string, float> paramOverrides; // setParameter() runtime overrides.
         VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -479,17 +503,6 @@ struct Chain::Impl {
                 out.mapped = static_cast<uint8_t *>(mappedInfo.pMappedData);
                 out.size = size;
                 return {};
-        }
-
-        static uint32_t MipLevelsForExtent(uint32_t width, uint32_t height)
-        {
-                uint32_t levels = 1;
-                uint32_t size = std::max(width, height);
-                while (size > 1) {
-                        size >>= 1;
-                        ++levels;
-                }
-                return levels;
         }
 
         // Allocates one target slot: image (full mip chain when the next pass
@@ -770,35 +783,41 @@ struct Chain::Impl {
                 return renderPass;
         }
 
-        auto GetSampler(const PassDef &def) -> VkSampler
+        auto GetSampler(FilterMode filter, WrapMode wrap, bool mipmap) -> VkSampler
         {
-                const uint64_t key = (static_cast<uint64_t>(def.wrap) << 8) | (static_cast<uint64_t>(def.filter) << 1)
-                    | static_cast<uint64_t>(def.mipmapInput);
+                const uint64_t key = (static_cast<uint64_t>(wrap) << 8) | (static_cast<uint64_t>(filter) << 1)
+                    | static_cast<uint64_t>(mipmap);
                 const auto it = samplers.find(key);
                 if (it != samplers.end())
                         return it->second;
 
                 VkSamplerCreateInfo info{};
                 info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-                info.magFilter = def.filter == FilterMode::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+                info.magFilter = filter == FilterMode::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
                 info.minFilter = info.magFilter;
                 // Mip-mode policy (SPEC 5.4/F1): only mipmap_input readers get a
                 // mip filter (linear, per the reference host's mip plan); every
-                // other binding samples level 0.
-                info.mipmapMode = def.mipmapInput ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-                switch (def.wrap) {
+                // other binding samples level 0. Mipmap LUTs (M3) share the
+                // policy: their own `name_mipmap` flag selects the mip filter.
+                info.mipmapMode = mipmap ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                switch (wrap) {
                         case WrapMode::Repeat: info.addressModeU = info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
                         case WrapMode::MirroredRepeat: info.addressModeU = info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
                         case WrapMode::ClampToEdge: break;
                 }
                 info.anisotropyEnable = VK_FALSE;
-                info.maxLod = def.mipmapInput ? 128.0F : 0.0F;
+                info.maxLod = mipmap ? 128.0F : 0.0F;
 
                 VkSampler sampler = VK_NULL_HANDLE;
                 if (vkCreateSampler(device->device(), &info, nullptr, &sampler) != VK_SUCCESS)
                         return VK_NULL_HANDLE;
                 samplers.emplace(key, sampler);
                 return sampler;
+        }
+
+        auto GetSampler(const PassDef &def) -> VkSampler
+        {
+                return GetSampler(def.filter, def.wrap, def.mipmapInput);
         }
 
         auto GetSet2Layout(size_t bindingCount) -> VkDescriptorSetLayout
@@ -851,73 +870,8 @@ struct Chain::Impl {
 
 namespace {
 
-// Classic (core-1.0) image barrier for one mip level. The M1 floor is
-// Vulkan 1.1, so sync2's barrier2 commands are not guaranteed (plan §8).
-void BarrierMipLevel(VkCommandBuffer cmd, VkImage image, uint32_t level, uint32_t levelCount, VkImageLayout oldLayout,
-    VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess,
-    VkAccessFlags dstAccess)
-{
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.oldLayout = oldLayout;
-        barrier.newLayout = newLayout;
-        barrier.image = image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, levelCount, 0, 1};
-        vkCmdPipelineBarrier(cmd, srcStage, dstStage, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
-}
-
-// Refills a full mip chain from level 0 (F1 mip plan; deterministic box
-// average on power-of-two extents). Level 0 starts in SHADER_READ_ONLY
-// (render pass finalLayout) or TRANSFER_DST (freshly blitted from the host
-// input); every level rests in SHADER_READ_ONLY afterwards.
-void RecordMipChain(VkCommandBuffer cmd, VkImage image, uint32_t levels, uint32_t width, uint32_t height,
-    bool level0InTransferDst)
-{
-        if (levels <= 1)
-                return;
-        constexpr VkPipelineStageFlags kTransfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        constexpr VkPipelineStageFlags kAll = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-
-        if (level0InTransferDst)
-                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT);
-        else
-                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT);
-
-        int32_t mipW = static_cast<int32_t>(width);
-        int32_t mipH = static_cast<int32_t>(height);
-        for (uint32_t l = 1; l < levels; ++l) {
-                BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
-                    VK_ACCESS_TRANSFER_WRITE_BIT);
-                VkImageBlit blit{};
-                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
-                blit.srcOffsets[1] = {std::max(1, mipW), std::max(1, mipH), 1};
-                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
-                blit.dstOffsets[1] = {std::max(1, mipW >> 1), std::max(1, mipH >> 1), 1};
-                vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-                // The source level is consumed: rest it in SHADER_READ_ONLY.
-                BarrierMipLevel(cmd, image, l - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_READ_BIT,
-                    VK_ACCESS_SHADER_READ_BIT);
-                if (l + 1 < levels)
-                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
-                            VK_ACCESS_TRANSFER_READ_BIT);
-                else
-                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_WRITE_BIT,
-                            VK_ACCESS_SHADER_READ_BIT);
-                mipW = std::max(1, mipW >> 1);
-                mipH = std::max(1, mipH >> 1);
-        }
-}
+// (image barrier + mip chain helpers moved to images.cpp — shared with the
+// M3 LUT uploader; see vk::BarrierMipLevel / vk::RecordMipChain)
 
 // Semantics ported from the reference host (F6 pin): Viewport-scale passes
 // resolve against the aspect-corrected game rect inside the output target.
@@ -1068,10 +1022,35 @@ auto ResolveTexture(const std::string &name, size_t passIndex, Chain::Impl &impl
                 }
                 return {};
         }
-        for (const slv::preset::TextureDef &texture : impl.presetTextures)
-                if (vk::CaseInsensitiveEqual(texture.name, name))
+        const auto bindLut = [&](size_t index) -> std::expected<void, Error> {
+                const Chain::Impl::LutBinding &lut = impl.luts[index];
+                if (lut.view == VK_NULL_HANDLE)
                         return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                            "LUT texture '" + name + "' image upload lands in M3"));
+                            "LUT texture '" + lut.name + "' has no uploaded image (preset was loaded with "
+                                "PresetLoadOptions::noLutImages)"));
+                sampler = impl.GetSampler(lut.def.filter, lut.def.wrap, lut.def.mipmap);
+                if (sampler == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "sampler creation failed"));
+                view = lut.view;
+                return {};
+        };
+        // User# (SPEC 4.5): positional access to the declared LUTs. The parser
+        // materializes preset.textures in declaration order, so User0 is the
+        // first declared LUT.
+        if (name.size() > 4 && name.compare(0, 4, "User") == 0
+            && name.find_first_not_of("0123456789", 4) == std::string::npos) {
+                const size_t index = static_cast<size_t>(std::atoi(name.c_str() + 4));
+                if (index >= impl.luts.size())
+                        return std::unexpected(SLV_ERROR(Errc::preset_parse,
+                            "User" + std::to_string(index) + " is outside the declared LUT list ("
+                                + std::to_string(impl.luts.size()) + " textures)"));
+                return bindLut(index);
+        }
+        // Declared LUT textures by name: the LUT's own linear/wrap/mipmap
+        // options select the sampler (SPEC 5.4); case-insensitive at bind (F9).
+        for (size_t l = 0; l < impl.luts.size(); ++l)
+                if (vk::CaseInsensitiveEqual(impl.luts[l].name, name))
+                        return bindLut(l);
         return std::unexpected(SLV_ERROR(Errc::preset_parse, "unresolved texture reference: " + name));
 }
 
@@ -1094,7 +1073,24 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         impl.targetWidth = options.outputWidth;
         impl.targetHeight = options.outputHeight;
         impl.targetFormat = options.outputFormat;
-        impl.presetTextures = preset.impl().parsed.textures;
+        // LUT bindings (M3): views are borrowed from the preset's uploaded
+        // images — a Preset must therefore outlive every Chain created from it
+        // (runner.hpp contract). A preset loaded with noLutImages produces
+        // bindings with null views; renders fail with an explicit error.
+        for (const slv::preset::TextureDef &texture : preset.impl().parsed.textures) {
+                Chain::Impl::LutBinding binding;
+                binding.name = texture.name;
+                binding.def = texture;
+                for (const Preset::Impl::LutGpu &uploaded : preset.impl().luts) {
+                        if (vk::CaseInsensitiveEqual(uploaded.name, texture.name)) {
+                                binding.view = uploaded.img.view;
+                                binding.width = uploaded.width;
+                                binding.height = uploaded.height;
+                                break;
+                        }
+                }
+                impl.luts.push_back(std::move(binding));
+        }
         impl.presetParameterOverrides = preset.impl().parsed.parameters;
 
         const auto &presetPasses = preset.impl().passDefs;
@@ -1514,6 +1510,15 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         aliasSizes.push_back({owner.translation.pragmaName, w, h});
         }
 
+        // LUT sizes (M3): declared names plus User# positional aliases; the
+        // fill resolves <Texture>Size members case-insensitively over both.
+        std::vector<vk::BlockFillContext::LutSize> lutSizes;
+        for (size_t l = 0; l < impl.luts.size(); ++l) {
+                if (impl.luts[l].width != 0 || impl.luts[l].height != 0)
+                        lutSizes.push_back({impl.luts[l].name, impl.luts[l].width, impl.luts[l].height});
+                lutSizes.push_back({"User" + std::to_string(l), impl.luts[l].width, impl.luts[l].height});
+        }
+
         // 4b. Ring / mip-copy (re)allocation happens before recording so the
         // error paths stay outside the command lambda.
         if (impl.historyDepth > 0
@@ -1579,6 +1584,7 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 ctx.frameDirection = frame.frameDirection;
                 ctx.passOutputSizes = &passSizes;
                 ctx.aliasSizes = &aliasSizes;
+                ctx.lutSizes = &lutSizes;
 
                 if (!pass.translation.vertex.uniformBlocks.empty()) {
                         ctx.vertexStage = true;
@@ -1709,9 +1715,9 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
                         blitInputTo(impl.sourceMipCopy.image);
-                        RecordMipChain(cmd, impl.sourceMipCopy.image, Chain::Impl::MipLevelsForExtent(
-                                          impl.srcMipWidth, impl.srcMipHeight),
-                            impl.srcMipWidth, impl.srcMipHeight, true);
+                        RecordMipChain(cmd, impl.sourceMipCopy.image,
+                            MipLevelsForExtent(impl.srcMipWidth, impl.srcMipHeight), impl.srcMipWidth,
+                            impl.srcMipHeight, true);
                 }
                 restoreInput();
 
