@@ -182,9 +182,10 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
         }
 
         auto recorded = device.impl().SubmitAndWait([&](VkCommandBuffer cmd) {
-                // Classic (core-1.0) barriers: the M1 floor is Vulkan 1.1, so
-                // sync2's vkCmdPipelineBarrier2 is not guaranteed. M2 introduces
-                // capability-gated sync2/dynamic-rendering paths (plan §8).
+                // Classic (core-1.0) barriers: the v1 floor is Vulkan 1.1, so
+                // sync2's vkCmdPipelineBarrier2 is not guaranteed. The sync2 /
+                // dynamic-rendering fast path is a post-1.0 perf lever, not a
+                // pending M2 item (v1 divergence, PROVENANCE.md).
                 VkImageMemoryBarrier barrier{};
                 barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

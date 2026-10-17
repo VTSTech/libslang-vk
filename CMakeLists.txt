@@ -35,6 +35,8 @@ option(SLANGVK_BUILD_TESTS "Build the unit test suite" ON)
 option(SLANGVK_BUILD_EXAMPLES "Build the example programs" ON)
 option(SLANGVK_BUILD_SHARED "Also build the shared library variant" ON)
 option(SLANGVK_ENABLE_VK "Build the Vulkan runner (src/vk; needs Vulkan-Headers + volk + VMA, fetched automatically)" ON)
+option(SLANGVK_SYSTEM_GLSLANG "Link a system-installed glslang (find_package CONFIG) instead of the pinned FetchContent copy (risk-3 size lever)" OFF)
+option(SLANGVK_LTO "Enable LTO/IPO + -Oz release codegen for the slangvk targets (risk-3 size lever; opt-in)" OFF)
 set(SLANGVK_SANITIZE "" CACHE STRING "Comma-separated sanitizers for a test build (e.g. address,undefined)")
 
 if(SLANGVK_SANITIZE)
@@ -51,6 +53,18 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(deps)
+
+# Risk-3 size lever: LTO over the glslang-heavy static lib. Checked once at
+# configure time so unsupported toolchains fall back with a note instead of
+# failing at generate.
+set(SLANGVK_IPO_SUPPORTED OFF)
+if(SLANGVK_LTO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT SLANGVK_IPO_SUPPORTED OUTPUT SLANGVK_IPO_MSG)
+        if(NOT SLANGVK_IPO_SUPPORTED)
+                message(WARNING "libslang-vk: SLANGVK_LTO requested but IPO is not supported here (${SLANGVK_IPO_MSG}); continuing without")
+        endif()
+endif()
 
 set(SLANGVK_CORE_SOURCES
     src/core/preset_parser.cpp
@@ -105,6 +119,17 @@ function(slangvk_add_library target shared)
         # its typeinfo symbols fails otherwise. The core uses no RTTI itself.
         if(NOT MSVC)
                 target_compile_options(${target} PRIVATE -fno-rtti)
+        endif()
+        # Risk-3 levers (opt-in): interprocedural optimization over the
+        # glslang-bearing static lib, plus -Oz release codegen (later -O wins
+        # on GNU/Clang, so this shrinks the Release default). No effect on the
+        # default build; CI stays on plain Release so ASan/UBSan timing holds.
+        if(SLANGVK_IPO_SUPPORTED)
+                set_target_properties(${target} PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+        endif()
+        if(SLANGVK_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+                AND CMAKE_BUILD_TYPE MATCHES "Release|MinSizeRel|RelWithDebInfo")
+                target_compile_options(${target} PRIVATE -Oz)
         endif()
 endfunction()
 

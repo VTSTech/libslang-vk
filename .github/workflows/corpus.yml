@@ -1,0 +1,64 @@
+# libslang-vk corpus ledger (plan §10, miss list #5).
+#
+# Nightly compile-sweep over the full libretro/slang-shaders corpus: parse +
+# translate + glslang-compile every preset headlessly on lavapipe and upload
+# the ledger as an artifact. Deliberately NOT part of ci.yml — the checkout is
+# ~400 MB and the sweep minutes are wasted on every push.
+#
+# No-regression policy (plan §10): a preset that loaded in the previous
+# release must not regress without an audit-documented reason. Bootstrap
+# order: this workflow first accumulates baseline ledgers (green, no
+# --fail-on-broken). Once a baseline artifact is pinned, add
+# `--fail-on-broken` to the sweep invocation to flip the job red on any
+# load/compile regression, and diff consecutive ledgers in review.
+#
+# Knobs left off the nightly baseline on purpose (flip when needed):
+#   --render   execute each chain on lavapipe too (slower, catches runner
+#              regressions, not just compile ones)
+#   --lut      upload LUT images instead of noLutImages mode
+
+name: corpus
+
+on:
+  schedule:
+    - cron: "30 06 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: full-corpus compile ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools + lavapipe + validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
+
+      - name: Check out the libretro shader corpus
+        run: git clone --depth 1 https://github.com/libretro/slang-shaders.git slang-shaders
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSLANGVK_BUILD_TESTS=OFF
+
+      - name: Build corpus_sweep
+        run: cmake --build build --target corpus_sweep
+
+      - name: Sweep (baseline mode — ledger, no gate)
+        run: |
+          ./build/examples/corpus_sweep slang-shaders --max-report 100 2>&1 | tee ledger.txt
+          # Bootstrapping note: append --fail-on-broken above once the first
+          # baseline ledger is pinned as the no-regression reference.
+
+      - name: Upload ledger artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-ledger-${{ github.run_id }}
+          path: ledger.txt
+          if-no-files-found: error

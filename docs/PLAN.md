@@ -26,7 +26,7 @@ Timing is deliberate. The codebase-audit ledger currently stands at **zero open 
 ### Goals (v1.0)
 
 1. **Full libretro slang spec support** — presets, `#pragma name/stage/parameter/texture`, defines, `#include` (with cycle detection), pass aliases (`source0..`), feedback passes, `PREV` / `PASSPREV` / `OriginalHistory#` frame history, wrap/mipmap/filter modes, all scale types (source/viewport/absolute, fractional), FBO format selection (RGBA8, RGBA16F, R16F, sRGB, …), and `max_fbo_*` clamping.
-2. **Direct Vulkan execution** — no SDL, no SDL_GPU, no intermediate abstraction layer. Vulkan 1.1 floor, Vulkan 1.3 dynamic-rendering preferred path.
+2. **Direct Vulkan execution** — no SDL, no SDL_GPU, no intermediate abstraction layer. Vulkan 1.1 floor everywhere (classic synchronization — the dynamic-rendering fast path is a recorded post-1.0 lever, §8/§13).
 3. **Drop-in host integration** — the host keeps ownership of its window, surface, swapchain, and fallback rendering. The library adopts host-provided `VkInstance`/`VkDevice`/queue or creates its own; input frame in, presented frame out.
 4. **C++23 API** — namespace `slv`, `std::expected`-based error handling, RAII handles. No C API in v1.
 5. **Conformance as a feature** — an automated CI sweep that loads and compiles the entire libretro corpus, plus golden-image tests, with a no-regression ledger policy inherited from the fork's audit discipline.
@@ -64,7 +64,7 @@ The MIT choice is only as good as the provenance discipline behind it, so this s
 
 - **Fork-authored code is portable.** The preset layer was authored inside the VTSTech fork; VTSTech holds the copyright and may relicense it to MIT. Each ported file gets a provenance header (origin commit, relicense statement) in a `PROVENANCE.md` ledger.
 - **Upstream DevilutionX code is banned.** Nothing under `Source/` that originates from upstream `diasurgical/DevilutionX` (game logic, UI, options plumbing around the scaler) may enter the libslang-vk repo. Where an idea is needed (e.g., the fallback-to-stock-renderer contract), it is re-expressed, not copied.
-- **No RetroArch code, ever.** RetroArch's slang implementation (`gfx/video_shader_parse.c` et al.) is GPL-3. libslang-vk is clean-room against it: the references are the libretro slang documentation, `docs/SLANG_SPEC.md` (itself written from docs + corpus conventions + the fork's independent implementation), and black-box behavior comparison. The fork's `tools/audit/scan_codefindings.py` methodology becomes a CI provenance gate that scans for known RetroArch code fingerprints before every release.
+- **No RetroArch code, ever.** RetroArch's slang implementation (`gfx/video_shader_parse.c` et al.) is GPL-3. libslang-vk is clean-room against it: the references are the libretro slang documentation, `docs/SLANG_SPEC.md` (itself written from docs + corpus conventions + the fork's independent implementation), and black-box behavior comparison. The fork's `tools/audit/scan_codefindings.py` methodology is realized as this repo's `tools/scan_codefindings.py` (2026-10-18, miss-list #9) — a RetroArch-fingerprint scanner with inline-waiver support, wired as the `provenance` CI job so the gate runs on every push and before any release tag.
 - **Vendored dependencies** (all MIT-compatible): glslang (Apache-2.0 / BSD, Khronos), Vulkan Memory Allocator (MIT), Vulkan-Headers (Apache-2.0 OR MIT). No other runtime dependencies; logging is a caller-provided callback.
 
 ## 5. Architecture
@@ -74,13 +74,19 @@ The MIT choice is only as good as the provenance discipline behind it, so this s
 ```
 libslang-vk/
 ├── include/slangvk/      Public headers — C++23, namespace slv, raw VkHandle types
-├── src/core/             GPU-agnostic: types, preset parser, translator, compiler
-├── src/vk/               Vulkan runner: device, pipelines, samplers, chain executor, sync
-├── src/interop/          Host-facing value types (surface frames, offscreen targets)
-├── corpus/               Conformance presets, golden images, sweep configuration
-├── tools/                Ported audit harnesses + provenance scanner
-└── docs/                 SPEC.md (from SLANG_SPEC.md), API.md, PLAN.md
+├── src/core/             GPU-agnostic: preset parser, translator, compiler
+├── src/vk/               Vulkan runner: device, images/LUTs, chain executor, present
+├── tests/                Unit + field-round + headless runner suites, fixtures in tests/data/
+├── examples/             preset_info, corpus_sweep + bundled presets
+├── tools/                scan_codefindings.py — provenance gate (CI job `provenance`)
+├── cmake/deps.cmake      Pinned FetchContent deps (glslang, Vulkan-Headers, volk, VMA)
+└── docs/                 SPEC.md (format contract), PLAN.md
 ```
+
+(The plan's original `src/interop/` row landed as the public value types in
+`include/slangvk/runner.hpp`; `corpus/` fixtures live under `tests/data/`;
+the audit harnesses became the `tests/` suite. Map corrected 2026-10-18,
+miss-list #13.)
 
 The load-bearing rule is the **core/vk boundary**: `src/core` never includes `vulkan.h`. It consumes shader source and preset files, and emits an intermediate representation — ordered passes, resource bindings, parameter blocks, compiled SPIR-V. `src/vk` consumes that IR. This is what made the fork's preset layer portable in the first place, and preserving it keeps the "Vulkan only" decision cheap to revisit later without having designed for anything.
 
@@ -155,13 +161,29 @@ One scope note: the fork's translator hard-fails on a handful of constructs (ver
 
 ## 8. Vulkan Runner Design
 
-**Version floor and feature use.** Vulkan 1.1 minimum for driver reach; when 1.3 or `VK_KHR_dynamic_rendering` is present the runner uses dynamic rendering, with a classic-renderpass fallback (lavapipe and older drivers exercise it in CI). Push constants carry pass matrices; one descriptor set per pass binds the param/metadata UBO plus N combined image samplers (source, `PREV`/`PASSPREV` taps, aliases, LUT textures, feedback targets).
+**Version floor and feature use.** Vulkan 1.1 minimum for driver reach. The
+runner uses classic render passes + core-1.0 stage-masked barriers on every
+device — the sync2/dynamic-rendering fast path once planned "with M2's
+capability detection" never shipped and is recorded as a formal v1
+divergence / post-1.0 lever (§13; PROVENANCE M1 divergence #2). Push
+carriers: push constants for pass matrices; one descriptor set per pass
+binds the param/metadata UBO plus N combined image samplers (source,
+`PREV`/`PASSPREV` taps, aliases, LUT textures, feedback targets).
 
-**Targets and formats.** FBO formats per preset (`RGBA8`, `RGBA16F`, `R16F`, `R32F`, sRGB variants), honor `scale_type` / fractional / absolute scaling and `max_fbo_width/height` clamps. Sampler cache is bounded and keyed by (wrap S/T, filter, mipmap).
+**Targets and formats.** FBO formats per preset (`RGBA8`, `RGBA16F`, `R16F`,
+`R32F`, sRGB variants), honor `scale_type` / fractional / absolute scaling,
+with `max_fbo_width/height` clamps implemented (2026-10-18: the clamped FBO
+size is what downstream Source-scale passes resolve against). Sampler cache
+is bounded and keyed by (wrap S/T, filter, mipmap).
 
 **History and feedback.** `OriginalHistory#` rings, `PREV`/`PASSPREV` taps and per-pass feedback are double-buffered image sets rotated with the exact slot ordering the fork's F5 fix pinned — the ported `test_history_ring` / field presets (`feedback.slangp`, `feedback-noncausal.slangp`, `history.slangp`) are the gate.
 
-**Memory and sync.** VMA-backed allocation with per-chain pools and a `trim()` hook for host memory pressure. Explicit stage-masked barriers between passes; acquire/present semaphores for swapchain mode; timeline semaphores reserved for a future async-upload path.
+**Memory and sync.** VMA-backed allocation with per-chain pools; explicit
+stage-masked barriers between passes; acquire/present semaphores for
+swapchain mode; timeline semaphores reserved for a future async-upload
+path. The `trim()` hook once sketched here is a recorded post-1.0 lever
+(§13; PROVENANCE divergence #6) — v1 caches are per-`Chain` and freed
+wholesale, so there is nothing incremental to trim.
 
 **Output modes.** (a) Final pass renders into a host-provided swapchain image view, with the lib handling letterbox rect, orientation flip, and final resolve — this is DevilutionX's mode, matching its existing presentation ownership. (b) Offscreen export for hosts that composite themselves, and for CI.
 
@@ -177,15 +199,17 @@ interface preserved, host context adopted, dual-path with the SDL_GPU
 runner until corpus parity (§12 risk 5). The spike closes when the lib path
 passes the hardware field sweep on Windows + Linux (§11 M4); library-side
 M0–M4 gates it consumes are green (PROVENANCE.md verification record).
-Hardware sessions (RX 560 / Windows) are logged in PROVENANCE.md's
-**hardware field log**: three sessions / four host runs — 23 preset loads
-over 20 unique presets, 9,093 frames — including 26- and 25-pass chains,
-the hqx/ScaleFX/ScaleHQ/FSR scale-rule families, and two in-game
-level-load transitions survived with no Reinit — zero skipped frames and
-no fallbacks throughout. Open: heavy-suite steady-state perf
-(crt-maximus-royale ~19 fps post-load window; 4.05 s synchronous load),
-history/feedback/format/mipmap coverage targets, and the Linux half of
-the sweep.
+Hardware sessions (first Windows RX 560, then a Linux llvmpipe run) are
+logged in PROVENANCE.md's **hardware field log**: four sessions / five
+host runs across two OSes — 24 preset loads over 20 unique presets,
+9,093 frames counted — including 26- and 25-pass chains, the
+hqx/ScaleFX/ScaleHQ/FSR scale-rule families, two in-game level-load
+transitions survived with no Reinit, and (session 4, Linux) the
+fit-and-center letterbox present path on mismatched game/swapchain sizes
+— zero skipped frames and no fallbacks throughout. Open: heavy-suite
+steady-state perf (crt-maximus-royale ~19 fps post-load window; 4.05 s
+synchronous load), a real-GPU (dGPU) Linux run, history/feedback/format/
+mipmap coverage targets, and the VRAM soak.
 
 Two integration consequences are worth stating openly. First, **dual-path period**: the fork will run both its SDL_GPU runner (Metal, and as a safety net) and the libslang-vk runner (Vulkan) behind the same scaler interface until the lib reaches corpus parity — whether the SDL_GPU runner is then retired is an open question (§13). Second, **upstream merge leverage**: `docs/merge-plan-draft-r2.md` gates its PR series on shader-stack findings; once the preset layer and runner live in an MIT library, the mod's mergeable surface shrinks to a thin adapter, which is exactly the shape upstream review tolerates best.
 
@@ -194,9 +218,9 @@ One honest caveat on the "static + dylib" decision: the API uses C++23 vocabular
 ## 10. Testing and Conformance Strategy
 
 - **Unit (core, no GPU):** ported from `tools/audit/` — parser order-independence (P1 regression), include-cycle handling (`r4_cycle_*`), history ring depth and direction (F5), uniform name mapping, viewport derivation, mipmap planning, rotation/format handling, plus the round-1..4 field tests.
-- **Compile sweep:** a CI job loads and compiles all 2,658 corpus presets headlessly (lavapipe, `noLutImages` mode) and emits a coverage CSV — the same ledger format the fork's campaign already produces. Policy: any preset that loaded in the previous release must not regress without an audit-documented reason.
+- **Compile sweep:** the nightly `corpus` workflow (`.github/workflows/corpus.yml`, 2026-10-18) shallow-clones `libretro/slang-shaders`, loads and compiles every preset headlessly (lavapipe, `noLutImages` mode) and uploads the ledger artifact — the same ledger format the fork's campaign already produces. Policy: any preset that loaded in the previous release must not regress without an audit-documented reason (the `--fail-on-broken` gate flips on once the first baseline ledger is pinned).
 - **Golden images:** selected presets (crt-royale, a Mega Bezel variant, xBR, ScaleFX, the interlacing/history suites) rendered offscreen and perceptual-hash-compared with bounded tolerance, catching the "renders but wrong" class the static audit proved is the dangerous one.
-- **Sanitizers and validation:** ASan/UBSan on the unit suite; Vulkan validation layers (incl. synchronization validation) enabled in every headless run.
+- **Sanitizers and validation:** ASan/UBSan on the unit suite; Vulkan validation layers enabled in every headless run, **with synchronization validation** (instance-level `VkValidationFeaturesEXT`, enabled 2026-10-18 whenever `VK_LAYER_KHRONOS_validation` is on — miss-list #2).
 - **Field loop:** the fork remains the hardware testbed — its crash-logger, heartbeat, and load-phase diagnostics carry over to the adapter, and preset failures found on real machines flow back as corpus cases.
 
 ## 11. Milestones
@@ -235,7 +259,7 @@ PROVENANCE.md's per-milestone sections are authoritative.
 |---|---|---|---|---|
 | 1 | GPL contamination accusation (RetroArch semantics learned "too well") | M | H | Clean-room policy (§4), `scan_codefindings.py` as CI gate, `PROVENANCE.md` ledger, spec-and-black-box references only |
 | 2 | Vulkan-only excludes macOS users of the mod | H | M | SDL_GPU/Metal path retained in fork; MoltenVK as optional tier; revisit post-1.0 |
-| 3 | glslang static size (~10–15 MB) bloats hosts | M | M | LTO + `-Oz` release builds; optional `SLANGVK_SYSTEM_GLSLANG`; document size honestly |
+| 3 | glslang static size (~10–15 MB) bloats hosts | M | M | Levers implemented as build options (2026-10-18, miss-list #13): `SLANGVK_LTO` (IPO + `-Oz` release codegen) and `SLANGVK_SYSTEM_GLSLANG` (link the host's glslang instead of the pinned FetchContent copy); artifact sizes documented in ARTIFACTS.txt/README |
 | 4 | RetroArch semantic divergence discovered late (e.g., sRGB, rotation edge cases) | M | M | `SPEC.md` status matrix is normative; divergence items pinned by tests in M2, corpus sweep in M3 catches the rest |
 | 5 | Drift between fork's SDL_GPU runner and lib runner during dual-path period | M | M | Time-box the period; corpus ledger is shared; M4 A/B sweep is the convergence gate |
 | 6 | Cold-start cost of no-disk-cache choice on huge presets (crt-royale suites) | M | L | Measure in M3; in-`Preset` memoization covers repeated selections in one session; disk cache is the documented post-1.0 lever |
@@ -249,6 +273,7 @@ PROVENANCE.md's per-milestone sections are authoritative.
 4. **MoltenVK tier** — best-effort CI or fully unsupported with a docs disclaimer?
 5. **Reflection surface** — expose per-pass uniform/texture introspection for hosts building debug OSDs, or keep v1 minimal?
 6. **Extraction mechanics** — clean-room retype into the new repo vs. mechanical move with per-file relicense headers; decision affects `PROVENANCE.md` granularity.
+7. **Deferred perf/memory levers (recorded 2026-10-18)** — sync2 barriers + dynamic rendering (PROVENANCE divergence #5), the `Chain::trim()` memory hook (divergence #6), async upload via timeline semaphores, and the disk SPIR-V cache (#3 above): all deliberately out of v1. Revisit as a post-1.0 perf round with the corpus ledger + perf budgets in hand.
 
 ## 14. References
 

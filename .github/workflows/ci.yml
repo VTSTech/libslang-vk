@@ -17,16 +17,25 @@
 #   builds static + shared and gates on the same suite.
 #
 #   linux           Release+Debug matrix, full ctest on lavapipe + Khronos
-#                   validation layer; Release also uploads libslangvk.a/.so
-#                   + headers (commit-pinned ARTIFACTS.txt)
+#                   validation layer (incl. synchronization validation, plan
+#                   §10); Release also uploads libslangvk.a/.so + headers
+#                   (commit-pinned ARTIFACTS.txt)
 #   linux-asan      address+undefined sanitized test build (examples off)
 #   windows-mingw   MSYS2 MinGW-w64; uploads libslangvk.dll, libslangvk.dll.a
 #                   (import) and libslangvk.a (static) + headers. The Vulkan
 #                   runner tests skip cleanly with no ICD (documented in
 #                   tests/CMakeLists.txt); every other test runs.
+#   provenance      tools/scan_codefindings.py — the plan §4 clean-room gate
+#                   (RetroArch fingerprint scan before every release; cheap
+#                   enough to run on every push)
 #
-# Still open (plan §11 M3): the full-corpus compile-sweep ledger needs a
-# slang-shaders checkout and intentionally does not run here.
+#   windows sanitized build: out of scope for v1 (maintainer decision
+#   2026-10-18) — MinGW-w64 ASan support is experimental and the Linux
+#   asan+ubsan job covers the whole suite; revisit only if a Windows-only
+#   memory bug appears.
+#
+# The full-corpus compile-sweep ledger lives in corpus.yml (nightly, needs a
+# slang-shaders checkout — too heavy for every push).
 
 name: ci
 
@@ -199,3 +208,15 @@ jobs:
           name: libslangvk-windows-x64-mingw
           path: libslangvk-win64-mingw.zip
           if-no-files-found: error
+
+  provenance:
+    name: provenance (clean-room gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for RetroArch code fingerprints
+        # Plan §4 / risk 1: the release gate must pass before any tag; it runs
+        # here on every push so a violation surfaces immediately, not at tag
+        # time. exit 1 = finding(s); inline `provenance-ok:` waivers allowed.
+        run: python3 tools/scan_codefindings.py --root .

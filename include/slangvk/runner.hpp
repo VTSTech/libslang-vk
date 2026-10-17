@@ -68,7 +68,7 @@ enum class Rotation : uint32_t { None = 0, Cw90 = 1, Cw180 = 2, Cw270 = 3 };
 struct DeviceOptions {
         std::string_view appName;
         uint32_t minApiVersion = VK_API_VERSION_1_1; ///< API version the device must support.
-        bool validationLayers = false;               ///< Enable VK_LAYER_KHRONOS_validation when present.
+        bool validationLayers = false;               ///< Enable VK_LAYER_KHRONOS_validation (incl. synchronization validation) when present.
         /**
          * @brief Extra instance extensions requested verbatim (M4: e.g.
          * VK_KHR_surface + a platform-surface extension for swapchain use).

@@ -224,6 +224,34 @@ int main()
                 }
         }
 
+        // --- max_fbo_width/height clamp (miss list #3): the pass FBO is
+        // capped and downstream Source-scale resolves against the clamped
+        // size ---------------------------------------------------------------
+        {
+                auto preset = slv::Preset::load(*device, dataDir + "/runner/maxfbo.slangp");
+                Check(preset.has_value(), "maxfbo preset loads");
+                if (preset) {
+                        Check(preset->passCount() == 2, "maxfbo preset has two passes");
+                        slv::ChainOptions chainOptions;
+                        chainOptions.outputWidth = kWidth;
+                        chainOptions.outputHeight = kHeight;
+                        auto chain = slv::Chain::create(*device, *preset, chainOptions);
+                        Check(chain.has_value(), "maxfbo chain creates");
+                        if (chain) {
+                                const auto rendered = chain->render(makeInput(), makeOutput(), slv::FrameInfo{});
+                                Check(rendered.has_value(), "maxfbo chain renders headless");
+                                if (rendered) {
+                                        const auto size0 = chain->passOutputSize(0);
+                                        const auto size1 = chain->passOutputSize(1);
+                                        Check(size0.has_value() && size0->first == 16 && size0->second == 16,
+                                            "max_fbo clamps the 64x64 pass-0 FBO to 16x16");
+                                        Check(size1.has_value() && size1->first == 32 && size1->second == 32,
+                                            "downstream source-scale resolves against the clamped FBO (32x32)");
+                                }
+                        }
+                }
+        }
+
         // --- Validation layers: any ERROR severity fails the run --------------
         const std::vector<std::string> validationErrors = device->validationErrors();
         if (!validationErrors.empty()) {

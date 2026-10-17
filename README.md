@@ -211,6 +211,10 @@ alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
 `SLANGVK_BUILD_EXAMPLES` (default `ON`, builds the `preset_info` demo),
 `SLANGVK_ENABLE_VK` (default `ON`, builds the Vulkan runner; `OFF` gives a
 core-only build), `SLANGVK_SANITIZE=address,undefined` (test builds).
+Size levers (opt-in, off by default): `SLANGVK_LTO` enables IPO + `-Oz`
+release codegen for the glslang-bearing library, and
+`SLANGVK_SYSTEM_GLSLANG=ON` links a system-installed glslang via
+`find_package(glslang CONFIG)` instead of the pinned FetchContent copy.
 glslang, Vulkan-Headers, volk and VMA are fetched and built automatically
 (SHA-256 pinned; see [PROVENANCE.md](PROVENANCE.md)).
 
@@ -230,10 +234,19 @@ same-toolchain-ABI API (`include/slangvk/export.h`):
   the Khronos validation layer installed.
 
 A sanitized (address + undefined) Linux test build runs alongside the
-Release jobs. The Vulkan runner tests execute against lavapipe on Linux;
-on Windows they skip cleanly when no ICD is present and everything else
-still runs. The full-corpus compile-sweep ledger (plan §11 M3) intentionally
-stays out of CI — it needs a slang-shaders checkout.
+Release jobs — with synchronization validation enabled whenever the
+Khronos layer is present. A `provenance` job runs
+[`tools/scan_codefindings.py`](tools/scan_codefindings.py) (the plan §4
+clean-room gate: RetroArch fingerprint scan) on every push. The Vulkan
+runner tests execute against lavapipe on Linux; on Windows they skip
+cleanly when no ICD is present and everything else still runs.
+
+The full-corpus compile-sweep ledger runs separately:
+[`.github/workflows/corpus.yml`](.github/workflows/corpus.yml) shallow-
+clones `libretro/slang-shaders` nightly (or via workflow_dispatch), loads
+and compiles every preset headlessly on lavapipe, and uploads the ledger
+artifact — bootstrap mode until the first baseline ledger is pinned,
+then the documented no-regression gate (plan §10) flips on.
 
 ## License
 

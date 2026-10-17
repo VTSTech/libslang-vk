@@ -10,27 +10,35 @@ include(FetchContent)
 
 # glslang — Khronos reference GLSL frontend; compiles translated .slang to
 # SPIR-V in-process (the same frontend RetroArch uses for its slang pipeline).
-# Same pinned version as the reference host for behavioral parity.
+# Default: pinned FetchContent copy (same version as the reference host for
+# behavioral parity). Risk-3 lever: SLANGVK_SYSTEM_GLSLANG=ON links a
+# system-installed glslang via find_package(CONFIG) instead, dropping the
+# vendored static build from the host binary.
 # Link targets: glslang::glslang, glslang::SPIRV,
 # glslang::glslang-default-resource-limits (GetDefaultResources()).
-set(BUILD_EXTERNAL OFF)
-set(BUILD_WERROR OFF)
-set(GLSLANG_TESTS OFF)
-set(GLSLANG_ENABLE_INSTALL OFF)
-set(ENABLE_SPIRV ON)
-set(ENABLE_GLSLANG_BINARIES OFF)
-set(ENABLE_GLSLANG_JS OFF)
-set(ENABLE_HLSL ON)
-set(ENABLE_OPT OFF) # skips the SPIRV-Tools submodule dependency
-set(ENABLE_SPVREMAPPER OFF)
-set(ENABLE_PCH ON)
-set(BUILD_SHARED_LIBS OFF)
+if(NOT SLANGVK_SYSTEM_GLSLANG)
+        set(BUILD_EXTERNAL OFF)
+        set(BUILD_WERROR OFF)
+        set(GLSLANG_TESTS OFF)
+        set(GLSLANG_ENABLE_INSTALL OFF)
+        set(ENABLE_SPIRV ON)
+        set(ENABLE_GLSLANG_BINARIES OFF)
+        set(ENABLE_GLSLANG_JS OFF)
+        set(ENABLE_HLSL ON)
+        set(ENABLE_OPT OFF) # skips the SPIRV-Tools submodule dependency
+        set(ENABLE_SPVREMAPPER OFF)
+        set(ENABLE_PCH ON)
+        set(BUILD_SHARED_LIBS OFF)
 
-FetchContent_Declare(glslang
-  URL https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz
-  URL_HASH SHA256=9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2
-)
-FetchContent_MakeAvailable(glslang)
+        FetchContent_Declare(glslang
+          URL https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz
+          URL_HASH SHA256=9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2
+        )
+        FetchContent_MakeAvailable(glslang)
+else()
+        find_package(glslang CONFIG REQUIRED)
+        message(STATUS "libslang-vk: using system glslang (${glslang_VERSION})")
+endif()
 
 # Vulkan-Headers — raw Vulkan API definitions (no loader). The runner talks
 # to Vulkan through volk (below), which loads the system loader at runtime;

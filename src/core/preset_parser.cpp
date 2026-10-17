@@ -405,11 +405,17 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
                         preset.feedbackPass = parentPreset.feedbackPass;
                 if (preset.histories <= 1 && parentPreset.histories > preset.histories)
                         preset.histories = parentPreset.histories;
+                if (preset.maxFboWidth == 0 && parentPreset.maxFboWidth > 0)
+                        preset.maxFboWidth = parentPreset.maxFboWidth;
+                if (preset.maxFboHeight == 0 && parentPreset.maxFboHeight > 0)
+                        preset.maxFboHeight = parentPreset.maxFboHeight;
         }
 
         // Pass 2: apply keys.
         int feedbackPass = preset.feedbackPass;
         int histories = preset.histories;
+        int maxFboWidth = static_cast<int>(preset.maxFboWidth);
+        int maxFboHeight = static_cast<int>(preset.maxFboHeight);
         std::string texturesList;
         std::string parametersList;
 
@@ -467,6 +473,18 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
                 }
                 if (key == "histories") {
                         histories = std::clamp(ParseInt(value, 1), 1, 8);
+                        continue;
+                }
+                if (key == "max_fbo_width" || key == "max_fbo_height") {
+                        // FBO clamps (0 = no clamp). Parsed clamped to the same
+                        // 0..16384 range the runner accepts for FBO dimensions,
+                        // so a hostile value cannot drive an oversized allocation
+                        // through the clamp itself.
+                        const int clamped = std::clamp(ParseInt(value, 0), 0, 16384);
+                        if (key == "max_fbo_width")
+                                maxFboWidth = clamped;
+                        else
+                                maxFboHeight = clamped;
                         continue;
                 }
                 if (key == "textures" || key == "parameters")
@@ -640,6 +658,8 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
         }
         preset.feedbackPass = feedbackPass;
         preset.histories = histories;
+        preset.maxFboWidth = static_cast<uint32_t>(std::max(0, maxFboWidth));
+        preset.maxFboHeight = static_cast<uint32_t>(std::max(0, maxFboHeight));
 
         // Materialize declared texture names and validate that every texture
         // carries a path.

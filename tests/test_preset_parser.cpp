@@ -214,6 +214,86 @@ int main()
                 std::filesystem::remove_all(root);
         }
 
+        // --- `histories` key (miss list #4): parse + clamp pinned; the ring
+        // itself derives depth from the max referenced OriginalHistoryN (SPEC
+        // key table: the key is informational, extra declared slots are not
+        // allocated) ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_histories");
+                SetShaderRootDir(root.string());
+                WriteText(root / "p.slang", "#pragma name p\n");
+                struct Case {
+                        const char *value;
+                        int want;
+                        const char *label;
+                };
+                const Case cases[] = {
+                        { "4", 4, "histories parses" },
+                        { "0", 1, "histories clamps low to 1" },
+                        { "99", 8, "histories clamps high to 8" },
+                        { "-3", 1, "histories negative clamps to 1" },
+                        { "\"2\"", 2, "histories quoted value parses" },
+                };
+                for (const Case &c : cases) {
+                        WriteText(root / "h.slangp", std::string("shader0=\"p.slang\"\n") + "histories = " + c.value + "\n");
+                        Preset preset;
+                        std::string error;
+                        if (ParsePreset((root / "h.slangp").string(), preset, error))
+                                Check(preset.histories == c.want, std::string(c.label));
+                        else
+                                Check(false, std::string(c.label) + " (parse failed: " + error + ")");
+                }
+                // #reference adoption: a child that keeps the default 1 picks up
+                // the parent's depth; an explicit child value wins.
+                WriteText(root / "base.slangp", "shader0=\"p.slang\"\nhistories = \"3\"\n");
+                WriteText(root / "child_default.slangp", "#reference \"base.slangp\"\nshader0=\"p.slang\"\n");
+                WriteText(root / "child_explicit.slangp",
+                    "#reference \"base.slangp\"\nshader0=\"p.slang\"\nhistories = \"5\"\n");
+                Preset preset;
+                std::string error;
+                Check(ParsePreset((root / "child_default.slangp").string(), preset, error)
+                        && preset.histories == 3,
+                    "#reference: child default adopts parent histories");
+                Check(ParsePreset((root / "child_explicit.slangp").string(), preset, error)
+                        && preset.histories == 5,
+                    "#reference: explicit child histories wins");
+                std::filesystem::remove_all(root);
+        }
+
+        // --- `max_fbo_width` / `max_fbo_height` keys (miss list #3): parse,
+        // clamp, and #reference adoption. The runner-side clamp is exercised
+        // by the runner_headless max_fbo case. ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_maxfbo");
+                SetShaderRootDir(root.string());
+                WriteText(root / "p.slang", "#pragma name p\n");
+                WriteText(root / "clamped.slangp",
+                    "shader0=\"p.slang\"\n"
+                    "max_fbo_width=\"64\"\n"
+                    "max_fbo_height=\"48\"\n");
+                Preset preset;
+                std::string error;
+                Check(ParsePreset((root / "clamped.slangp").string(), preset, error), "max_fbo preset parses");
+                Check(preset.maxFboWidth == 64 && preset.maxFboHeight == 48, "max_fbo keys parse into clamps");
+                WriteText(root / "unset.slangp", "shader0=\"p.slang\"\n");
+                Check(ParsePreset((root / "unset.slangp").string(), preset, error)
+                        && preset.maxFboWidth == 0 && preset.maxFboHeight == 0,
+                    "max_fbo default (unset) is 0/0 (no clamp)");
+                WriteText(root / "hostile.slangp",
+                    "shader0=\"p.slang\"\nmax_fbo_width=\"99999999\"\nmax_fbo_height=\"-5\"\n");
+                Check(ParsePreset((root / "hostile.slangp").string(), preset, error)
+                        && preset.maxFboWidth == 16384 && preset.maxFboHeight == 0,
+                    "max_fbo hostile values clamp to 16384 / 0");
+                // #reference: child without keys adopts the parent's clamps.
+                WriteText(root / "base.slangp",
+                    "shader0=\"p.slang\"\nmax_fbo_width=\"128\"\nmax_fbo_height=\"96\"\n");
+                WriteText(root / "child.slangp", "#reference \"base.slangp\"\nshader0=\"p.slang\"\n");
+                Check(ParsePreset((root / "child.slangp").string(), preset, error)
+                        && preset.maxFboWidth == 128 && preset.maxFboHeight == 96,
+                    "#reference: child adopts parent max_fbo clamps");
+                std::filesystem::remove_all(root);
+        }
+
         std::printf("\n%s (%d failures)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures);
         return failures == 0 ? 0 : 1;
 }

@@ -77,10 +77,16 @@ parameter resolution order (preset override → pragma default → zero).
    uv = position and an MVP mapping (x,y) → NDC (2x−1, 2y−1); Vulkan NDC
    (−1,−1) is top-left, matching uv (0,0), so no mirror exists anywhere in
    the chain and the flip-cancel dance is unnecessary.
-2. **Classic synchronization for the 1.1 floor.** M1 uses core-1.0
+2. **Classic synchronization for the 1.1 floor.** M1 used core-1.0
    `vkCmdPipelineBarrier` + classic render passes (plan §8's "classic
-   fallback" path); the sync2/dynamic-rendering fast path lands with M2's
-   capability detection.
+   fallback" path). The M1 note promising the sync2/dynamic-rendering fast
+   path "with M2's capability detection" was NOT fulfilled — M2–M4 shipped
+   classic-only everywhere. Promoted to a formal v1 divergence 2026-10-18
+   (miss-list #1): classic path is the verified conformance vehicle
+   (byte-exact goldens, live validation gate, 9,093 hardware frames);
+   sync2 barriers + dynamic rendering are recorded as post-1.0 perf levers
+   (plan §13), not a pending milestone item. Stale "M2 introduces"
+   comments fixed (`chain.cpp`, `images.cpp`).
 3. **Case-insensitive parameter/size matching.** The parser lowercases
    `.slangp` keys (RetroArch behavior); the translator's UBO-member whitelist
    already matched case-insensitively, so the runner's UBO fill, parameter
@@ -312,6 +318,17 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
    (vertex UBOs set 1, fragment textures set 2, fragment UBOs set 3, push
    block re-homed as std140 UBO) is kept byte-compatible so the reference
    host can adopt the library without a shader-pack migration.
+5. **No sync2 / dynamic-rendering fast path (vulkan runner).** Classic
+   render passes + core-1.0 barriers everywhere (M1 divergence #2, promoted
+   2026-10-18). Deferred as post-1.0 perf levers (plan §13); no capability
+   gating exists in v1 — the Vulkan 1.1 floor is the only requirement.
+6. **No `trim()` memory hook.** Plan §8's "`trim()` hook for host memory
+   pressure" is not implemented: every cache (samplers, render passes,
+   framebuffers, pipelines) is per-`Chain` and freed wholesale in the
+   destructor, so there is no incremental memory to trim in v1. A `trim()`
+   surface (e.g. VMA defragmentation + stale-framebuffer sweep after
+   resize storms) is a post-1.0 lever (plan §13) — added there 2026-10-18
+   instead of shipping an untestable hook.
 
 ## Verification record
 
@@ -426,12 +443,15 @@ set; `ARTIFACTS.txt` manifest matches the run.
 ### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
 
 Verbatim-log summaries from the fork's field loop — the hardware half of
-the M4 exit above. Host: Windows, Radeon RX 560 Series, vsync on,
-game + swapchain 1920x1080 (equal-size direct present path). The adapter
+the M4 exit above. Hosts: Windows (Radeon RX 560 Series, vsync on,
+game + swapchain 1920x1080, equal-size direct present path) for sessions
+1–3; Linux (llvmpipe, LLVM 21.1.8 — Mesa software rasterizer, the CI
+conformance vehicle's hardware-side cousin) for session 4. The adapter
 build advances between sessions (`338827ff4` Oct 17 18:21:36 →
-`ff3999a6f` Oct 17 18:57:45); builds are recorded per session. "0 skipped"
-in every heartbeat of every session so far; no `(Unavailable)` fallback,
-no validation output, clean shutdowns throughout.
+`ff3999a6f` Oct 17 18:57:45 → `a98c6d5` Oct 17 20:16:39); builds are
+recorded per session. "0 skipped" in every heartbeat of every session so
+far; no `(Unavailable)` fallback, no validation output, clean shutdowns
+throughout.
 
 **Session 1 — preset hot-swap matrix (7 presets, build `338827ff4`).** anamorphic (1 pass),
 fxaa (1), fxaa+linear (2), smaa (4 — libretro preset declaring LUT
@@ -473,15 +493,39 @@ level loads (ShowProgress transitions; the frame dips there are the game's
 own loading screens) with no Reinit and no fallback; 4,699 frames, clean
 shutdown.
 
-**Still open in the sweep:** Linux session; feedback double-buffering
+**Session 4 — first Linux host run (build `a98c6d5`, exe
+1.6.0-dev-Release-a98c6d5, Oct 17 20:16:39).** Host: Linux, Vulkan device
+**llvmpipe (LLVM 21.1.8, 256 bits)** — Mesa's software rasterizer
+(lavapipe-class): the conformance environment's hardware-side cousin, not
+a dGPU. vsync=0. `fxaa+linear` (2 passes; already covered on Windows in
+session 1) cold-loaded in **812 ms** on the software device; first
+present ~943 ms in with game=1366x768 vs swapchain=1299x736 —
+**mismatched sizes, so the fit-and-center letterbox present path
+(plan §8 output (a), M4) ran on a second OS and a second device class**
+(all Windows sessions were equal-size direct presents). Clean shutdown
+~6 s in; no Reinit, no fallback, no validation output. The frame counter
+did not report in this short session. A real-GPU (dGPU) Linux run remains
+open against the M4 exit's "hardware field sweep on Windows + Linux"
+wording — see the still-open list.
+
+**Still open in the sweep:** a real-GPU (dGPU) Linux run (session 4 was
+llvmpipe, software); feedback double-buffering
 readers (named `<name>Feedback` / numeric `PassFeedback#` forms),
 `mipmap_input` chains, live parameter updates, resize/fullscreen-toggle
 FBO + swapchain recreation, and a long preset-swap soak for
 chain-teardown VRAM stability. Field-verified with no regressions:
-integer-scaling on/off (explicit `outputRect` path) and vsync on/off.
+integer-scaling on/off (explicit `outputRect` path) and vsync on/off
+(Windows) / vsync off (Linux).
 Corpus note: the `histories` key and `max_fbo_*` clamps have **zero**
-users across all 2,658 presets — lib-tested paths, not field paths.
+users across all 2,658 presets — lib-only paths. Both were lib-side
+implemented + tested 2026-10-18 (miss-list round): `max_fbo_*` clamps
+FBO sizes in the runner (`maxfbo.slangp` runner case + parser pins);
+`histories` stays informational (ring depth derives from max referenced
+tap) with parse/clamp/merge pinned in `test_preset_parser`.
 
-**Cumulative after 3 sessions (4 host runs):** 23 preset loads over 20
-unique presets — max 26 passes — 9,093 frames, zero skipped, zero
-fallbacks, zero validation output, clean shutdowns.
+**Cumulative after 4 sessions (5 host runs, 2 OSes):** 24 preset loads over
+20 unique presets — max 26 passes — 9,093 frames counted (session 4's
+short run uncounted), zero skipped, zero fallbacks, zero validation
+output, clean shutdowns. Device coverage: RX 560 (dGPU) + llvmpipe
+(software rasterizer); present-path coverage: direct equal-size +
+letterbox fit-and-center; vsync on/off both field-verified.
