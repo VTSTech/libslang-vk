@@ -368,8 +368,16 @@ struct Chain::Impl {
                 bool nextPassReadsMips = false; // The NEXT pass reads this output with mipmap_input (F1).
                 uint32_t mipLevels = 1;        // Resolved at allocation time from nextPassReadsMips.
                 std::array<PassTarget, 2> targets;
-                Ubo vertexUbo;
-                Ubo fragmentUbo;
+                // One UBO per possible block binding (0 = plain UBO, 1 = the
+                // push-constant block re-homed beside it). Stock libretro
+                // shaders declare a global MVP UBO AND a push-constant block;
+                // the translator re-homes both into the same set at bindings
+                // 0 and 1, and any stage that READS the push block needs its
+                // descriptor present or drivers reject the pipeline at create
+                // time (AMD surfaces this as VK_ERROR_INVALID_SHADER_NV while
+                // lavapipe does not validate the interface).
+                std::array<Ubo, 2> vertexUbo {};
+                std::array<Ubo, 2> fragmentUbo {};
                 VkDescriptorSet set1 = VK_NULL_HANDLE;
                 VkDescriptorSet set2 = VK_NULL_HANDLE;
                 VkDescriptorSet set3 = VK_NULL_HANDLE;
@@ -469,8 +477,10 @@ struct Chain::Impl {
                                 vkDestroyShaderModule(dev, pass.fragmentModule, nullptr);
                         for (PassTarget &t : pass.targets)
                                 DestroyPassTarget(t);
-                        DestroyUbo(pass.vertexUbo);
-                        DestroyUbo(pass.fragmentUbo);
+                        for (Ubo &ubo : pass.vertexUbo)
+                                DestroyUbo(ubo);
+                        for (Ubo &ubo : pass.fragmentUbo)
+                                DestroyUbo(ubo);
                 }
                 DestroyHistory();
                 DestroySourceMipCopy();
@@ -1395,30 +1405,38 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         const size_t passCount = presetPasses.size();
 
         // Layouts: set0 empty placeholder, set1 vertex UBO, set2 textures, set3 params UBO.
+        // Sets 1 and 3 carry TWO bindings: the translator re-homes the plain
+        // UBO at binding 0 and the push-constant block at binding 1 of the
+        // same set whenever a stage declares both (the stock libretro shader
+        // shape). Declaring both up front keeps the pipeline layout in sync
+        // with the translated SPIR-V on strict drivers.
         VkDescriptorSetLayoutCreateInfo emptyInfo{};
         emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         SLV_VK(vkCreateDescriptorSetLayout(device.device(), &emptyInfo, nullptr, &impl.emptyLayout), Errc::vk_error);
 
-        VkDescriptorSetLayoutBinding set1Binding = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT,
-            nullptr};
+        const std::array<VkDescriptorSetLayoutBinding, 2> set1Bindings = {
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
         VkDescriptorSetLayoutCreateInfo set1Info{};
         set1Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        set1Info.bindingCount = 1;
-        set1Info.pBindings = &set1Binding;
+        set1Info.bindingCount = static_cast<uint32_t>(set1Bindings.size());
+        set1Info.pBindings = set1Bindings.data();
         SLV_VK(vkCreateDescriptorSetLayout(device.device(), &set1Info, nullptr, &impl.set1Layout), Errc::vk_error);
 
-        VkDescriptorSetLayoutBinding set3Binding = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-            VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        const std::array<VkDescriptorSetLayoutBinding, 2> set3Bindings = {
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
         VkDescriptorSetLayoutCreateInfo set3Info{};
         set3Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        set3Info.bindingCount = 1;
-        set3Info.pBindings = &set3Binding;
+        set3Info.bindingCount = static_cast<uint32_t>(set3Bindings.size());
+        set3Info.pBindings = set3Bindings.data();
         SLV_VK(vkCreateDescriptorSetLayout(device.device(), &set3Info, nullptr, &impl.set3Layout), Errc::vk_error);
 
         // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts,
         // plus the M4 present set.
         VkDescriptorPoolSize poolSizes[2]{};
-        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(2 * passCount)};
+        // Up to two UBOs per stage per pass (plain UBO + re-homed push block).
+        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(4 * passCount)};
         uint32_t samplerCount = 0;
         for (const SlangTranslation &translation : presetTranslations)
                 samplerCount += static_cast<uint32_t>(translation.fragment.textures.size());
@@ -1528,42 +1546,49 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 if (pass.set1 == VK_NULL_HANDLE || pass.set2 == VK_NULL_HANDLE || pass.set3 == VK_NULL_HANDLE)
                         return std::unexpected(SLV_ERROR(Errc::vk_error, "descriptor set allocation failed"));
 
-                // UBOs sized by the reflected blocks; UBO descriptors written once.
+                // UBOs sized by the reflected blocks; one buffer + descriptor
+                // per block, written once at the block's own binding (0 =
+                // plain UBO, 1 = the re-homed push-constant block).
+                const auto makeStageUbos = [&](bool isVertex) -> std::expected<void, Error> {
+                        const auto &blocks = isVertex ? pass.translation.vertex.uniformBlocks
+                                                      : pass.translation.fragment.uniformBlocks;
+                        const char *stageName = isVertex ? "vertex" : "fragment";
+                        if (blocks.size() > 2)
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    std::string(stageName) + " stage declares more than two uniform blocks"));
+                        for (const UniformBlock &block : blocks) {
+                                if (block.binding >= 2)
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            std::string(stageName) + " uniform block binding out of range: "
+                                                + block.instanceName));
+                                uint32_t bytes = 16;
+                                for (const UniformMember &member : block.members)
+                                        bytes = std::max(bytes, member.offset + member.size);
+                                auto &ubo = isVertex ? pass.vertexUbo[block.binding] : pass.fragmentUbo[block.binding];
+                                auto made = impl.MakeUbo(bytes, ubo);
+                                if (!made)
+                                        return std::unexpected(made.error());
+                                VkDescriptorBufferInfo bufferInfo{ubo.buffer, 0, VK_WHOLE_SIZE};
+                                VkWriteDescriptorSet write{};
+                                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                write.dstSet = isVertex ? pass.set1 : pass.set3;
+                                write.dstBinding = block.binding;
+                                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                                write.descriptorCount = 1;
+                                write.pBufferInfo = &bufferInfo;
+                                vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+                        }
+                        return {};
+                };
                 if (hasVertexUbo) {
-                        const UniformBlock &block = pass.translation.vertex.uniformBlocks[0];
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = impl.MakeUbo(bytes, pass.vertexUbo);
+                        auto made = makeStageUbos(true);
                         if (!made)
                                 return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.vertexUbo.buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set1;
-                        write.dstBinding = 0;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
                 }
                 if (hasFragmentUbo) {
-                        const UniformBlock &block = pass.translation.fragment.uniformBlocks[0];
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = impl.MakeUbo(bytes, pass.fragmentUbo);
+                        auto made = makeStageUbos(false);
                         if (!made)
                                 return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.fragmentUbo.buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set3;
-                        write.dstBinding = 0;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
                 }
         }
 
@@ -1930,24 +1955,31 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 ctx.aliasSizes = &aliasSizes;
                 ctx.lutSizes = &lutSizes;
 
-                if (!pass.translation.vertex.uniformBlocks.empty()) {
-                        ctx.vertexStage = true;
-                        const std::vector<uint8_t> bytes = vk::FillBlockBytes(
-                            pass.translation.vertex.uniformBlocks[0], pass.def, pass.translation, effectiveOverrides, ctx);
-                        if (bytes.size() > static_cast<size_t>(pass.vertexUbo.size))
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "vertex UBO overflow"));
-                        if (pass.vertexUbo.mapped != nullptr)
-                                std::memcpy(pass.vertexUbo.mapped, bytes.data(), bytes.size());
-                }
-                if (!pass.translation.fragment.uniformBlocks.empty()) {
-                        ctx.vertexStage = false;
-                        const std::vector<uint8_t> bytes = vk::FillBlockBytes(
-                            pass.translation.fragment.uniformBlocks[0], pass.def, pass.translation, effectiveOverrides, ctx);
-                        if (bytes.size() > static_cast<size_t>(pass.fragmentUbo.size))
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "fragment UBO overflow"));
-                        if (pass.fragmentUbo.mapped != nullptr)
-                                std::memcpy(pass.fragmentUbo.mapped, bytes.data(), bytes.size());
-                }
+                // Fill every declared block (binding 0 plain UBO and binding 1
+                // re-homed push block); both get real values even when the
+                // stage only reads one.
+                const auto fillStageUbos = [&](bool isVertex) -> std::expected<void, Error> {
+                        const auto &blocks = isVertex ? pass.translation.vertex.uniformBlocks
+                                                      : pass.translation.fragment.uniformBlocks;
+                        if (blocks.empty())
+                                return {};
+                        ctx.vertexStage = isVertex;
+                        for (const UniformBlock &block : blocks) {
+                                const std::vector<uint8_t> bytes = vk::FillBlockBytes(
+                                    block, pass.def, pass.translation, effectiveOverrides, ctx);
+                                const auto &ubo = isVertex ? pass.vertexUbo[block.binding] : pass.fragmentUbo[block.binding];
+                                if (bytes.size() > static_cast<size_t>(ubo.size))
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            std::string(isVertex ? "vertex" : "fragment") + " UBO overflow"));
+                                if (ubo.mapped != nullptr)
+                                        std::memcpy(ubo.mapped, bytes.data(), bytes.size());
+                        }
+                        return {};
+                };
+                if (auto made = fillStageUbos(true); !made)
+                        return std::unexpected(made.error());
+                if (auto made = fillStageUbos(false); !made)
+                        return std::unexpected(made.error());
                 inputW = pass.outputWidth;
                 inputH = pass.outputHeight;
         }

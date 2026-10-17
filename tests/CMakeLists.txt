@@ -81,4 +81,13 @@ if(SLANGVK_ENABLE_VK)
         target_compile_definitions(test_runner_m4 PRIVATE
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_m4 COMMAND test_runner_m4)
+
+        # Field regression: the stock libretro shader shape (global MVP UBO +
+        # push-constant block read by the fragment stage) must build its pass
+        # pipeline — the layout covers set 1/set 3 bindings 0 AND 1.
+        add_executable(test_runner_pushblock test_runner_pushblock.cpp)
+        target_link_libraries(test_runner_pushblock PRIVATE slangvk)
+        target_compile_definitions(test_runner_pushblock PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_pushblock COMMAND test_runner_pushblock)        
 endif()
