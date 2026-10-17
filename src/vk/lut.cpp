@@ -176,12 +176,15 @@ auto UploadLutTexture(Device &device, const TextureDef &def, const std::string &
                 copyBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 copyBarrier.image = out.img.image;
                 copyBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                // The transition is a write: order it before the upload copy.
+                copyBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                     nullptr, 0, nullptr, 1, &copyBarrier);
                 if (out.mipLevels > 1) {
                         VkImageMemoryBarrier chainBarrier = copyBarrier;
                         chainBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                         chainBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 1, out.mipLevels - 1, 0, 1};
+                        chainBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &chainBarrier);
                 }

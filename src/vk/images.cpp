@@ -26,6 +26,8 @@ void BarrierMipLevel(VkCommandBuffer cmd, VkImage image, uint32_t level, uint32_
         barrier.newLayout = newLayout;
         barrier.image = image;
         barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, levelCount, 0, 1};
+        barrier.srcAccessMask = srcAccess;
+        barrier.dstAccessMask = dstAccess;
         vkCmdPipelineBarrier(cmd, srcStage, dstStage, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
@@ -194,6 +196,10 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
                 barrier.newLayout = upload ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : info.finalLayout;
                 barrier.image = impl.obj.image;
                 barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                // The transition is a write: make it available to the upload
+                // copy (transfer write) or to any later access.
+                barrier.dstAccessMask = upload ? VK_ACCESS_TRANSFER_WRITE_BIT
+                                               : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                     upload ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                     nullptr, 1, &barrier);
@@ -208,6 +214,8 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
                         VkImageMemoryBarrier toFinal = barrier;
                         toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                         toFinal.newLayout = info.finalLayout;
+                        toFinal.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        toFinal.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
                             0, nullptr, 0, nullptr, 1, &toFinal);
                 }
@@ -256,6 +264,11 @@ auto Image::update(const void *pixels, size_t pixelBytes) -> std::expected<void,
                 toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 toDst.image = impl_->obj.image;
                 toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                // The transition write must be available before the upload copy
+                // writes the same image (WAW); prior content writes are made
+                // available by the source scope.
+                toDst.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &toDst);
 
@@ -268,6 +281,8 @@ auto Image::update(const void *pixels, size_t pixelBytes) -> std::expected<void,
                 VkImageMemoryBarrier toRest = toDst;
                 toRest.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 toRest.newLayout = current;
+                toRest.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                toRest.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &toRest);
         });
@@ -316,6 +331,10 @@ auto Device::readPixels(VkImage image, VkFormat format, uint32_t width, uint32_t
                 barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                 barrier.image = image;
                 barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                // Render/copy writes become visible to the readback copy, and
+                // the transition write is ordered before the transfer read.
+                barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
 
@@ -327,6 +346,8 @@ auto Device::readPixels(VkImage image, VkFormat format, uint32_t width, uint32_t
                 VkImageMemoryBarrier restore = barrier;
                 restore.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                 restore.newLayout = currentLayout;
+                restore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                restore.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                 vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &restore);
         });

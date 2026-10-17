@@ -245,8 +245,9 @@ int main()
                                         const auto size1 = chain->passOutputSize(1);
                                         Check(size0.has_value() && size0->first == 16 && size0->second == 16,
                                             "max_fbo clamps the 64x64 pass-0 FBO to 16x16");
-                                        Check(size1.has_value() && size1->first == 32 && size1->second == 32,
-                                            "downstream source-scale resolves against the clamped FBO (32x32)");
+                                        Check(size1.has_value() && size1->first == 16 && size1->second == 16,
+                                            "max_fbo cap holds chain-wide: pass 1 resolves 2x the clamped "
+                                            "pass-0 FBO (32) and is clamped back to 16");
                                 }
                         }
                 }

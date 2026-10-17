@@ -560,11 +560,15 @@ int main()
                                         }
 
                                         if (allFramesOk) {
-                                                device2->waitIdle();
-                                                // Read back every presented image: PRESENT_SRC
-                                                // -> TRANSFER_SRC, readPixels, back to PRESENT_SRC.
-                                                const auto transitionAll = [&](VkImageLayout from, VkImageLayout to,
-                                                                                  VkPipelineStageFlags dstStage,
+                                                // Read back every presented image, one re-acquire
+                                                // per image: the acquire semaphore is what makes
+                                                // the present -> readback ordering validation-
+                                                // visible (synchronization validation does not
+                                                // model host waitIdle).
+                                                const auto transition = [&](VkImage image, VkImageLayout from,
+                                                                                  VkImageLayout to,
+                                                                                  VkSemaphore waitSem,
+                                                                                  VkAccessFlags srcAccess,
                                                                                   VkAccessFlags dstAccess) {
                                                         VkCommandBufferAllocateInfo allocInfo{};
                                                         allocInfo.sType
@@ -580,23 +584,24 @@ int main()
                                                         beginInfo.flags
                                                             = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                                                         vkBeginCommandBuffer(cmd, &beginInfo);
-                                                        for (VkImage image : swapImages) {
-                                                                VkImageMemoryBarrier barrier{};
-                                                                barrier.sType
-                                                                    = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                                                                barrier.srcQueueFamilyIndex
-                                                                    = VK_QUEUE_FAMILY_IGNORED;
-                                                                barrier.dstQueueFamilyIndex
-                                                                    = VK_QUEUE_FAMILY_IGNORED;
-                                                                barrier.oldLayout = from;
-                                                                barrier.newLayout = to;
-                                                                barrier.image = image;
-                                                                barrier.subresourceRange = {
-                                                                    VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                                                                vkCmdPipelineBarrier(cmd,
-                                                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dstStage, 0,
-                                                                    0, nullptr, 0, nullptr, 1, &barrier);
-                                                        }
+                                                        VkImageMemoryBarrier barrier{};
+                                                        barrier.sType
+                                                            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                                        barrier.srcQueueFamilyIndex
+                                                            = VK_QUEUE_FAMILY_IGNORED;
+                                                        barrier.dstQueueFamilyIndex
+                                                            = VK_QUEUE_FAMILY_IGNORED;
+                                                        barrier.oldLayout = from;
+                                                        barrier.newLayout = to;
+                                                        barrier.image = image;
+                                                        barrier.subresourceRange = {
+                                                            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                                                        barrier.srcAccessMask = srcAccess;
+                                                        barrier.dstAccessMask = dstAccess;
+                                                        vkCmdPipelineBarrier(cmd,
+                                                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                                                            0, nullptr, 0, nullptr, 1, &barrier);
                                                         vkEndCommandBuffer(cmd);
                                                         VkFenceCreateInfo fenceInfo{};
                                                         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -606,44 +611,117 @@ int main()
                                                         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                                                         submitInfo.commandBufferCount = 1;
                                                         submitInfo.pCommandBuffers = &cmd;
+                                                        VkPipelineStageFlags waitStage
+                                                            = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                                                        if (waitSem != VK_NULL_HANDLE) {
+                                                                submitInfo.waitSemaphoreCount = 1;
+                                                                submitInfo.pWaitSemaphores = &waitSem;
+                                                                submitInfo.pWaitDstStageMask = &waitStage;
+                                                        }
                                                         vkQueueSubmit(device2->graphicsQueue(), 1, &submitInfo,
                                                             fence);
                                                         vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
                                                         vkDestroyFence(dev, fence, nullptr);
                                                         vkFreeCommandBuffers(dev, cmdPool, 1, &cmd);
                                                 };
+                                                const auto presentBack = [&](uint32_t index) {
+                                                        VkPresentInfoKHR presentInfo{};
+                                                        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+                                                        presentInfo.swapchainCount = 1;
+                                                        presentInfo.pSwapchains = &swapchain;
+                                                        presentInfo.pImageIndices = &index;
+                                                        vkQueuePresentKHR(device2->graphicsQueue(), &presentInfo);
+                                                };
 
-                                                transitionAll(VK_IMAGE_LAYOUT_UNDEFINED,
-                                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-                                                for (uint32_t i = 0; i < imageCount; ++i) {
-                                                        const auto it = caseForImage.find(i);
-                                                        if (it == caseForImage.end())
-                                                                continue;
-                                                        auto got = device2->readPixels(swapImages[i], swapFormat,
-                                                            kSwapExtent.width, kSwapExtent.height,
-                                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-                                                        Check(got.has_value(),
-                                                            "swapchain e2e: readback image " + std::to_string(i));
-                                                        if (!got)
-                                                                continue;
-                                                        // Case 0 auto-fits to (16,0); cases 1/2 are explicit.
-                                                        const int32_t offsetX
-                                                            = it->second == 0 ? 16 : (it->second == 1 ? 32 : 0);
-                                                        std::vector<uint8_t> want = PlacedFrame(pattern, 96, 64,
-                                                            kSwapExtent.width, kSwapExtent.height, offsetX, 0);
-                                                        if (bgra) {
-                                                                // B8G8R8A8 readback: bytes are B,G,R,A.
-                                                                for (size_t t = 0; t + 3 < want.size(); t += 4)
-                                                                        std::swap(want[t], want[t + 2]);
+                                                std::map<uint32_t, bool> readBack;
+                                                uint32_t processedCount = 0;
+                                                // Headless presenters may never retire images (present
+                                                // is a no-op), so FIFO can keep handing back already
+                                                // processed ones: bound the attempts and let a
+                                                // finite acquire timeout end the sweep. Each
+                                                // acquire gets its own semaphore — one left
+                                                // signaled (a dropped duplicate) must never be
+                                                // handed to the next acquire.
+                                                const uint32_t maxAttempts = imageCount * 8;
+                                                for (uint32_t attempt = 0;
+                                                    attempt < maxAttempts && processedCount < imageCount;
+                                                    ++attempt) {
+                                                        VkSemaphore acquireSem = VK_NULL_HANDLE;
+                                                        VkSemaphoreCreateInfo semInfo{};
+                                                        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+                                                        vkCreateSemaphore(dev, &semInfo, nullptr, &acquireSem);
+                                                        uint32_t idx = 0;
+                                                        const VkResult acquired = vkAcquireNextImageKHR(dev,
+                                                            swapchain, 250000000ULL /* 250 ms */, acquireSem,
+                                                            VK_NULL_HANDLE, &idx);
+                                                        if (acquired != VK_SUCCESS) {
+                                                                // timeout/exhausted: images still in flight
+                                                                vkDestroySemaphore(dev, acquireSem, nullptr);
+                                                                break;
                                                         }
-                                                        CheckBytes(*got, want,
-                                                            "swapchain e2e: image " + std::to_string(i)
-                                                                + " matches case " + std::to_string(it->second));
+                                                        if (readBack[idx]) {
+                                                                // FIFO handed back an image we already
+                                                                // processed and its presentation may never
+                                                                // retire here: leave it acquired (the
+                                                                // swapchain retires it on destroy) and drop
+                                                                // the still-signaled semaphore.
+                                                                vkDestroySemaphore(dev, acquireSem, nullptr);
+                                                                continue;
+                                                        }
+                                                        readBack[idx] = true;
+                                                        ++processedCount;
+                                                        // UNDEFINED -> TRANSFER_SRC: an acquired image
+                                                        // reads UNDEFINED to validation (WSI), and the
+                                                        // acquire semaphore orders the transition after
+                                                        // the presentation engine released the image.
+                                                        // Pixel content survives present -> acquire on
+                                                        // FIFO presenters — the goldens below pin it.
+                                                        transition(swapImages[idx],
+                                                            VK_IMAGE_LAYOUT_UNDEFINED,
+                                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                                            acquireSem, 0, VK_ACCESS_TRANSFER_READ_BIT);
+                                                        const auto it = caseForImage.find(idx);
+                                                        if (it != caseForImage.end()) {
+                                                                auto got = device2->readPixels(swapImages[idx],
+                                                                    swapFormat, kSwapExtent.width,
+                                                                    kSwapExtent.height,
+                                                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                                                                Check(got.has_value(),
+                                                                    "swapchain e2e: readback image "
+                                                                        + std::to_string(idx));
+                                                                if (got) {
+                                                                        // Case 0 auto-fits to (16,0); cases 1/2
+                                                                        // are explicit.
+                                                                        const int32_t offsetX = it->second == 0
+                                                                            ? 16
+                                                                            : (it->second == 1 ? 32 : 0);
+                                                                        std::vector<uint8_t> want = PlacedFrame(
+                                                                            pattern, 96, 64, kSwapExtent.width,
+                                                                            kSwapExtent.height, offsetX, 0);
+                                                                        if (bgra) {
+                                                                                // B8G8R8A8 readback: bytes are
+                                                                                // B,G,R,A.
+                                                                                for (size_t t = 0;
+                                                                                    t + 3 < want.size(); t += 4)
+                                                                                        std::swap(want[t],
+                                                                                            want[t + 2]);
+                                                                        }
+                                                                        CheckBytes(*got, want,
+                                                                            "swapchain e2e: image "
+                                                                                + std::to_string(idx)
+                                                                                + " matches case "
+                                                                                + std::to_string(it->second));
+                                                                }
+                                                        }
+                                                        // Rest in PRESENT_SRC and give it back.
+                                                        transition(swapImages[idx],
+                                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                                            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_NULL_HANDLE,
+                                                            VK_ACCESS_TRANSFER_READ_BIT, 0);
+                                                        presentBack(idx);
+                                                        vkDestroySemaphore(dev, acquireSem, nullptr);
                                                 }
-                                                transitionAll(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0);
+                                                device2->waitIdle();
                                         }
                                 }
 

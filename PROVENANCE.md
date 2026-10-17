@@ -408,7 +408,8 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
   when the surface or swapchain extension is unavailable (Windows CI has no
   ICD; mingw still compiles the full suite).
 - Debug + ASan/UBSan build: **19/19 tests pass** (sanitizers active across
-  the swapchain + present path on lavapipe).
+  the swapchain + present path on lavapipe). (Test count is now 20 with the
+  2026-10-18 `runner_pushblock` canary; the sanitizer re-run rides CI.)
 - Core-only build (`SLANGVK_ENABLE_VK=OFF`): **14/14 tests pass**.
 - Hardware half of the DevilutionX-mode exit: owned by the fork's M4
   adapter spike, underway on branch `libslang-vk` (dual-path with the
@@ -439,6 +440,71 @@ First artifact verified end-to-end: run for commit `c63b96d` (main) —
 16.6.0 linked in; `libslangvk.dll.a` 44,442 bytes; `libslangvk.a`
 1,808,164 bytes (no glslang embedded, per contract); complete public header
 set; `ARTIFACTS.txt` manifest matches the run.
+
+### Syncval gate bites: CI red run + fix batch (2026-10-18)
+
+The merged workflow restored `vulkan-validationlayers`; the same day's
+state also enabled instance-level synchronization validation (plan §10) and
+added the maintainer's `runner_pushblock` field canary (the stock libretro
+shape: global MVP UBO + a push-constant block read by the fragment stage).
+The next CI run failed 5 of 20 tests — every Vulkan runner test — and the
+failures were real, in three families:
+
+1. **The re-homed push/params UBO was never bound (field bug).** The
+   translator rewrites `push_constant` blocks into binding 1 of the stage
+   UBO set (set 1 vertex / set 3 fragment), but the runner's set layouts
+   only declared binding 0, only allocated/filled one UBO per stage and
+   only wrote binding-0 descriptors. Every field shader reading `params`
+   from the fragment stage (fxaa/smaa shape) rendered with zero-filled
+   uniforms — invisible to the bundled canaries because glslang
+   dead-code-eliminates unused push blocks, and invisible to lavapipe
+   itself, which does not validate the shader/pipeline-layout interface
+   (exactly the strict-driver failure the canary's header comment predicts:
+   `VK_ERROR_INVALID_SHADER_NV` on AMD). Validation surfaced it as
+   VUID-VkGraphicsPipelineCreateInfo-layout-07988 +
+   VUID-vkCmdDraw-None-08114. Fix: binding-0/1 set layouts, per-block UBO
+   allocation + descriptor writes, per-block per-frame uniform fill
+   (`chain.cpp`).
+2. **Zero-access layout-transition barriers.** Layout transitions are
+   writes; the upload (`Image::create`/`update`), readback
+   (`Device::readPixels`), mip-refill (`BarrierMipLevel` — which accepted
+   access-mask parameters and silently dropped them), LUT-upload and
+   pass-target-init barriers all carried `srcAccessMask = dstAccessMask =
+   0`, so every `CopyBufferToImage` / `CopyImageToBuffer` / `BlitImage`
+   against a freshly transitioned image was a validation hazard
+   (READ_AFTER_WRITE / WRITE_AFTER_WRITE, 50 instances in one run). Fix:
+   correct stage/access masks at every hand-rolled barrier site
+   (`images.cpp`, `lut.cpp`, `chain.cpp`).
+3. **Test-side present ordering.** `runner_m4` read back presented
+   swapchain images after a host `vkDeviceWaitIdle` — spec-legal, but
+   synchronization validation does not model host idle. Restructured onto
+   an acquire-semaphore chain: one semaphore per re-acquire (a left-
+   signaled semaphore must never feed the next acquire), duplicates on a
+   headless presenter are dropped rather than re-presented, the readback
+   transition matches WSI's acquired-images-read-UNDEFINED model, and the
+   sweep is attempt-bounded with a finite acquire timeout (a headless
+   presenter may never retire images).
+
+Reproduction method (no sudo in the dev environment): A/B runs on a
+user-space Vulkan stack — SwiftShader ICD extracted from the local
+agent-browser Chrome bundle (ICD json `api_version` patched to 1.3) ×
+user-space `vulkan-validationlayers` deb extraction, selected via
+`VK_DRIVER_FILES` / `VK_LAYER_PATH`. Run A (no layers) isolated defect 1
+through the pushblock golden (16,253-byte diff = zero-filled params); Run B
+(layers) reproduced all five CI failures exactly; after the fix both runs
+are 20/20. The gate stays on: it converted three silent-wrongness families
+into hard failures on its first run — exactly what plan §10 bought it for.
+
+Landing status: the chain.cpp UBO-binding core and an improved
+`VkResultToString` (numeric fallback for unmapped result codes, so
+driver-specific failures like the AMD pipeline rejection above log the
+actual code) landed upstream as the maintainer's `6e693ec`; the completion
+overlay carries the remaining pieces — chain.cpp barrier access masks,
+images.cpp / lut.cpp upload·readback·mip·LUT barriers, the maxfbo preset's
+binding-1 params tap, the runner_headless check relaxation, the runner_m4
+acquire-semaphore present restructure, and these docs. Post-integration
+verification on `6e693ec` + overlay: Run A 20/20, Run B (syncval) 20/20
+with zero validation messages, ASan/UBSan 17/17.
 
 ### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
 

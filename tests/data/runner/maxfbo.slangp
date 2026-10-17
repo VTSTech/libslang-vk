@@ -1,9 +1,10 @@
 # libslang-vk miss-list #3 test: max_fbo_width / max_fbo_height clamps.
 # Pass 0 asks for an absolute 64x64 FBO; the max_fbo keys clamp it to 16x16.
-# Pass 1 uses source-scale 2.0 and must resolve against the CLAMPED pass-0
-# FBO (16 * 2 = 32) — the clamped FBO is what downstream passes read.
-# Final pass renders 32x32 into the 64x64 target through the letterbox
-# present path, so the render is also a smoke test of clamp + present.
+# Pass 1 uses source-scale 2.0 and resolves against the CLAMPED pass-0 FBO
+# (16 * 2 = 32); the chain-wide cap clamps it back to 16x16 — no pass FBO
+# ever exceeds max_fbo. Final pass renders 16x16 into the 64x64 target
+# through the letterbox present path, so the render is also a smoke test of
+# clamp + present.
 shaders = 2
 shader0 = shaders/blit.slang
 scale_type0 = absolute
