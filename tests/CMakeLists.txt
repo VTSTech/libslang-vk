@@ -89,5 +89,5 @@ if(SLANGVK_ENABLE_VK)
         target_link_libraries(test_runner_pushblock PRIVATE slangvk)
         target_compile_definitions(test_runner_pushblock PRIVATE
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
-        add_test(NAME runner_pushblock COMMAND test_runner_pushblock)        
+        add_test(NAME runner_pushblock COMMAND test_runner_pushblock)
 endif()
