@@ -6,6 +6,7 @@
 // Copy of the anonymous-namespace helper in preset_runner.cpp.
 // Build: g++ -O2 -Wall -Wextra -std=c++17 -o test_viewport_derive
 // tools/audit/test_viewport_derive.cpp
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

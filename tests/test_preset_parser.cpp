@@ -166,9 +166,11 @@ int main()
                 // Same parent, similar prefix: ".../shaders-ng" must not pass ".../shaders".
                 const std::filesystem::path tricky = root / "pack-extra";
                 std::filesystem::create_directories(tricky);
-                SetShaderRootDir(root / "pack");
+                // Explicit .string(): on MSVC path::string_type is std::wstring,
+                // so the implicit conversion GCC accepts does not exist.
+                SetShaderRootDir((root / "pack").string());
                 Check(!IsPathInsideShaderRoot(tricky), "sandbox: prefix lookalike rejected");
-                SetShaderRootDir(root);
+                SetShaderRootDir(root.string());
                 std::filesystem::remove_all(root);
         }
 
