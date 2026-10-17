@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     name: linux (${{ matrix.build_type }})
@@ -40,8 +44,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  windows:
-    name: windows (static + shared)
+  windows-msvc:
+    name: windows (msvc, static + shared)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +57,34 @@ jobs:
         # No Vulkan ICD on Windows runners: the headless runner test skips
         # itself; the core suite + example smoke tests still gate the build.
         run: ctest --test-dir build -C Release --output-on-failure
+
+  windows-mingw64:
+    name: windows (mingw-w64, static + shared)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up mingw-w64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          release: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+      - name: Configure
+        # Everything is fetched from source (glslang, Vulkan-Headers, volk, VMA):
+        # no Vulkan SDK and no extra env vars needed. -fno-rtti applies via the
+        # NOT-MSVC branch; export macros key off _WIN32, so the shared variant
+        # gets dllexport/dllimport on mingw too.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        # Same skip behavior as the MSVC job: no ICD on the runner, so the
+        # headless Vulkan test skips itself; core suite + examples still gate.
+        run: ctest --test-dir build --output-on-failure
