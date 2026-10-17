@@ -1,19 +1,29 @@
-# libslang-vk CI — plan M0 infra: tests + per-toolchain library artifacts.
+# libslang-vk CI — tests on lavapipe + per-toolchain library artifacts.
 #
-#   linux           full ctest on lavapipe (mesa-vulkan-drivers + libvulkan1),
-#                   uploads libslangvk.a / libslangvk.so / public headers
-#   linux-asan      address+undefined sanitized test build (examples off);
-#                   the runner tests keep their live validation-error gate
-#   windows-mingw   MSYS2 MinGW-w64 build; uploads libslangvk.dll,
-#                   libslangvk.dll.a (import) and libslangvk.a (static) +
-#                   headers. The Vulkan runner tests skip cleanly with no
-#                   ICD (documented in tests/CMakeLists.txt); every other
-#                   test runs.
+# Lineage: this repo has had a ci.yml since the M0 scaffolding commit
+# (workflow history: `25ce03d` M0 -> `f1bd2b8`/`aed9cef` M1 -> `b7c6583` M3).
+# The 2026-10-18 extension added what it never had: artifact uploads — the
+# per-toolchain distribution the plan prescribes (the C++23 API is
+# same-toolchain ABI, include/slangvk/export.h). The merged workflow keeps
+# the original's Release+Debug matrix and `vulkan-validationlayers` install
+# (dropped by the first artifact upload pass — without that package the
+# runner tests' validation gate is vacuous on CI) and preserves the original
+# maintainer decision:
 #
-# The artifact zips are the distribution form the plan prescribes: the C++23
-# API is same-toolchain ABI (include/slangvk/export.h), so shared builds ship
-# per platform/toolchain, built by CI. FetchContent (README) remains the
-# preferred path when a host compiles with a different toolchain.
+#   windows-msvc job dropped (maintainer decision 2026-10-17): the
+#   VS-generator build is 5-8x slower than Ninja and the job hung on the
+#   runner well past any plausible test runtime (all bounded core tests,
+#   0 output). Windows remains covered by the mingw-w64 job below, which
+#   builds static + shared and gates on the same suite.
+#
+#   linux           Release+Debug matrix, full ctest on lavapipe + Khronos
+#                   validation layer; Release also uploads libslangvk.a/.so
+#                   + headers (commit-pinned ARTIFACTS.txt)
+#   linux-asan      address+undefined sanitized test build (examples off)
+#   windows-mingw   MSYS2 MinGW-w64; uploads libslangvk.dll, libslangvk.dll.a
+#                   (import) and libslangvk.a (static) + headers. The Vulkan
+#                   runner tests skip cleanly with no ICD (documented in
+#                   tests/CMakeLists.txt); every other test runs.
 #
 # Still open (plan §11 M3): the full-corpus compile-sweep ledger needs a
 # slang-shaders checkout and intentionally does not run here.
@@ -22,6 +32,7 @@ name: ci
 
 on:
   push:
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
@@ -31,18 +42,22 @@ concurrency:
 
 jobs:
   linux:
-    name: linux-x64 (tests + artifacts)
+    name: linux-x64 (${{ matrix.build_type }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tools + lavapipe
+      - name: Install build tools + lavapipe + validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
         run: cmake --build build
@@ -51,6 +66,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Stage artifacts
+        if: matrix.build_type == 'Release'
         run: |
           mkdir -p stage/libslangvk/include
           cp -r include/slangvk stage/libslangvk/include/
@@ -77,6 +93,7 @@ jobs:
           (cd stage && zip -qr ../libslangvk-linux-x64.zip libslangvk)
 
       - name: Upload artifacts
+        if: matrix.build_type == 'Release'
         uses: actions/upload-artifact@v4
         with:
           name: libslangvk-linux-x64
@@ -89,13 +106,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tools + lavapipe
+      - name: Install build tools + lavapipe + validation layers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSLANGVK_SANITIZE=address,undefined -DSLANGVK_BUILD_EXAMPLES=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSLANGVK_SANITIZE=address,undefined -DSLANGVK_BUILD_EXAMPLES=OFF
 
       - name: Build
         run: cmake --build build
@@ -124,6 +141,10 @@ jobs:
           msystem: MINGW64
           update: false
           # python: glslang's build_info.h generation needs an interpreter
+          # (everything else is fetched from source: no Vulkan SDK, no extra
+          # env vars; -fno-rtti applies via the NOT-MSVC branch; export
+          # macros key off _WIN32, so the shared variant gets
+          # dllexport/dllimport on mingw too)
           pacboy: >-
             toolchain:p
             cmake:p
@@ -137,6 +158,8 @@ jobs:
         run: cmake --build build
 
       - name: Test
+        # No ICD on the runner, so the headless Vulkan tests skip themselves;
+        # core suite + examples still gate.
         run: ctest --test-dir build --output-on-failure
 
       - name: Stage artifacts

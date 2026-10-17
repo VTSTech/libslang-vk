@@ -399,6 +399,30 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
   test is the device-agnostic CI gate for the same code path; the hardware
   sweep closes the spike per plan §11.
 
+### CI (GitHub Actions)
+
+CI has run on this repository since the M0 scaffolding commit (workflow
+history: `25ce03d` M0 → `f1bd2b8`/`aed9cef` M1 mingw64 → `b7c6583` M3). The
+original workflow carried the maintainer's 2026-10-17 decision to drop the
+VS-generator MSVC job (5–8x slower than Ninja; hung the runner past any
+plausible test runtime) — Windows coverage stayed on mingw-w64. An audit on
+2026-10-18 missed the hidden `.github/` directory and reported "no CI in
+repo"; that finding is retracted — what CI lacked was artifact uploads, not
+CI, and that is what the 2026-10-18 extension added (per-toolchain
+distribution per plan §6/export.h: `libslangvk.a`/`.so` + headers on Linux
+Release; `libslangvk.dll` + `libslangvk.dll.a` + `libslangvk.a` + headers on
+win64 MinGW-w64; every zip carries a commit-pinned `ARTIFACTS.txt`). The
+first artifact-upload ci.yml pass regressed two properties of the original
+(the Debug build type, the `vulkan-validationlayers` install — without it
+the runner tests' validation gate is vacuous on CI); the merged workflow
+restores both and preserves the MSVC-drop decision.
+
+First artifact verified end-to-end: run for commit `c63b96d` (main) —
+`libslangvk.dll` is a PE32+ x86-64 image, 6,263,032 bytes, with glslang
+16.6.0 linked in; `libslangvk.dll.a` 44,442 bytes; `libslangvk.a`
+1,808,164 bytes (no glslang embedded, per contract); complete public header
+set; `ARTIFACTS.txt` manifest matches the run.
+
 ### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
 
 Verbatim-log summaries from the fork's field loop — the hardware half of

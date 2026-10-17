@@ -226,7 +226,8 @@ same-toolchain-ABI API (`include/slangvk/export.h`):
   static library, `include/slangvk/` headers. MSYS2 MinGW-w64 GCC build;
   link the DLL from MinGW-w64, not MSVC.
 - **`libslangvk-linux-x64`** — `libslangvk.a`, `libslangvk.so`, headers;
-  GCC Release build with the full ctest suite on lavapipe.
+  GCC Release + Debug builds gating the full ctest suite on lavapipe with
+  the Khronos validation layer installed.
 
 A sanitized (address + undefined) Linux test build runs alongside the
 Release jobs. The Vulkan runner tests execute against lavapipe on Linux;
