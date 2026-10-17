@@ -1,0 +1,16 @@
+# libslang-vk M1 headless test: two-pass FBO indirection + alias.
+# Pass 0 renders at 1:1 into an intermediate FBO aliased "pre"; pass 1
+# averages Source (the pass-0 output) with the alias. Both are the same
+# texture here, so the golden contract stays byte-identical to the input.
+shaders = 2
+shader0 = shaders/blit.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0
+alias0 = "pre"
+
+shader1 = shaders/blend2.slang
+scale_type_x1 = source
+scale_x1 = 1.0
+scale_type_y1 = source
+scale_y1 = 1.0

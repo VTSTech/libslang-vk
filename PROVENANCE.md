@@ -46,6 +46,47 @@ methodology is the intended CI provenance gate for releases.
 | `docs/SPEC.md` | `docs/SLANG_SPEC.md` | Header note adapted to this repository; normative content unchanged |
 | `docs/PLAN.md` | `docs/libslang-vk-plan.md` (this project's plan) | Verbatim |
 
+## M1 — Vulkan runner (all new code, MIT, authored for this repo)
+
+The `src/vk/` runner layer, `include/slangvk/runner.hpp` and
+`tests/test_runner_headless.cpp` are new implementations written against the
+plan's API sketch (§6) and runner design (§8). Semantics that the fork pinned
+by test were ported as *semantics*, not code: pass-size resolution with
+half-up rounding (`test_viewport_derive`), the aspect-corrected viewport base
+(F6), UBO fill order and vec4 write rules (`FillBlockBytes`), the
+`Rotation`-fills-0 / FrameDirection-1 / FrameTime-µs conventions, and the
+parameter resolution order (preset override → pragma default → zero).
+
+### Vendored dependencies (M1)
+
+| Dependency | Version | License | Purpose |
+|---|---|---|---|
+| `Vulkan-Headers` | v1.4.364 (SHA-256 pinned in `cmake/deps.cmake`) | Apache-2.0 OR MIT | Vulkan API definitions |
+| `volk` | vulkan-sdk-1.4.363.0 (SHA-256 pinned) | MIT | Runtime Vulkan loader (no link-time libvulkan) |
+| `VulkanMemoryAllocator` | v3.3.0 (SHA-256 pinned) | MIT | Device memory suballocation |
+
+### M1 documented divergences
+
+1. **MVP orientation (Vulkan-native).** The fork's SDL_GPU host paired
+   GL-style UVs with clip-space positions and cancelled per-draw mirrors
+   through a FlipY matrix on intermediate passes (field bisects A1/A2/C2/E1).
+   The Vulkan runner's fullscreen quad uses unit-quad positions in [0,1] with
+   uv = position and an MVP mapping (x,y) → NDC (2x−1, 2y−1); Vulkan NDC
+   (−1,−1) is top-left, matching uv (0,0), so no mirror exists anywhere in
+   the chain and the flip-cancel dance is unnecessary.
+2. **Classic synchronization for the 1.1 floor.** M1 uses core-1.0
+   `vkCmdPipelineBarrier` + classic render passes (plan §8's "classic
+   fallback" path); the sync2/dynamic-rendering fast path lands with M2's
+   capability detection.
+3. **Case-insensitive parameter/size matching.** The parser lowercases
+   `.slangp` keys (RetroArch behavior); the translator's UBO-member whitelist
+   already matched case-insensitively, so the runner's UBO fill, parameter
+   metadata merge and `setParameter()` match names case-insensitively for a
+   single consistent rule.
+4. **Synchronous render.** `Chain::render()` records + submits one command
+   buffer and fences (M1 skeleton); batching/timeline semaphores are the M3
+   perf work per plan §8.
+
 ## Documented divergences (v1 decisions, plan §2/§5/§13)
 
 1. **No SPIR-V disk cache / sidecars.** v1 compiles with glslang on every
@@ -63,9 +104,22 @@ methodology is the intended CI provenance gate for releases.
    block re-homed as std140 UBO) is kept byte-compatible so the reference
    host can adopt the library without a shader-pack migration.
 
-## Verification record (M0 exit)
+## Verification record
 
+### M0 exit
 - Release build (static + shared), Linux GCC 14.2, CMake Ninja: **12/12 tests pass**.
 - Debug + ASan/UBSan build: **12/12 tests pass** (sanitizers active incl.
   LeakSanitizer across the glslang compile path).
-- Windows/macOS CI: pending first push (`.github/workflows/ci.yml`).
+
+### M1 exit
+- Release build (static + shared), Linux GCC 14.2, CMake Ninja: **15/15 tests pass**
+  (M0 suite + example smoke tests + `runner_headless`).
+- `runner_headless` on **lavapipe** (llvmpipe, Mesa 25.0.7, API 1.4): golden blit
+  round-trip byte-identical, two-pass alias chain byte-identical, parameter-gain
+  golden within tolerance, **zero validation-layer errors** with
+  `VK_LAYER_KHRONOS_validation` active.
+- Debug + ASan/UBSan build: **15/15 tests pass** (sanitizers active across the
+  Vulkan execution path on lavapipe).
+- "and a real GPU" half of the M1 exit criterion: the headless test is
+  device-agnostic (skips cleanly without an ICD); hardware runs happen on the
+  maintainer's machines and in the fork's field loop (plan §10).

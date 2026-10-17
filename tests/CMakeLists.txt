@@ -48,3 +48,14 @@ foreach(t
 	add_executable(${t} reference/${t}.cpp)
 	add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+# --- Vulkan runner headless test (M1) ----------------------------------------
+# Renders the golden blit round-trip on lavapipe (CI) or a real GPU; skips
+# cleanly when no Vulkan device is present.
+if(SLANGVK_ENABLE_VK)
+	add_executable(test_runner_headless test_runner_headless.cpp)
+	target_link_libraries(test_runner_headless PRIVATE slangvk)
+	target_compile_definitions(test_runner_headless PRIVATE
+	    SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+	add_test(NAME runner_headless COMMAND test_runner_headless)
+endif()

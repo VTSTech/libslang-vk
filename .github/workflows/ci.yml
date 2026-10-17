@@ -19,6 +19,8 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - name: Build
         run: cmake --build build
+      - name: Install headless Vulkan (lavapipe + validation layers)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers libvulkan1
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
@@ -33,6 +35,8 @@ jobs:
           -DSLANGVK_SANITIZE=address,undefined
       - name: Build
         run: cmake --build build
+      - name: Install headless Vulkan (lavapipe + validation layers)
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-validationlayers libvulkan1
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
@@ -46,4 +50,6 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
       - name: Test
+        # No Vulkan ICD on Windows runners: the headless runner test skips
+        # itself; the core suite + example smoke tests still gate the build.
         run: ctest --test-dir build -C Release --output-on-failure

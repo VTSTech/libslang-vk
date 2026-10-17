@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(libslang-vk
     VERSION 0.1.0
     DESCRIPTION "libretro slang shader preset parsing/compiling with a Vulkan execution path"
-    LANGUAGES CXX)
+    LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(SLANGVK_BUILD_TESTS "Build the unit test suite" ON)
 option(SLANGVK_BUILD_EXAMPLES "Build the example programs" ON)
 option(SLANGVK_BUILD_SHARED "Also build the shared library variant" ON)
+option(SLANGVK_ENABLE_VK "Build the Vulkan runner (src/vk; needs Vulkan-Headers + volk + VMA, fetched automatically)" ON)
 set(SLANGVK_SANITIZE "" CACHE STRING "Comma-separated sanitizers for a test build (e.g. address,undefined)")
 
 if(SLANGVK_SANITIZE)
@@ -41,6 +42,15 @@ set(SLANGVK_CORE_SOURCES
     src/core/slang_compile.cpp
 )
 
+if(SLANGVK_ENABLE_VK)
+        list(APPEND SLANGVK_CORE_SOURCES
+            src/vk/device.cpp
+            src/vk/images.cpp
+            src/vk/preset.cpp
+            src/vk/chain.cpp
+            src/vk/vma_impl.cpp)
+endif()
+
 # Each variant compiles the core sources once with its own export defines:
 # the shared build exports annotated symbols, the static build stays clean.
 function(slangvk_add_library target shared)
@@ -55,6 +65,13 @@ function(slangvk_add_library target shared)
         target_include_directories(${target} PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>)
+        if(SLANGVK_ENABLE_VK)
+                # Raw Vulkan handle types in runner.hpp need the Khronos headers
+                # at the boundary; volk + VMA stay private implementation details.
+                target_link_libraries(${target} PUBLIC slv-headers-only)
+                target_compile_definitions(${target} PUBLIC SLANGVK_ENABLE_VK=1)
+                target_link_libraries(${target} PRIVATE slv-volk slv-vma-headers)
+        endif()
         # glslang is an implementation detail: PRIVATE, but as a static library
         # CMake still propagates the link dependency to consumers.
         target_link_libraries(${target} PRIVATE

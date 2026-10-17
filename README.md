@@ -4,7 +4,7 @@ Parse, translate and compile **libretro slang shader presets** (`.slangp` /
 `.slang`) as an embeddable C++23 library, with a **Vulkan** execution path.
 
 ```
-.slangp ──parser──▶ pass chain ──translator──▶ per-stage GLSL ──glslang──▶ SPIR-V ──▶ Vulkan runner (M1)
+.slangp ──parser──▶ pass chain ──translator──▶ per-stage GLSL ──glslang──▶ SPIR-V ──runner──▶ Vulkan
 ```
 
 The core layer is extracted from the proven preset stack of
@@ -14,11 +14,13 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M0 (core extraction).** Parser, translator and glslang compile path
-build and pass their test suite. The Vulkan runner, public `slv::` runner API
-and packaging land in M1–M5 per the plan.
+**Status: M1 (Vulkan runner skeleton).** The full M0 core suite passes, and
+the runner now renders presets headlessly: `Device` adopt/create, offscreen
+`Chain::render`, golden blit round-trips green on lavapipe with validation
+layers clean. M2 adds history/feedback rings, LUT uploads, rotation and the
+dynamic-rendering fast path per the plan.
 
-## Consuming (M0)
+## Consuming
 
 ```cmake
 include(FetchContent)
@@ -53,6 +55,42 @@ if (slv::preset::ParsePreset(slv::preset::ResolvePresetPath("crt-royale.slangp")
 The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
 Vulkan runner consumes; a host rolling its own pipeline can use them too.
+
+## Vulkan runner (M1)
+
+The runner executes compiled presets on a Vulkan device. The host either
+adopts its own context or goes headless; errors come back as
+`std::expected<T, slv::Error>`:
+
+```cpp
+#include <slangvk/slangvk.hpp>
+
+// Headless device (lavapipe/CI) or slv::Device::adopt(instance, pd, dev, queue, family)
+auto device = slv::Device::create({.appName = "myhost"});
+
+auto preset = slv::Preset::load(*device, "shaders/crt-royale.slangp");
+
+slv::ChainOptions opts{.outputWidth = 1280, .outputHeight = 720};
+auto chain = slv::Chain::create(*device, *preset, opts);
+
+// One frame: input texture in SHADER_READ_ONLY_OPTIMAL, output into your view.
+chain->render(
+    {/* .view = */ inputView, VK_FORMAT_R8G8B8A8_UNORM, 640, 480, slv::Rotation::None},
+    slv::Offscreen{outputView, VK_FORMAT_R8G8B8A8_UNORM, 1280, 720},
+    {/* .frameCount = */ 0, 16666.7F, 1});
+```
+
+M1 semantics already live: multi-pass chains with per-pass scale rules and
+aliases, the pinned UBO fill (sizes, FrameCount mod, parameters), and the
+fork's viewport-derivation math. History/feedback rings, LUT image uploads,
+rotation and swapchain targets return `slv::Errc::unsupported_feature` until
+M2–M4. The M1 gate — golden blit round-trip headless on lavapipe with
+validation layers clean — is `tests/test_runner_headless.cpp`.
+
+Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
+(no link-time libvulkan); memory comes from vendored
+[VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator).
+Hosts adopting a context keep owning their instance/device/queue.
 
 ## Example
 
@@ -104,8 +142,10 @@ ctest --test-dir build --output-on-failure
 Options: `SLANGVK_BUILD_SHARED` (default `ON`, builds `libslangvk.so/dll`
 alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
 `SLANGVK_BUILD_EXAMPLES` (default `ON`, builds the `preset_info` demo),
-`SLANGVK_SANITIZE=address,undefined` (test builds). glslang is fetched and
-built automatically (pinned 16.6.0, same version the reference host used).
+`SLANGVK_ENABLE_VK` (default `ON`, builds the Vulkan runner; `OFF` gives a
+core-only build), `SLANGVK_SANITIZE=address,undefined` (test builds).
+glslang, Vulkan-Headers, volk and VMA are fetched and built automatically
+(SHA-256 pinned; see [PROVENANCE.md](PROVENANCE.md)).
 
 ## License
 
