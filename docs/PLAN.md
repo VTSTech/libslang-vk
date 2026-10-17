@@ -177,6 +177,12 @@ interface preserved, host context adopted, dual-path with the SDL_GPU
 runner until corpus parity (§12 risk 5). The spike closes when the lib path
 passes the hardware field sweep on Windows + Linux (§11 M4); library-side
 M0–M4 gates it consumes are green (PROVENANCE.md verification record).
+First hardware sessions (RX 560 / Windows) are now logged in
+PROVENANCE.md's **hardware field log**: 11 presets across two sessions —
+including a 26-pass and a 25-pass chain — hot-swapped with zero skipped
+frames and no fallbacks; heavy-suite steady-state perf (crt-maximus-royale
+load 4.05 s synchronous, ~19 fps post-load window) and the Linux half of
+the sweep remain open.
 
 Two integration consequences are worth stating openly. First, **dual-path period**: the fork will run both its SDL_GPU runner (Metal, and as a safety net) and the libslang-vk runner (Vulkan) behind the same scaler interface until the lib reaches corpus parity — whether the SDL_GPU runner is then retired is an open question (§13). Second, **upstream merge leverage**: `docs/merge-plan-draft-r2.md` gates its PR series on shader-stack findings; once the preset layer and runner live in an MIT library, the mod's mergeable surface shrinks to a thin adapter, which is exactly the shape upstream review tolerates best.
 

@@ -398,3 +398,35 @@ center); rotation semantics are defined from the SPEC (`Rotation` uint
   SDL_GPU runner; field loop on Windows + Linux). The headless swapchain
   test is the device-agnostic CI gate for the same code path; the hardware
   sweep closes the spike per plan §11.
+
+### Hardware field log (DevilutionX fork adapter, branch `libslang-vk`)
+
+Verbatim-log summaries from the fork's field loop — the hardware half of
+the M4 exit above. Host: Windows, Radeon RX 560 Series, adapter build
+Oct 17 2026 18:21:36, exe `1.6.0-dev-Release-338827ff4`, vsync on,
+game + swapchain 1920x1080 (equal-size direct present path). "0 skipped"
+in every heartbeat of both sessions; no `(Unavailable)` fallback, no
+validation output, clean shutdowns throughout.
+
+**Session 1 — preset hot-swap matrix (7 presets).** anamorphic (1 pass),
+fxaa (1), fxaa+linear (2), smaa (4 — libretro preset declaring LUT
+textures, so the M3 decode/upload/bind path ran on hardware),
+smaa+sharpen (5), smaa+linear (5), crt-1tap-bloom (26 passes). Steady-state
+~44–49 fps on the 26-pass chain; 1,836 frames total, no skipped.
+
+**Session 2 — startup + heavy suite (4 presets).** Cold start with
+crt-1tap-bloom: device ready 104 ms after scaler init, preset loaded 466 ms
+in, first present ~1.5 s in. Hot-swap to crt-maximus-royale (25 passes):
+**4.05 s synchronous load** (parse + translate + glslang x25 + LUT uploads
++ history) — the heaviest data point yet for the documented no-disk-cache
+trade-off (plan §13); rendered with zero skipped frames, post-load
+heartbeat window ≈19 fps (single short window — steady-state fps on the
+heavy suites is an open M3 validation item, plan §11 perf budgets).
+crt-nobody (1 pass, 141 ms) and crt-hyllian-ntsc (5 passes, 281 ms)
+followed; 1,330 frames total, no skipped.
+
+**Still open in the sweep:** Linux session; history-ring presets
+(`OriginalHistory#`), feedback double-buffering readers, srgb/float FBO
+formats, `mipmap_input` chains, resize/fullscreen-toggle FBO + swapchain
+recreation, live parameter updates, and a long preset-swap soak for
+chain-teardown VRAM stability.
