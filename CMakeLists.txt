@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 3.28)
+# 3.22 matches the floor of downstream embedders (DevilutionX declares 3.22)
+# and of the fetched deps (glslang 16.6.0 and Vulkan-Headers 1.4.364 need
+# 3.22.1); DevilutionX's Linux CI image ships CMake 3.25.1, which sits
+# comfortably above everything in the chain.
+cmake_minimum_required(VERSION 3.22)
 
 project(libslang-vk
     VERSION 0.1.0
@@ -10,6 +14,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 # Classic translation units only — no C++ module dependency scanning (the
 # ported sources are plain headers/TUs; scanning costs configure time).
+# The variable exists since CMake 3.25; on 3.22-3.24 hosts no scanning ever
+# happens, so ignoring it there is exactly the desired behavior.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 # glslang is linked statically into both library variants; the shared variant
 # needs it position-independent on Linux.
