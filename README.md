@@ -14,11 +14,14 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M1 (Vulkan runner skeleton).** The full M0 core suite passes, and
-the runner now renders presets headlessly: `Device` adopt/create, offscreen
-`Chain::render`, golden blit round-trips green on lavapipe with validation
-layers clean. M2 adds history/feedback rings, LUT uploads, rotation and the
-dynamic-rendering fast path per the plan.
+**Status: M2 (full chain semantics).** The M0 core suite passes and the M1
+runner skeleton (Device adopt/create, offscreen `Chain::render`, golden blit
+round-trips) is joined by the M2 execution contract: history rings
+(`OriginalHistory#`), feedback double-buffering (`PassFeedback#` /
+`<name>Feedback`), per-pass FBO formats (`#pragma format`, srgb/float
+framebuffers), `mipmap_input` refill, FBO recreation on resize and live
+parameters. LUT image upload lands in M3 (corpus sweep); rotation and
+swapchain output in M4 per the plan.
 
 ## Consuming
 
@@ -56,7 +59,7 @@ The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
 Vulkan runner consumes; a host rolling its own pipeline can use them too.
 
-## Vulkan runner (M1)
+## Vulkan runner (M1 + M2)
 
 The runner executes compiled presets on a Vulkan device. The host either
 adopts its own context or goes headless; errors come back as
@@ -74,18 +77,27 @@ slv::ChainOptions opts{.outputWidth = 1280, .outputHeight = 720};
 auto chain = slv::Chain::create(*device, *preset, opts);
 
 // One frame: input texture in SHADER_READ_ONLY_OPTIMAL, output into your view.
+// .image fields are needed for history/mipmap presets and feedback-read
+// final passes (the runner blits from/into them; content is never modified).
 chain->render(
-    {/* .view = */ inputView, VK_FORMAT_R8G8B8A8_UNORM, 640, 480, slv::Rotation::None},
-    slv::Offscreen{outputView, VK_FORMAT_R8G8B8A8_UNORM, 1280, 720},
+    {/* .view = */ inputView, /* .image = */ inputImage, VK_FORMAT_R8G8B8A8_UNORM, 640, 480,
+     slv::Rotation::None},
+    slv::Offscreen{outputView, outputImage, VK_FORMAT_R8G8B8A8_UNORM, 1280, 720},
     {/* .frameCount = */ 0, 16666.7F, 1});
 ```
 
-M1 semantics already live: multi-pass chains with per-pass scale rules and
-aliases, the pinned UBO fill (sizes, FrameCount mod, parameters), and the
-fork's viewport-derivation math. History/feedback rings, LUT image uploads,
-rotation and swapchain targets return `slv::Errc::unsupported_feature` until
-M2–M4. The M1 gate — golden blit round-trip headless on lavapipe with
-validation layers clean — is `tests/test_runner_headless.cpp`.
+M1+M2 semantics already live: multi-pass chains with per-pass scale rules
+and aliases, the pinned UBO fill (sizes, FrameCount mod, parameters —
+alias/`#pragma name` sizes resolve to the owning pass), history rings
+(depth+1 RGBA8 slots, seeded warmup, T-N indexing per SPEC 5.2),
+demand-driven feedback double-buffering with a final-pass resolve blit
+(SPEC 5.3), per-pass target formats, mip-chain refill for `mipmap_input`
+readers (F1), FBO recreation on resize, and case-insensitive live
+parameters. LUT image upload, rotation and swapchain targets return
+`slv::Errc::unsupported_feature` until M3/M4. Gates: golden blit + full
+chain semantics headless on lavapipe with validation layers clean —
+`tests/test_runner_headless.cpp` (M1) and `tests/test_runner_m2.cpp` (M2,
+the fork's field canaries: feedback / history / format / include-cycle).
 
 Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
 (no link-time libvulkan); memory comes from vendored

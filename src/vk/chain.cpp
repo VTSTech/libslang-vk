@@ -6,25 +6,35 @@
 //   samplers (dense), set 3 binding 0 — fragment params UBO (std140 offsets
 //   already reflected in UniformBlock::members).
 //
-// M1 semantics (ported from the reference host, PROVENANCE.md):
+// M2 semantics (ported from the reference host, PROVENANCE.md):
 //   - pass output sizes: Source/Viewport/Absolute rules, half-up rounding,
 //     viewport base aspect-corrected per the F6 pin;
 //   - UBO fill: sizes as vec4(w,h,1/w,1/h), FrameCount with frame_count_mod,
-//     FrameDirection/FrameTime/PASSINDEX/Rotation, <Texture>Size forms,
+//     FrameDirection/FrameTime/PASSINDEX/Rotation, <Texture>Size forms
+//     (alias/#pragma-name sizes resolve to the OWNING pass's output),
 //     parameters (preset override -> pragma default -> zero);
 //   - MVP divergence (documented): the Vulkan-native quad pairs uv (0,0)
 //     with NDC (-1,-1) top-left, so every pass gets the unit-quad -> NDC
-//     matrix and no per-draw mirror exists anywhere in the chain.
+//     matrix and no per-draw mirror exists anywhere in the chain;
+//   - history ring: depth+1 RGBA8 slots at game resolution, seeded on
+//     first frame / resize, OriginalHistoryN binds frame T-N (F5);
+//   - feedback: demand-driven double buffering for passes read through
+//     PassFeedback# / <name>Feedback (SPEC 5.3, F2: feedback_pass unused);
+//   - mipmap_input (F1): mip-capable copy of the chain input for pass 0,
+//     mip-chained pass outputs refilled between render passes;
+//   - sampler policy (SPEC 5.4): Source uses the reading pass's
+//     filter/wrap/mipmap; every other binding is nearest/clamp-to-edge.
 //
-// Not in M1 (unsupported_feature): history/feedback rings, LUT image
-// sampling, rotation != None, swapchain targets, final-pass blit when the
-// last pass does not resolve to the output target size.
+// Not yet (unsupported_feature): LUT image upload (M3), rotation != None
+// and swapchain targets (M4), final-pass blit/letterbox (M4).
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "vk_internal.hpp"
 #include "impls.hpp"
@@ -224,13 +234,18 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                                                 h = (*ctx.passOutputSizes)[static_cast<size_t>(idx)].second;
                                         }
                                 }
-                        } else {
-                                // Alias or lookup texture: alias sizes come from the owning pass.
-                                if (CaseInsensitiveEqual(passDef.alias, texName)) {
-                                        w = ctx.outputWidth;
-                                        h = ctx.outputHeight;
-                                }
-                                // LUT sizes resolve in M2 when LUT images are uploaded.
+                        } else if (ctx.aliasSizes != nullptr) {
+                                // Alias / #pragma name sizes come from the OWNING pass's
+                                // output (M2 fix: the reading pass's own size was used
+                                // before, which only went unnoticed when every pass
+                                // rendered at the same resolution).
+                                for (const BlockFillContext::AliasSize &entry : *ctx.aliasSizes)
+                                        if (CaseInsensitiveEqual(entry.name, texName)) {
+                                                w = entry.width;
+                                                h = entry.height;
+                                                break;
+                                        }
+                                // LUT sizes resolve with LUT upload (M3).
                         }
                         const auto [x, y, z, ww] = sizeVec(w, h);
                         writeVec4(member, x, y, z, ww);
@@ -292,6 +307,15 @@ struct Chain::Impl {
                 VkDeviceSize size = 0;
         };
 
+        // One pass output allocation. Double-buffered passes (read through
+        // PassFeedback# / <name>Feedback) own two; readers always bind the
+        // buffer NOT being written this frame (SPEC 5.3).
+        struct PassTarget {
+                VkImageWithView img;                     // img.view samples the full mip chain.
+                VkImageView renderView = VK_NULL_HANDLE; // Level-0-only view for the framebuffer (aliases img.view at 1 mip).
+                VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        };
+
         struct PassRuntime {
                 PassDef def;
                 SlangTranslation translation;
@@ -304,8 +328,12 @@ struct Chain::Impl {
                 uint32_t allocatedWidth = 0;   // Actual FBO allocation (drift detection).
                 uint32_t allocatedHeight = 0;
                 VkFormat targetFormat = VK_FORMAT_R8G8B8A8_UNORM;
-                VkImageWithView target;
-                VkFramebuffer framebuffer = VK_NULL_HANDLE; // Over own target (intermediate passes).
+                bool feedbackRead = false;     // A pass samples this output's previous-frame buffer.
+                uint32_t targetCount = 1;      // 2 when feedbackRead.
+                uint32_t writeIndex = 0;       // Buffer written this frame; feedback readers use 1 - writeIndex.
+                bool nextPassReadsMips = false; // The NEXT pass reads this output with mipmap_input (F1).
+                uint32_t mipLevels = 1;        // Resolved at allocation time from nextPassReadsMips.
+                std::array<PassTarget, 2> targets;
                 Ubo vertexUbo;
                 Ubo fragmentUbo;
                 VkDescriptorSet set1 = VK_NULL_HANDLE;
@@ -331,6 +359,29 @@ struct Chain::Impl {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAllocation = VK_NULL_HANDLE;
 
+        // History ring (SPEC 5.2): depth+1 RGBA8 slots at game resolution;
+        // OriginalHistoryN binds slot [(slot - N) mod count] = frame T-N. All
+        // slots are seeded with the current frame on the first render and
+        // after every input-size change (RetroArch history warmup, F5).
+        uint32_t historyDepth = 0; // Max OriginalHistoryN (N >= 1) referenced by any pass.
+        struct HistoryRing {
+                std::vector<VkImageWithView> slots;
+                uint32_t slot = 0;   // Slot holding the current frame after the update.
+                uint32_t width = 0;
+                uint32_t height = 0;
+                bool seeded = false;
+        } history;
+
+        // Pass-0 mipmap_input (F1): the chain input itself stays a 1-mip host
+        // image, so pass 0 samples a mip-capable RGBA8 copy blitted and
+        // refilled every frame.
+        bool useSourceMipCopy = false;
+        VkImageWithView sourceMipCopy{};
+        uint32_t srcMipWidth = 0;
+        uint32_t srcMipHeight = 0;
+
+        std::unordered_set<std::string> warnedTextureFallbacks;
+
         uint32_t gameWidth = 0;
         uint32_t gameHeight = 0;
         uint32_t targetWidth = 0;
@@ -351,10 +402,13 @@ struct Chain::Impl {
                                 vkDestroyShaderModule(dev, pass.vertexModule, nullptr);
                         if (pass.fragmentModule != VK_NULL_HANDLE)
                                 vkDestroyShaderModule(dev, pass.fragmentModule, nullptr);
-                        DestroyTarget(pass);
+                        for (PassTarget &t : pass.targets)
+                                DestroyPassTarget(t);
                         DestroyUbo(pass.vertexUbo);
                         DestroyUbo(pass.fragmentUbo);
                 }
+                DestroyHistory();
+                DestroySourceMipCopy();
                 for (auto &entry : outputFramebuffers)
                         vkDestroyFramebuffer(dev, entry.second, nullptr);
                 for (auto &entry : renderPasses)
@@ -377,21 +431,27 @@ struct Chain::Impl {
                         vmaDestroyBuffer(device->impl().allocator, vertexBuffer, vertexAllocation);
         }
 
-        void DestroyTarget(PassRuntime &pass)
+        void DestroyPassTarget(PassTarget &t)
         {
-                if (device == nullptr)
-                        return;
                 VkDevice dev = device->device();
-                if (pass.framebuffer != VK_NULL_HANDLE)
-                        vkDestroyFramebuffer(dev, pass.framebuffer, nullptr);
-                if (pass.target.view != VK_NULL_HANDLE)
-                        vkDestroyImageView(dev, pass.target.view, nullptr);
-                if (pass.target.image != VK_NULL_HANDLE)
-                        vmaDestroyImage(device->impl().allocator, pass.target.image, pass.target.allocation);
-                pass.framebuffer = VK_NULL_HANDLE;
-                pass.target = {};
+                if (t.framebuffer != VK_NULL_HANDLE)
+                        vkDestroyFramebuffer(dev, t.framebuffer, nullptr);
+                if (t.renderView != VK_NULL_HANDLE && t.renderView != t.img.view)
+                        vkDestroyImageView(dev, t.renderView, nullptr);
+                if (t.img.view != VK_NULL_HANDLE)
+                        vkDestroyImageView(dev, t.img.view, nullptr);
+                if (t.img.image != VK_NULL_HANDLE)
+                        vmaDestroyImage(device->impl().allocator, t.img.image, t.img.allocation);
+                t = {};
+        }
+
+        void DestroyTargets(PassRuntime &pass)
+        {
+                for (PassTarget &t : pass.targets)
+                        DestroyPassTarget(t);
                 pass.allocatedWidth = 0;
                 pass.allocatedHeight = 0;
+                pass.mipLevels = 1;
         }
 
         void DestroyUbo(Ubo &ubo)
@@ -421,47 +481,77 @@ struct Chain::Impl {
                 return {};
         }
 
-        auto MakeTarget(PassRuntime &pass, uint32_t width, uint32_t height) -> std::expected<void, Error>
+        static uint32_t MipLevelsForExtent(uint32_t width, uint32_t height)
         {
-                DestroyTarget(pass);
+                uint32_t levels = 1;
+                uint32_t size = std::max(width, height);
+                while (size > 1) {
+                        size >>= 1;
+                        ++levels;
+                }
+                return levels;
+        }
+
+        // Allocates one target slot: image (full mip chain when the next pass
+        // reads mips), sample view, level-0 render view + framebuffer, and the
+        // initial UNDEFINED -> SHADER_READ_ONLY transition. Feedback buffers
+        // are additionally cleared to opaque black so the first frame's
+        // readers sample defined content (SPEC 5.3: "first frames after a
+        // preset switch start from black").
+        auto MakePassTarget(PassRuntime &pass, uint32_t slotIndex, uint32_t width, uint32_t height, bool clearToBlack)
+            -> std::expected<void, Error>
+        {
+                PassTarget &t = pass.targets[slotIndex];
+                DestroyPassTarget(t);
+                const uint32_t levels = pass.nextPassReadsMips ? MipLevelsForExtent(width, height) : 1;
+                pass.mipLevels = levels;
+
                 VkImageCreateInfo imageInfo{};
                 imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
                 imageInfo.imageType = VK_IMAGE_TYPE_2D;
                 imageInfo.format = pass.targetFormat;
                 imageInfo.extent = {width, height, 1};
-                imageInfo.mipLevels = 1;
+                imageInfo.mipLevels = levels;
                 imageInfo.arrayLayers = 1;
                 imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
                 imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
                 imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
                 imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
                 VmaAllocationCreateInfo allocInfo{};
                 allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-                if (vmaCreateImage(device->impl().allocator, &imageInfo, &allocInfo, &pass.target.image,
-                        &pass.target.allocation, nullptr)
+                if (vmaCreateImage(device->impl().allocator, &imageInfo, &allocInfo, &t.img.image, &t.img.allocation,
+                        nullptr)
                     != VK_SUCCESS)
                         return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "pass target allocation failed"));
 
                 VkImageViewCreateInfo viewInfo{};
                 viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-                viewInfo.image = pass.target.image;
+                viewInfo.image = t.img.image;
                 viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 viewInfo.format = pass.targetFormat;
-                viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                SLV_VK(vkCreateImageView(device->device(), &viewInfo, nullptr, &pass.target.view), Errc::vk_error);
+                viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+                SLV_VK(vkCreateImageView(device->device(), &viewInfo, nullptr, &t.img.view), Errc::vk_error);
+
+                if (levels > 1) {
+                        // The framebuffer renders into mip 0 only.
+                        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        SLV_VK(vkCreateImageView(device->device(), &viewInfo, nullptr, &t.renderView), Errc::vk_error);
+                } else {
+                        t.renderView = t.img.view;
+                }
 
                 const VkRenderPass renderPass = GetRenderPass(pass.targetFormat);
                 VkFramebufferCreateInfo fbInfo{};
                 fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
                 fbInfo.renderPass = renderPass;
                 fbInfo.attachmentCount = 1;
-                fbInfo.pAttachments = &pass.target.view;
+                fbInfo.pAttachments = &t.renderView;
                 fbInfo.width = width;
                 fbInfo.height = height;
                 fbInfo.layers = 1;
-                SLV_VK(vkCreateFramebuffer(device->device(), &fbInfo, nullptr, &pass.framebuffer), Errc::vk_error);
+                SLV_VK(vkCreateFramebuffer(device->device(), &fbInfo, nullptr, &t.framebuffer), Errc::vk_error);
 
                 // New images start UNDEFINED; the renderpass expects every
                 // target to rest in SHADER_READ_ONLY between uses (its
@@ -472,19 +562,156 @@ struct Chain::Impl {
                         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                        barrier.image = pass.target.image;
-                        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                            0, 0, nullptr, 0, nullptr, 1, &barrier);
+                        barrier.newLayout = clearToBlack ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        barrier.image = t.img.image;
+                        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            clearToBlack ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                            nullptr, 0, nullptr, 1, &barrier);
+                        if (clearToBlack) {
+                                VkClearColorValue black{};
+                                black.float32[0] = black.float32[1] = black.float32[2] = 0.0F;
+                                black.float32[3] = 1.0F;
+                                const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+                                vkCmdClearColorImage(cmd, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                                    &range);
+                                VkImageMemoryBarrier toShader = barrier;
+                                toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShader);
+                        }
                 });
                 if (!transitioned)
                         return std::unexpected(transitioned.error());
 
-                pass.outputWidth = width;
-                pass.outputHeight = height;
-                pass.allocatedWidth = width;
-                pass.allocatedHeight = height;
+                if (slotIndex == 0) {
+                        pass.allocatedWidth = width;
+                        pass.allocatedHeight = height;
+                }
+                return {};
+        }
+
+        void DestroyHistory()
+        {
+                if (device == nullptr)
+                        return;
+                for (VkImageWithView &s : history.slots) {
+                        if (s.view != VK_NULL_HANDLE)
+                                vkDestroyImageView(device->device(), s.view, nullptr);
+                        if (s.image != VK_NULL_HANDLE)
+                                vmaDestroyImage(device->impl().allocator, s.image, s.allocation);
+                }
+                history.slots.clear();
+                history.width = history.height = 0;
+                history.slot = 0;
+                history.seeded = false;
+        }
+
+        // Ring slots are created UNDEFINED; the first frame's command buffer
+        // seeds every slot from the input image.
+        auto MakeHistorySlots(uint32_t width, uint32_t height) -> std::expected<void, Error>
+        {
+                DestroyHistory();
+                const uint32_t count = historyDepth + 1;
+                history.slots.resize(count);
+                for (uint32_t i = 0; i < count; ++i) {
+                        VkImageWithView &s = history.slots[i];
+                        VkImageCreateInfo imageInfo{};
+                        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+                        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+                        imageInfo.extent = {width, height, 1};
+                        imageInfo.mipLevels = 1;
+                        imageInfo.arrayLayers = 1;
+                        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+                        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+                        imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                        VmaAllocationCreateInfo allocInfo{};
+                        allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                        if (vmaCreateImage(device->impl().allocator, &imageInfo, &allocInfo, &s.image, &s.allocation,
+                                nullptr)
+                            != VK_SUCCESS)
+                                return std::unexpected(
+                                    SLV_ERROR(Errc::vk_out_of_memory, "history ring slot allocation failed"));
+                        VkImageViewCreateInfo viewInfo{};
+                        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                        viewInfo.image = s.image;
+                        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+                        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        SLV_VK(vkCreateImageView(device->device(), &viewInfo, nullptr, &s.view), Errc::vk_error);
+                }
+                history.width = width;
+                history.height = height;
+                history.slot = 0;
+                history.seeded = false;
+                return {};
+        }
+
+        void DestroySourceMipCopy()
+        {
+                if (device == nullptr)
+                        return;
+                if (sourceMipCopy.view != VK_NULL_HANDLE)
+                        vkDestroyImageView(device->device(), sourceMipCopy.view, nullptr);
+                if (sourceMipCopy.image != VK_NULL_HANDLE)
+                        vmaDestroyImage(device->impl().allocator, sourceMipCopy.image, sourceMipCopy.allocation);
+                sourceMipCopy = {};
+                srcMipWidth = 0;
+                srcMipHeight = 0;
+        }
+
+        // Mip-capable RGBA8 copy of the chain input for pass-0 mipmap_input
+        // (F1). Created UNDEFINED; refilled from the input every frame.
+        auto MakeSourceMipCopy(uint32_t width, uint32_t height) -> std::expected<void, Error>
+        {
+                DestroySourceMipCopy();
+                const uint32_t levels = MipLevelsForExtent(width, height);
+                VkImageCreateInfo imageInfo{};
+                imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                imageInfo.imageType = VK_IMAGE_TYPE_2D;
+                imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+                imageInfo.extent = {width, height, 1};
+                imageInfo.mipLevels = levels;
+                imageInfo.arrayLayers = 1;
+                imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+                imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+                imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+                imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                VmaAllocationCreateInfo allocInfo{};
+                allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                if (vmaCreateImage(device->impl().allocator, &imageInfo, &allocInfo, &sourceMipCopy.image,
+                        &sourceMipCopy.allocation, nullptr)
+                    != VK_SUCCESS)
+                        return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "source mip copy allocation failed"));
+                VkImageViewCreateInfo viewInfo{};
+                viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                viewInfo.image = sourceMipCopy.image;
+                viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+                viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+                SLV_VK(vkCreateImageView(device->device(), &viewInfo, nullptr, &sourceMipCopy.view), Errc::vk_error);
+
+                auto transitioned = device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
+                        VkImageMemoryBarrier barrier{};
+                        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        barrier.image = sourceMipCopy.image;
+                        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                });
+                if (!transitioned)
+                        return std::unexpected(transitioned.error());
+                srcMipWidth = width;
+                srcMipHeight = height;
                 return {};
         }
 
@@ -516,16 +743,16 @@ struct Chain::Impl {
                 std::array<VkSubpassDependency, 2> deps{};
                 deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
                 deps[0].dstSubpass = 0;
-                deps[0].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-                deps[0].srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+                deps[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                 deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
                 deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                 deps[1].srcSubpass = 0;
                 deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
                 deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
                 deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                deps[1].dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-                deps[1].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+                deps[1].dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
 
                 VkRenderPassCreateInfo info{};
                 info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -555,7 +782,10 @@ struct Chain::Impl {
                 info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
                 info.magFilter = def.filter == FilterMode::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
                 info.minFilter = info.magFilter;
-                info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                // Mip-mode policy (SPEC 5.4/F1): only mipmap_input readers get a
+                // mip filter (linear, per the reference host's mip plan); every
+                // other binding samples level 0.
+                info.mipmapMode = def.mipmapInput ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
                 switch (def.wrap) {
                         case WrapMode::Repeat: info.addressModeU = info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
                         case WrapMode::MirroredRepeat: info.addressModeU = info.addressModeV = info.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
@@ -621,6 +851,74 @@ struct Chain::Impl {
 
 namespace {
 
+// Classic (core-1.0) image barrier for one mip level. The M1 floor is
+// Vulkan 1.1, so sync2's barrier2 commands are not guaranteed (plan §8).
+void BarrierMipLevel(VkCommandBuffer cmd, VkImage image, uint32_t level, uint32_t levelCount, VkImageLayout oldLayout,
+    VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess,
+    VkAccessFlags dstAccess)
+{
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, levelCount, 0, 1};
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+// Refills a full mip chain from level 0 (F1 mip plan; deterministic box
+// average on power-of-two extents). Level 0 starts in SHADER_READ_ONLY
+// (render pass finalLayout) or TRANSFER_DST (freshly blitted from the host
+// input); every level rests in SHADER_READ_ONLY afterwards.
+void RecordMipChain(VkCommandBuffer cmd, VkImage image, uint32_t levels, uint32_t width, uint32_t height,
+    bool level0InTransferDst)
+{
+        if (levels <= 1)
+                return;
+        constexpr VkPipelineStageFlags kTransfer = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        constexpr VkPipelineStageFlags kAll = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+        if (level0InTransferDst)
+                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+        else
+                BarrierMipLevel(cmd, image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+
+        int32_t mipW = static_cast<int32_t>(width);
+        int32_t mipH = static_cast<int32_t>(height);
+        for (uint32_t l = 1; l < levels; ++l) {
+                BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kAll, kTransfer, VK_ACCESS_SHADER_READ_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkImageBlit blit{};
+                blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - 1, 0, 1};
+                blit.srcOffsets[1] = {std::max(1, mipW), std::max(1, mipH), 1};
+                blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+                blit.dstOffsets[1] = {std::max(1, mipW >> 1), std::max(1, mipH >> 1), 1};
+                vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+                // The source level is consumed: rest it in SHADER_READ_ONLY.
+                BarrierMipLevel(cmd, image, l - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_SHADER_READ_BIT);
+                if (l + 1 < levels)
+                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kTransfer, kTransfer, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_READ_BIT);
+                else
+                        BarrierMipLevel(cmd, image, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, kAll, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT);
+                mipW = std::max(1, mipW >> 1);
+                mipH = std::max(1, mipH >> 1);
+        }
+}
+
 // Semantics ported from the reference host (F6 pin): Viewport-scale passes
 // resolve against the aspect-corrected game rect inside the output target.
 void ResolvePassSizes(Chain::Impl &impl, uint32_t gameW, uint32_t gameH, uint32_t targetW, uint32_t targetH)
@@ -647,49 +945,133 @@ void ResolvePassSizes(Chain::Impl &impl, uint32_t gameW, uint32_t gameH, uint32_
 }
 
 auto ResolveTexture(const std::string &name, size_t passIndex, Chain::Impl &impl, const InputFrame &input,
-    Chain::Impl::PassRuntime &pass, VkImageView &view, VkSampler &sampler) -> std::expected<void, Error>
+    VkImageView fallbackSource, VkImageView &view, VkSampler &sampler) -> std::expected<void, Error>
 {
         const Chain::Impl::PassRuntime &self = impl.passes[passIndex];
-        sampler = impl.GetSampler(self.def);
-        if (sampler == VK_NULL_HANDLE)
-                return std::unexpected(SLV_ERROR(Errc::vk_error, "sampler creation failed"));
+
+        // Sampler policy (SPEC 5.4): Source uses the reading pass's
+        // filter_linearN/wrap_modeN/mipmap_inputN; every other binding is
+        // nearest/clamp-to-edge.
+        const auto sourceSampler = [&]() -> std::expected<void, Error> {
+                sampler = impl.GetSampler(self.def);
+                if (sampler == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "sampler creation failed"));
+                return {};
+        };
+        const auto neutralSampler = [&]() -> std::expected<void, Error> {
+                const PassDef neutral; // nearest / clamp-to-edge / no mips
+                sampler = impl.GetSampler(neutral);
+                if (sampler == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "sampler creation failed"));
+                return {};
+        };
+        const auto passOutputView = [&](size_t idx, bool previousFrame) -> VkImageView {
+                const Chain::Impl::PassRuntime &owner = impl.passes[idx];
+                const uint32_t buffer = previousFrame ? 1u - owner.writeIndex : owner.writeIndex;
+                return owner.targets[buffer].img.view;
+        };
 
         if (name == "Source") {
-                view = passIndex == 0 ? input.view : impl.passes[passIndex - 1].target.view;
+                auto got = sourceSampler();
+                if (!got)
+                        return got;
+                if (passIndex == 0)
+                        view = impl.useSourceMipCopy ? impl.sourceMipCopy.view : input.view;
+                else
+                        view = passOutputView(passIndex - 1, false);
                 return {};
         }
-        if (name == "Original" || name.rfind("OriginalHistory", 0) == 0) {
-                // History rings land in M2; Original itself is the chain input.
-                if (name != "Original")
-                        return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                            "OriginalHistory# taps land in M2 (history rings)"));
+        if (name == "Original" || name == "OriginalHistory0") {
+                auto got = neutralSampler();
+                if (!got)
+                        return got;
                 view = input.view;
                 return {};
         }
-        if (name.rfind("PassOutput", 0) == 0 || name.rfind("PASSOUTPUT", 0) == 0) {
-                if (name.size() <= 10)
-                        return std::unexpected(SLV_ERROR(Errc::preset_parse, "malformed PassOutput# reference: " + name));
+        if (name.rfind("OriginalHistory", 0) == 0) {
+                if (name.size() <= 15 || impl.history.slots.empty())
+                        return std::unexpected(
+                            SLV_ERROR(Errc::preset_parse, "OriginalHistory# reference without a ring: " + name));
+                const int n = std::atoi(name.c_str() + 15);
+                const size_t count = impl.history.slots.size();
+                if (n < 1 || static_cast<size_t>(n) >= count)
+                        return std::unexpected(SLV_ERROR(Errc::preset_parse, "OriginalHistory index out of range: " + name));
+                auto got = neutralSampler();
+                if (!got)
+                        return got;
+                view = impl.history.slots[(impl.history.slot + count - static_cast<size_t>(n)) % count].view;
+                return {};
+        }
+        if (name.rfind("PassOutput", 0) == 0 && name.size() > 10) {
                 const int idx = std::atoi(name.c_str() + 10);
                 if (idx < 0 || static_cast<size_t>(idx) >= impl.passes.size())
                         return std::unexpected(SLV_ERROR(Errc::preset_parse, "PassOutput index out of range: " + name));
-                if (static_cast<size_t>(idx) == passIndex)
-                        return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                            "feedback reads of a pass's own output land in M2"));
-                view = impl.passes[static_cast<size_t>(idx)].target.view;
+                if (static_cast<size_t>(idx) >= passIndex)
+                        return std::unexpected(SLV_ERROR(Errc::preset_parse,
+                            "PassOutput" + std::to_string(idx) + " is not causal in pass "
+                                + std::to_string(passIndex)));
+                auto got = neutralSampler();
+                if (!got)
+                        return got;
+                view = passOutputView(static_cast<size_t>(idx), false);
                 return {};
         }
-        if (name.rfind("PASSPREV", 0) == 0 || name.rfind("PassFeedback", 0) == 0)
-                return std::unexpected(
-                    SLV_ERROR(Errc::unsupported_feature, "PASSPREV/PassFeedback taps land in M2 (feedback rings)"));
-        for (size_t j = 0; j < passIndex; ++j)
-                if (!impl.passes[j].def.alias.empty() && impl.passes[j].def.alias == name) {
-                        view = impl.passes[j].target.view;
-                        return {};
+        if (name.rfind("PassFeedback", 0) == 0 && name.size() > 12) {
+                const int idx = std::atoi(name.c_str() + 12);
+                if (idx < 0 || static_cast<size_t>(idx) >= impl.passes.size())
+                        return std::unexpected(SLV_ERROR(Errc::preset_parse, "PassFeedback index out of range: " + name));
+                auto got = neutralSampler();
+                if (!got)
+                        return got;
+                view = passOutputView(static_cast<size_t>(idx), true);
+                return {};
+        }
+        // <name>Feedback: alias / #pragma name + Feedback suffix = that pass's
+        // previous-frame output (SPEC 5.3). Case-insensitive end to end (F9).
+        if (name.size() > 8 && vk::CaseInsensitiveEqual(name.substr(name.size() - 8), "Feedback")) {
+                const std::string base = name.substr(0, name.size() - 8);
+                for (size_t j = 0; j < impl.passes.size(); ++j) {
+                        const Chain::Impl::PassRuntime &owner = impl.passes[j];
+                        const bool aliasHit = !owner.def.alias.empty() && vk::CaseInsensitiveEqual(owner.def.alias, base);
+                        const bool nameHit = !owner.translation.pragmaName.empty()
+                            && vk::CaseInsensitiveEqual(owner.translation.pragmaName, base);
+                        if (aliasHit || nameHit) {
+                                auto got = neutralSampler();
+                                if (!got)
+                                        return got;
+                                view = passOutputView(j, true);
+                                return {};
+                        }
                 }
+        }
+        // Plain alias / #pragma name: earlier passes' outputs this frame.
+        for (size_t j = 0; j < impl.passes.size(); ++j) {
+                const Chain::Impl::PassRuntime &owner = impl.passes[j];
+                const bool aliasHit = !owner.def.alias.empty() && vk::CaseInsensitiveEqual(owner.def.alias, name);
+                const bool nameHit = !owner.translation.pragmaName.empty()
+                    && vk::CaseInsensitiveEqual(owner.translation.pragmaName, name);
+                if (!aliasHit && !nameHit)
+                        continue;
+                auto got = neutralSampler();
+                if (!got)
+                        return got;
+                if (j < passIndex) {
+                        view = passOutputView(j, false);
+                } else {
+                        // Not causal this frame: warn once, bind the current source
+                        // texture (SPEC 4.5 runtime fallback; never a null bind).
+                        if (impl.warnedTextureFallbacks.insert(name).second)
+                                std::fprintf(stderr, "libslang-vk: texture '%s' is not causal in pass %zu; "
+                                                     "binding the current source instead\n",
+                                    name.c_str(), passIndex);
+                        view = fallbackSource;
+                }
+                return {};
+        }
         for (const slv::preset::TextureDef &texture : impl.presetTextures)
-                if (texture.name == name)
+                if (vk::CaseInsensitiveEqual(texture.name, name))
                         return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                            "LUT texture '" + name + "' image upload lands in M2"));
+                            "LUT texture '" + name + "' image upload lands in M3"));
         return std::unexpected(SLV_ERROR(Errc::preset_parse, "unresolved texture reference: " + name));
 }
 
@@ -761,6 +1143,44 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
 
         // Per-pass resources.
         impl.passes.resize(passCount);
+
+        // M2 chain analysis: history depth, demand-driven feedback double
+        // buffering (SPEC 5.3), mip targets (F1), and the final-pass feedback
+        // guard (the final pass writes the host target directly; a
+        // previous-frame copy of it needs the M4 presentation path).
+        for (size_t i = 0; i < passCount; ++i) {
+                if (i + 1 < passCount && presetPasses[i + 1].mipmapInput)
+                        impl.passes[i].nextPassReadsMips = true;
+                for (const TextureRef &ref : presetTranslations[i].fragment.textures) {
+                        const std::string &n = ref.name;
+                        if (n.size() > 12 && n.compare(0, 12, "PassFeedback") == 0) {
+                                const int idx = std::atoi(n.c_str() + 12);
+                                if (idx >= 0 && static_cast<size_t>(idx) < passCount)
+                                        impl.passes[static_cast<size_t>(idx)].feedbackRead = true;
+                        } else if (n.size() > 8 && vk::CaseInsensitiveEqual(n.substr(n.size() - 8), "Feedback")) {
+                                const std::string base = n.substr(0, n.size() - 8);
+                                for (size_t j = 0; j < passCount; ++j) {
+                                        const bool aliasHit = !presetPasses[j].alias.empty()
+                                            && vk::CaseInsensitiveEqual(presetPasses[j].alias, base);
+                                        const bool nameHit = !presetTranslations[j].pragmaName.empty()
+                                            && vk::CaseInsensitiveEqual(presetTranslations[j].pragmaName, base);
+                                        if (aliasHit || nameHit)
+                                                impl.passes[j].feedbackRead = true;
+                                }
+                        }
+                }
+        }
+        for (size_t i = 0; i < passCount; ++i)
+                impl.passes[i].targetCount = impl.passes[i].feedbackRead ? 2u : 1u;
+        for (const SlangTranslation &translation : presetTranslations)
+                for (const TextureRef &ref : translation.fragment.textures)
+                        if (ref.name.size() > 15 && ref.name.compare(0, 15, "OriginalHistory") == 0) {
+                                const int n = std::atoi(ref.name.c_str() + 15);
+                                if (n >= 1)
+                                        impl.historyDepth = std::max(impl.historyDepth, static_cast<uint32_t>(n));
+                        }
+        impl.useSourceMipCopy = presetPasses[0].mipmapInput;
+
         for (size_t i = 0; i < passCount; ++i) {
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
                 pass.def = presetPasses[i];
@@ -861,7 +1281,13 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 pipelineInfo.pColorBlendState = &blend;
                 pipelineInfo.pDynamicState = &dynamic;
                 pipelineInfo.layout = pass.pipelineLayout;
-                pipelineInfo.renderPass = impl.GetRenderPass(pass.targetFormat);
+                // The final pass renders straight into the host output target
+                // (host format) unless it is feedback-read — then it renders
+                // into its own double-buffered target like the intermediates
+                // and a resolve blit copies the result to the host image.
+                const bool isLastPass = i + 1 == passCount;
+                const bool rendersToHost = isLastPass && !pass.feedbackRead;
+                pipelineInfo.renderPass = impl.GetRenderPass(rendersToHost ? impl.targetFormat : pass.targetFormat);
                 if (pipelineInfo.renderPass == VK_NULL_HANDLE)
                         return std::unexpected(SLV_ERROR(Errc::vk_error, "render pass creation failed"));
                 SLV_VK(vkCreateGraphicsPipelines(device.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
@@ -956,6 +1382,14 @@ auto Chain::setParameter(std::string_view id, float value) -> std::expected<void
 {
         if (id.empty())
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::setParameter: empty id"));
+        // Case-insensitive update in place: parameter names arrive in mixed
+        // case ("GAIN" vs the parser-lowercased "gain"), and case-variant
+        // duplicates in the override map would merge in hash order.
+        for (auto &[name, existing] : impl_->paramOverrides)
+                if (vk::CaseInsensitiveEqual(name, std::string(id))) {
+                        existing = value;
+                        return {};
+                }
         impl_->paramOverrides.insert_or_assign(std::string(id), value);
         return {};
 }
@@ -975,7 +1409,8 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         if (input.view == VK_NULL_HANDLE || input.width == 0 || input.height == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid input frame"));
         if (input.rotation != Rotation::None)
-                return std::unexpected(SLV_ERROR(Errc::unsupported_feature, "rotation lands in M2"));
+                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
+                    "rotation != None lands in M4 (presentation path)"));
 
         if (std::holds_alternative<SwapchainFrame>(target))
                 return std::unexpected(SLV_ERROR(Errc::unsupported_feature, "swapchain output lands in M4"));
@@ -987,8 +1422,22 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument,
                     "render: offscreen target must match ChainOptions size/format (resize() to change)"));
 
+        // The final-pass feedback resolve blits into the host image itself.
+        const bool finalFeedbackResolve = !impl.passes.empty() && impl.passes.back().feedbackRead;
+        if (finalFeedbackResolve && offscreen.image == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "render: Offscreen::image is required when the final pass is feedback-read"));
+
         impl.gameWidth = input.width;
         impl.gameHeight = input.height;
+
+        // History ring updates and the pass-0 mip copy blit from the input
+        // image itself; it is never modified and rests in SHADER_READ_ONLY
+        // before and after the frame.
+        const bool needsSourceImage = impl.historyDepth > 0 || impl.useSourceMipCopy;
+        if (needsSourceImage && input.image == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "render: InputFrame::image is required for history/mipmap presets"));
 
         // 1. Resolve pass sizes; the final pass must land on the output target.
         ResolvePassSizes(impl, input.width, input.height, impl.targetWidth, impl.targetHeight);
@@ -998,20 +1447,29 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                     "final pass resolves to " + std::to_string(last.outputWidth) + "x"
                         + std::to_string(last.outputHeight) + " but the output target is "
                         + std::to_string(impl.targetWidth) + "x" + std::to_string(impl.targetHeight)
-                        + "; final-pass blit/letterbox lands in M2"));
+                        + "; final-pass blit/letterbox lands in M4"));
 
-        // 2. Ensure intermediate FBOs exist (intermediate = all but last).
-        for (size_t i = 0; i + 1 < impl.passes.size(); ++i) {
+        // 2. Ensure pass targets exist; recreate on size drift (M2: resize()
+        // no longer requires a new Chain). Intermediate passes always render
+        // into their own target; a feedback-read FINAL pass also renders into
+        // its own (double-buffered) target and resolves to the host image
+        // with a blit afterwards. Feedback readers get a cleared second
+        // buffer so first-frame samples are defined (SPEC 5.3).
+        for (size_t i = 0; i < impl.passes.size(); ++i) {
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
-                if (pass.target.image == VK_NULL_HANDLE || pass.outputWidth != pass.allocatedWidth
+                const bool needsOwnTarget = i + 1 < impl.passes.size() || pass.feedbackRead;
+                if (!needsOwnTarget)
+                        continue;
+                if (pass.targets[0].img.image == VK_NULL_HANDLE || pass.outputWidth != pass.allocatedWidth
                     || pass.outputHeight != pass.allocatedHeight) {
-                        // Recreate when size drifted (resize() path).
-                        if (pass.target.image != VK_NULL_HANDLE)
-                                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                                    "mid-chain FBO recreation on resize lands in M2 (recreate the Chain)"));
-                        auto made = impl.MakeTarget(pass, pass.outputWidth, pass.outputHeight);
+                        auto made = impl.MakePassTarget(pass, 0, pass.outputWidth, pass.outputHeight, false);
                         if (!made)
                                 return std::unexpected(made.error());
+                        if (pass.targetCount == 2) {
+                                made = impl.MakePassTarget(pass, 1, pass.outputWidth, pass.outputHeight, true);
+                                if (!made)
+                                        return std::unexpected(made.error());
+                        }
                 }
         }
 
@@ -1041,6 +1499,48 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         std::vector<std::pair<uint32_t, uint32_t>> passSizes;
         for (const Chain::Impl::PassRuntime &pass : impl.passes)
                 passSizes.emplace_back(pass.outputWidth, pass.outputHeight);
+
+        // Alias / #pragma name size lookups resolve to the OWNING pass's
+        // output size (the fill context carries them case-insensitively).
+        std::vector<vk::BlockFillContext::AliasSize> aliasSizes;
+        for (size_t j = 0; j < impl.passes.size(); ++j) {
+                const Chain::Impl::PassRuntime &owner = impl.passes[j];
+                const bool isFinal = j + 1 == impl.passes.size();
+                const uint32_t w = isFinal ? impl.targetWidth : owner.outputWidth;
+                const uint32_t h = isFinal ? impl.targetHeight : owner.outputHeight;
+                if (!owner.def.alias.empty())
+                        aliasSizes.push_back({owner.def.alias, w, h});
+                if (!owner.translation.pragmaName.empty())
+                        aliasSizes.push_back({owner.translation.pragmaName, w, h});
+        }
+
+        // 4b. Ring / mip-copy (re)allocation happens before recording so the
+        // error paths stay outside the command lambda.
+        if (impl.historyDepth > 0
+            && (impl.history.width != input.width || impl.history.height != input.height)) {
+                auto made = impl.MakeHistorySlots(input.width, input.height);
+                if (!made)
+                        return std::unexpected(made.error());
+        }
+        if (impl.useSourceMipCopy && (impl.srcMipWidth != input.width || impl.srcMipHeight != input.height)) {
+                auto made = impl.MakeSourceMipCopy(input.width, input.height);
+                if (!made)
+                        return std::unexpected(made.error());
+        }
+
+        // 4c. History ring slot bookkeeping must happen BEFORE descriptor
+        // writes: OriginalHistoryN binds (slot - N) as of AFTER this frame's
+        // advance, and descriptors capture views up front.
+        bool seedRing = false;
+        if (impl.historyDepth > 0 && !impl.history.slots.empty()) {
+                if (!impl.history.seeded) {
+                        seedRing = true;
+                        impl.history.slot = 0;
+                        impl.history.seeded = true;
+                } else {
+                        impl.history.slot = (impl.history.slot + 1) % impl.history.slots.size();
+                }
+        }
 
         // Effective parameter values: .slangp overrides, then setParameter()
         // runtime overrides on top (matching is case-insensitive in the fill,
@@ -1078,6 +1578,7 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 ctx.frameDeltaUs = frame.frameDeltaUs;
                 ctx.frameDirection = frame.frameDirection;
                 ctx.passOutputSizes = &passSizes;
+                ctx.aliasSizes = &aliasSizes;
 
                 if (!pass.translation.vertex.uniformBlocks.empty()) {
                         ctx.vertexStage = true;
@@ -1101,19 +1602,28 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 inputH = pass.outputHeight;
         }
 
-        // 5. Bind textures into set 2 for every pass.
+        // 5. Bind textures into set 2 for every pass (M2 resolver).
         for (size_t i = 0; i < impl.passes.size(); ++i) {
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
                 const size_t textureCount = pass.translation.fragment.textures.size();
                 if (textureCount == 0)
                         continue;
+                // Fallback source for non-causal alias/pragma-name taps (SPEC 4.5):
+                // the same texture Source would bind for this pass.
+                VkImageView fallbackSource = VK_NULL_HANDLE;
+                if (i == 0)
+                        fallbackSource = impl.useSourceMipCopy ? impl.sourceMipCopy.view : input.view;
+                else {
+                        const Chain::Impl::PassRuntime &prev = impl.passes[i - 1];
+                        fallbackSource = prev.targets[prev.writeIndex].img.view;
+                }
                 std::vector<VkDescriptorImageInfo> imageInfos(textureCount);
                 std::vector<VkWriteDescriptorSet> writes(textureCount);
                 for (size_t t = 0; t < textureCount; ++t) {
                         const TextureRef &ref = pass.translation.fragment.textures[t];
                         VkImageView view = VK_NULL_HANDLE;
                         VkSampler sampler = VK_NULL_HANDLE;
-                        auto resolved = ResolveTexture(ref.name, i, impl, input, pass, view, sampler);
+                        auto resolved = ResolveTexture(ref.name, i, impl, input, fallbackSource, view, sampler);
                         if (!resolved)
                                 return std::unexpected(resolved.error());
                         imageInfos[t] = {sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -1125,20 +1635,107 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                     nullptr);
         }
 
-        // 6. Record + submit (synchronous M1).
+        // 6. Record + submit (synchronous).
         auto recorded = impl.device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
-                uint32_t inputW2 = input.width;
-                uint32_t inputH2 = input.height;
+                // The input image is borrowed as a blit source for the history
+                // ring and the pass-0 mip copy, then restored to
+                // SHADER_READ_ONLY before any pass samples it.
+                bool inputInTransferSrc = false;
+                const auto promoteInput = [&]() {
+                        if (inputInTransferSrc)
+                                return;
+                        BarrierMipLevel(cmd, input.image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                        inputInTransferSrc = true;
+                };
+                const auto restoreInput = [&]() {
+                        if (!inputInTransferSrc)
+                                return;
+                        BarrierMipLevel(cmd, input.image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_ACCESS_SHADER_READ_BIT);
+                        inputInTransferSrc = false;
+                };
+                const auto blitInputTo = [&](VkImage dst) {
+                        VkImageBlit blit{};
+                        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        blit.srcOffsets[1] = {static_cast<int32_t>(input.width), static_cast<int32_t>(input.height), 1};
+                        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        blit.dstOffsets[1] = blit.srcOffsets[1];
+                        vkCmdBlitImage(cmd, input.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+                };
+
+                // (a) History ring update (SPEC 5.2): seed every slot on the
+                // first frame and after input-size changes; otherwise advance
+                // one slot. The slot was already advanced before descriptor
+                // writes, so OriginalHistoryN binds frame T-N.
+                if (impl.historyDepth > 0 && !impl.history.slots.empty()) {
+                        promoteInput();
+                        const size_t count = impl.history.slots.size();
+                        if (seedRing) {
+                                for (size_t s = 0; s < count; ++s) {
+                                        BarrierMipLevel(cmd, impl.history.slots[s].image, 0, 1,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                            VK_ACCESS_TRANSFER_WRITE_BIT);
+                                        blitInputTo(impl.history.slots[s].image);
+                                        BarrierMipLevel(cmd, impl.history.slots[s].image, 0, 1,
+                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                            VK_ACCESS_SHADER_READ_BIT);
+                                }
+                        } else {
+                                const size_t current = impl.history.slot;
+                                BarrierMipLevel(cmd, impl.history.slots[current].image, 0, 1,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                                blitInputTo(impl.history.slots[current].image);
+                                BarrierMipLevel(cmd, impl.history.slots[current].image, 0, 1,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                        }
+                }
+
+                // (b) Pass-0 mipmap_input: refill the mip-capable input copy (F1).
+                if (impl.useSourceMipCopy && impl.sourceMipCopy.image != VK_NULL_HANDLE) {
+                        promoteInput();
+                        BarrierMipLevel(cmd, impl.sourceMipCopy.image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                        blitInputTo(impl.sourceMipCopy.image);
+                        RecordMipChain(cmd, impl.sourceMipCopy.image, Chain::Impl::MipLevelsForExtent(
+                                          impl.srcMipWidth, impl.srcMipHeight),
+                            impl.srcMipWidth, impl.srcMipHeight, true);
+                }
+                restoreInput();
+
+                // (c) Passes. A mip-reading pass gets its input pass's mip
+                // chain refilled right before it binds (F1); double-buffered
+                // passes write targets[writeIndex] while feedback readers
+                // sample targets[1 - writeIndex] (SPEC 5.3).
                 for (size_t i = 0; i < impl.passes.size(); ++i) {
                         Chain::Impl::PassRuntime &pass = impl.passes[i];
+                        if (i > 0 && pass.def.mipmapInput) {
+                                Chain::Impl::PassRuntime &src = impl.passes[i - 1];
+                                RecordMipChain(cmd, src.targets[src.writeIndex].img.image, src.mipLevels,
+                                    src.allocatedWidth, src.allocatedHeight, false);
+                        }
                         const bool isLast = i + 1 == impl.passes.size();
+                        const bool rendersToHost = isLast && !pass.feedbackRead;
                         const uint32_t outW = isLast ? impl.targetWidth : pass.outputWidth;
                         const uint32_t outH = isLast ? impl.targetHeight : pass.outputHeight;
 
                         VkRenderPassBeginInfo beginInfo{};
                         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-                        beginInfo.renderPass = impl.GetRenderPass(pass.targetFormat);
-                        beginInfo.framebuffer = isLast ? outputFramebuffer : pass.framebuffer;
+                        beginInfo.renderPass = impl.GetRenderPass(rendersToHost ? impl.targetFormat : pass.targetFormat);
+                        beginInfo.framebuffer = rendersToHost ? outputFramebuffer
+                                                              : pass.targets[pass.writeIndex].framebuffer;
                         beginInfo.renderArea = {{0, 0}, {outW, outH}};
                         std::array<float, 4> black = {0.F, 0.F, 0.F, 1.F};
                         beginInfo.clearValueCount = 1;
@@ -1158,15 +1755,47 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         vkCmdBindVertexBuffers(cmd, 0, 1, &impl.vertexBuffer, &offset);
                         vkCmdDraw(cmd, 4, 1, 0, 0);
                         vkCmdEndRenderPass(cmd);
-
-                        inputW2 = outW;
-                        inputH2 = outH;
                 }
-                (void)inputW2;
-                (void)inputH2;
+
+                // (d) Final-pass feedback resolve: the last pass rendered into
+                // its own double-buffered target; copy it into the host image
+                // (1:1, nearest — the final pass resolves to the target size).
+                if (finalFeedbackResolve) {
+                        Chain::Impl::PassRuntime &lastPass = impl.passes.back();
+                        const VkImage srcImage = lastPass.targets[lastPass.writeIndex].img.image;
+                        BarrierMipLevel(cmd, srcImage, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                        BarrierMipLevel(cmd, offscreen.image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                        VkImageBlit resolve{};
+                        resolve.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        resolve.srcOffsets[1] = {static_cast<int32_t>(impl.targetWidth),
+                            static_cast<int32_t>(impl.targetHeight), 1};
+                        resolve.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        resolve.dstOffsets[1] = resolve.srcOffsets[1];
+                        vkCmdBlitImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, offscreen.image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve, VK_FILTER_NEAREST);
+                        BarrierMipLevel(cmd, srcImage, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_ACCESS_SHADER_READ_BIT);
+                        BarrierMipLevel(cmd, offscreen.image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT);
+                }
         });
         if (!recorded)
                 return std::unexpected(recorded.error());
+
+        // Double-buffered passes flip AFTER the frame (SPEC 5.3): this
+        // frame's write buffer becomes the next frame's feedback source.
+        for (Chain::Impl::PassRuntime &pass : impl.passes)
+                if (pass.targetCount == 2)
+                        pass.writeIndex ^= 1u;
+
         return {};
 }
 

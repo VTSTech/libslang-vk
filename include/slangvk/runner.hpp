@@ -8,11 +8,14 @@
 // so consumers need no Vulkan SDK at link time — only the headers that
 // ship alongside this one for the handle types.
 //
-// M1 scope: Device adopt/create, Preset load (parse + translate + compile),
-// Chain create/render for single- and multi-pass offscreen execution and
-// host image helpers for headless use (tests, golden images, CI).
-// History rings, feedback, LUT image upload, rotation and swapchain output
-// land in M2-M4; those paths return slv::Errc::unsupported_feature for now.
+// M2 scope: Device adopt/create, Preset load (parse + translate + compile),
+// Chain create/render for multi-pass offscreen execution with the full chain
+// semantics — history rings (OriginalHistory#), feedback double-buffering
+// (PassFeedback# / <name>Feedback), mipmap refill, per-pass FBO formats,
+// FBO recreation on resize and live parameters — plus host image helpers
+// for headless use (tests, golden images, CI).
+// LUT image upload lands in M3 (corpus sweep); rotation and swapchain
+// output in M4; those paths return slv::Errc::unsupported_feature for now.
 
 #include <cstdint>
 #include <expected>
@@ -233,6 +236,13 @@ struct FrameInfo {
 /** @brief The chain's input texture (host-owned image; layout must be SHADER_READ_ONLY_OPTIMAL). */
 struct InputFrame {
         VkImageView view = VK_NULL_HANDLE;
+        /**
+         * @brief The underlying image (required for history and mipmap-input
+         * presets: the runner blits it into the history ring / mip-capable
+         * copy every frame; the image content is never modified and its
+         * layout returns to SHADER_READ_ONLY_OPTIMAL). May be null otherwise.
+         */
+        VkImage image = VK_NULL_HANDLE;
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
         uint32_t width = 0;
         uint32_t height = 0;
@@ -242,6 +252,13 @@ struct InputFrame {
 /** @brief Render into a host-provided image view the host composites itself (headless/CI mode). */
 struct Offscreen {
         VkImageView view = VK_NULL_HANDLE;
+        /**
+         * @brief The underlying image. Required only when the final pass is
+         * feedback-read (the runner blits its double-buffered output into
+         * the host image; layout returns to SHADER_READ_ONLY_OPTIMAL). May
+         * be null otherwise.
+         */
+        VkImage image = VK_NULL_HANDLE;
         /// Mismatched target params are a hard error (invalid_argument).
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
         uint32_t width = 0;

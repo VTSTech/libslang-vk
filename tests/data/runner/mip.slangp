@@ -1,0 +1,17 @@
+# libslang-vk M2 headless test: mipmap_input (F1). Both passes sample mip
+# level 6 (1x1 = box average of the 64x64 input). Pass 0 exercises the
+# mip-capable chain-input copy; pass 1 exercises the mip-chained pass
+# output. Golden: out = average(input) with r=g=126, b=63 (deterministic
+# on power-of-two sizes).
+shaders = 2
+shader0 = shaders/mip.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0
+mipmap_input0 = true
+
+shader1 = shaders/mip.slang
+scale_type1 = source
+scale_x1 = 1.0
+scale_y1 = 1.0
+mipmap_input1 = true

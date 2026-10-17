@@ -87,6 +87,64 @@ parameter resolution order (preset override → pragma default → zero).
    buffer and fences (M1 skeleton); batching/timeline semaphores are the M3
    perf work per plan §8.
 
+## M2 — Full chain semantics (all new code, MIT, authored for this repo)
+
+M2 implements the SPEC §5 runtime contract on the Vulkan runner as a
+black-box semantic port of the reference host's behavior (field-canary
+fixtures reused verbatim; no RetroArch or reference-host code copied).
+
+### M2 semantics (black-box from the reference host + SPEC)
+
+1. **History ring (SPEC 5.2, audit fix F5).** `depth + 1` RGBA8 slots at
+   game resolution (depth = max referenced `OriginalHistoryN`); the chain
+   input is blitted into the ring before any pass runs; `OriginalHistoryN`
+   binds `(slot - N) mod count` = frame T-N; all slots are seeded with the
+   current frame on the first render and after every input-size change
+   (RetroArch history warmup). Slot bookkeeping happens before descriptor
+   writes so bindings reflect the post-advance ring.
+2. **Feedback double-buffering (SPEC 5.3, F2).** Demand-driven: a pass read
+   through `PassFeedback#` or `<name>Feedback` (case-insensitive, alias or
+   `#pragma name`) gets two output buffers; readers bind the buffer not
+   being written (frame N-1); buffers flip after the frame. The second
+   buffer starts cleared to opaque black. `feedback_pass` stays
+   parsed-but-unused per F2.
+3. **Final-pass feedback resolve.** A feedback-read final pass renders into
+   its own double-buffered target and a 1:1 nearest blit copies the result
+   into the host output image (requires the new `Offscreen::image`); other
+   final passes keep rendering into the host target directly.
+4. **Mipmap refill (SPEC 5.4, audit fix F1).** Pass outputs read by a
+   `mipmap_input` pass allocate full mip chains and are refilled between
+   render passes with a linear blit chain; pass 0 reads the chain input
+   through a mip-capable RGBA8 copy blitted and refilled every frame. Mip
+   filter linear, min/mag per `filter_linearN`; history/feedback/alias
+   bindings keep the nearest/clamp default sampler (deliberate divergence,
+   SPEC 5.4).
+5. **Sampler policy (SPEC 5.4).** Only `Source` uses the reading pass's
+   filter/wrap/mipmap; `Original`, `OriginalHistory#`, `PassOutput#`,
+   `PassFeedback#`, `<name>Feedback` and plain aliases bind
+   nearest/clamp-to-edge. (M1 bound every name with the reading pass's
+   sampler; the field fixtures were 1:1, masking the difference.)
+6. **UBO fix.** Alias/`#pragma name` `<Name>Size` members resolve to the
+   OWNING pass's output size (M1 used the reading pass's size — only
+   invisible when every pass rendered at the same resolution).
+7. **Live parameters.** `setParameter()` updates case-insensitively in
+   place (case-variant duplicates in the override map would otherwise
+   merge in hash order); the merged values land in the params UBO on the
+   next render.
+
+### M2 documented divergences
+
+1. **LUT textures remain load-gated.** Presets declaring `textures =`
+   still fail `Preset::load` (M3: decode + upload path with the corpus
+   sweep that exercises them); `noLutImages` keeps compile-only sweeps
+   working.
+2. **`Rotation` semantic stays 0.** The UBO member is filled with the
+   identity value 0 (ported semantic); `InputFrame::rotation != None`
+   returns `unsupported_feature` until the M4 presentation path.
+3. **Non-causal alias taps fall back.** A plain alias / `#pragma name`
+   tap of a LATER pass binds the current source texture with a one-shot
+   stderr warning (SPEC 4.5 runtime fallback, "never a null bind").
+
 ## Documented divergences (v1 decisions, plan §2/§5/§13)
 
 1. **No SPIR-V disk cache / sidecars.** v1 compiles with glslang on every
@@ -123,3 +181,20 @@ parameter resolution order (preset override → pragma default → zero).
 - "and a real GPU" half of the M1 exit criterion: the headless test is
   device-agnostic (skips cleanly without an ICD); hardware runs happen on the
   maintainer's machines and in the fork's field loop (plan §10).
+
+### M2 exit
+- Release build (static + shared), Linux GCC 14.2, CMake Ninja: **16/16 tests pass**
+  (M0 suite + example smoke tests + `runner_headless` + new `runner_m2`).
+- `runner_m2` on **lavapipe**: the fork's field canaries pass on the Vulkan
+  runner — feedback ping-pong (frame 1 = src*0.5 from the cleared buffer,
+  frame 2 = src*0.75 proving the previous-frame bind), history ring with gap
+  taps OriginalHistory1+3 (frames 2 and 4 pin T-N indexing and seeding),
+  3-pass format chain through an R16F FBO, r4 include/cycle preset renders
+  with the pinned tint golden, mip refill = exact box average at level 6,
+  resize re-seeds the ring and recreates FBOs, live case-insensitive
+  parameters — **zero validation-layer errors** throughout.
+- `feedback-noncausal` negative control: `Preset::load` rejects with
+  "PassOutput0 is not causal in pass 0" (translator causality gate).
+- Debug + ASan/UBSan build: **16/16 tests pass** (sanitizers active across
+  the Vulkan execution path on lavapipe).
+- Core-only build (`SLANGVK_ENABLE_VK=OFF`): **12/12 tests pass**.

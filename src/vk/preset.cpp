@@ -88,11 +88,12 @@ auto Preset::load(Device & /*device*/, const std::filesystem::path &slangp, cons
                 if (!pass.alias.empty())
                         knownTextureNames.insert(pass.alias);
 
-        // LUT images are an M2 capability: declared textures are recorded and
-        // size-resolvable, but pixel upload is not wired yet (plan §8/§11).
+        // LUT images are an M3 capability (corpus sweep needs the decode +
+        // upload path): declared textures are recorded and size-resolvable,
+        // but pixel upload is not wired yet (plan §8/§11).
         if (!impl.parsed.textures.empty() && !options.noLutImages)
                 return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                    "Preset::load: LUT texture image upload lands in M2; pass noLutImages for compile-only sweeps"));
+                    "Preset::load: LUT texture image upload lands in M3; pass noLutImages for compile-only sweeps"));
 
         // 2. Per pass: translate to stage GLSL, compile to SPIR-V.
         const int passCount = static_cast<int>(impl.parsed.passes.size());

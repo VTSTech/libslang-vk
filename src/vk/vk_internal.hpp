@@ -113,6 +113,12 @@ struct BlockFillContext {
         bool vertexStage = false;
         bool isLastPass = false;
         const std::vector<std::pair<uint32_t, uint32_t>> *passOutputSizes = nullptr; // PassOutput# size lookups.
+        struct AliasSize {                                                           // Alias / #pragma name -> owning pass's output size.
+                std::string name;
+                uint32_t width = 0;
+                uint32_t height = 0;
+        };
+        const std::vector<AliasSize> *aliasSizes = nullptr;
 };
 
 auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const SlangTranslation &translation,

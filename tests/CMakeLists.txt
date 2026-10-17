@@ -25,9 +25,9 @@ target_link_libraries(test_slang_compile PRIVATE slangvk)
 add_test(NAME slang_compile COMMAND test_slang_compile)
 
 foreach(round 2 3 4)
-	add_executable(test_field_round${round} test_field_round${round}.cpp)
-	target_link_libraries(test_field_round${round} PRIVATE slangvk)
-	add_test(NAME field_round${round} COMMAND test_field_round${round})
+        add_executable(test_field_round${round} test_field_round${round}.cpp)
+        target_link_libraries(test_field_round${round} PRIVATE slangvk)
+        add_test(NAME field_round${round} COMMAND test_field_round${round})
 endforeach()
 
 # Optional-corpus argument is not wired in CI; pass a slang-shaders checkout
@@ -45,17 +45,26 @@ foreach(t
     test_uniform_names
     test_viewport_derive
     test_rotation_format)
-	add_executable(${t} reference/${t}.cpp)
-	add_test(NAME ${t} COMMAND ${t})
+        add_executable(${t} reference/${t}.cpp)
+        add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
-# --- Vulkan runner headless test (M1) ----------------------------------------
-# Renders the golden blit round-trip on lavapipe (CI) or a real GPU; skips
-# cleanly when no Vulkan device is present.
+# --- Vulkan runner headless tests (M1 + M2) -----------------------------------
+# M1: golden blit round-trip, two-pass alias chain, parameter fill.
+# M2: full chain semantics — feedback ping-pong, history ring, FBO formats,
+# include/cycle, mip refill, resize recreation, live parameters — on the
+# fork's field-preset canaries. Skips cleanly when no Vulkan device is
+# present (no ICD on Windows CI).
 if(SLANGVK_ENABLE_VK)
-	add_executable(test_runner_headless test_runner_headless.cpp)
-	target_link_libraries(test_runner_headless PRIVATE slangvk)
-	target_compile_definitions(test_runner_headless PRIVATE
-	    SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
-	add_test(NAME runner_headless COMMAND test_runner_headless)
+        add_executable(test_runner_headless test_runner_headless.cpp)
+        target_link_libraries(test_runner_headless PRIVATE slangvk)
+        target_compile_definitions(test_runner_headless PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_headless COMMAND test_runner_headless)
+
+        add_executable(test_runner_m2 test_runner_m2.cpp)
+        target_link_libraries(test_runner_m2 PRIVATE slangvk)
+        target_compile_definitions(test_runner_m2 PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_m2 COMMAND test_runner_m2)
 endif()
