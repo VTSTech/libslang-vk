@@ -9,6 +9,16 @@ project(libslang-vk
     DESCRIPTION "libretro slang shader preset parsing/compiling with a Vulkan execution path"
     LANGUAGES CXX C)
 
+# URL-based FetchContent deps: prefer archive timestamps (NEW behavior since
+# CMake 3.24) so re-downloads don't churn extraction trees. DevilutionX's
+# embed sets the same default, keeping standalone and embedded builds alike.
+foreach(_policy CMP0135)
+    if(POLICY ${_policy})
+        cmake_policy(SET ${_policy} NEW)
+        set(CMAKE_POLICY_DEFAULT_${_policy} NEW)
+    endif()
+endforeach()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
