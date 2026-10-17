@@ -16,6 +16,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(SLANGVK_BUILD_TESTS "Build the unit test suite" ON)
+option(SLANGVK_BUILD_EXAMPLES "Build the example programs" ON)
 option(SLANGVK_BUILD_SHARED "Also build the shared library variant" ON)
 set(SLANGVK_SANITIZE "" CACHE STRING "Comma-separated sanitizers for a test build (e.g. address,undefined)")
 
@@ -79,6 +80,10 @@ endif()
 if(SLANGVK_BUILD_TESTS)
         enable_testing()
         add_subdirectory(tests)
+endif()
+
+if(SLANGVK_BUILD_EXAMPLES)
+        add_subdirectory(examples)
 endif()
 
 install(TARGETS slangvk

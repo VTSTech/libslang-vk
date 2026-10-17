@@ -1,0 +1,23 @@
+# libslang-vk demo: two-pass glow chain.
+# Pass 0 downsamples the input at half resolution with linear filtering and
+# exposes it under the alias "blur"; pass 1 combines the original frame with
+# the blurred copy. Demonstrates per-pass scale rules, filter modes, pass
+# aliases and a preset parameter override.
+shaders = 2
+shader0 = shaders/demo_downsample.slang
+filter_linear0 = true
+scale_type_x0 = source
+scale_x0 = 0.5
+scale_type_y0 = source
+scale_y0 = 0.5
+alias0 = "blur"
+
+shader1 = shaders/demo_glow_combine.slang
+filter_linear1 = true
+scale_type_x1 = source
+scale_x1 = 1.0
+scale_type_y1 = source
+scale_y1 = 1.0
+
+parameters = "GLOW"
+GLOW = "0.60"

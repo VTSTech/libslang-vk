@@ -1,0 +1,11 @@
+# libslang-vk demo: single-pass "hello world" preset.
+# One shader, one tunable parameter — the smallest useful chain.
+shaders = 1
+shader0 = shaders/demo_bright.slang
+filter_linear0 = false
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0
+
+parameters = "BRIGHTNESS"
+BRIGHTNESS = "1.25"

@@ -54,6 +54,45 @@ The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
 Vulkan runner consumes; a host rolling its own pipeline can use them too.
 
+## Example
+
+[`examples/preset_info.cpp`](examples/preset_info.cpp) is a complete
+end-to-end demo in ~180 lines: it loads a `.slangp`, prints the pass chain,
+scale rules, aliases and parameters, then translates and compiles every pass
+to SPIR-V with glslang — printing the per-stage bytecode sizes and the dense
+texture bindings the M1 Vulkan runner will create. Two demo presets are
+bundled under [`examples/presets/`](examples/presets): a single-pass
+brightness shader (`demo-bright`) and a two-pass glow chain exercising
+per-pass scale rules, linear filtering and pass aliases (`demo-glow`).
+
+```sh
+cmake --build build --target preset_info
+./build/examples/preset_info                       # bundled demo-bright
+./build/examples/preset_info examples/presets/demo-glow.slangp
+./build/examples/preset_info path/to/any.slangp    # any preset on disk
+```
+
+Each demo preset also runs as a ctest smoke test (`example_preset_info_*`),
+so the example path is covered by CI. Exit code is 0 only when every pass
+parses, translates and compiles — convenient for checking foreign presets.
+
+Sample output (`demo-glow`, trimmed):
+
+```
+pass 0: shaders/demo_downsample.slang
+  filter linear, wrap clamp-to-edge, mipmap off
+  scale x: x0.5 source, y: x0.5 source
+  alias 'blur', frame_count_mod 0, format rgba8
+...
+pass 1 shaders/demo_glow_combine.slang: OK
+  vertex SPIR-V 1172 bytes (293 words), fragment SPIR-V 1428 bytes (357 words)
+  set 2 textures: Original=0 blur=1
+  parameters:
+    GLOW = 0.600 (default 0.500, range 0.000..2.000 step 0.050) [preset]
+
+result: 2/2 pass(es) compiled to SPIR-V — ready for the M1 Vulkan runner.
+```
+
 ## Building and testing
 
 ```sh
@@ -64,6 +103,7 @@ ctest --test-dir build --output-on-failure
 
 Options: `SLANGVK_BUILD_SHARED` (default `ON`, builds `libslangvk.so/dll`
 alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
+`SLANGVK_BUILD_EXAMPLES` (default `ON`, builds the `preset_info` demo),
 `SLANGVK_SANITIZE=address,undefined` (test builds). glslang is fetched and
 built automatically (pinned 16.6.0, same version the reference host used).
 
