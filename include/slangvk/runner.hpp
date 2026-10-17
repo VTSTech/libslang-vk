@@ -18,8 +18,11 @@
 // R8G8B8A8_UNORM (full mip chain when `name_mipmap` is set); bindings
 // resolve by declared name (case-insensitive) and positionally via `User#`,
 // each LUT sampled with its own linear/wrap/mipmap options (SPEC 3.5/4.5/5.4).
-// Rotation and swapchain output land in M4; those paths return
-// slv::Errc::unsupported_feature for now.
+// M4 adds presentation: SwapchainFrame output (final-pass letterbox draw into
+// an acquired swapchain image, host owns acquire/present), InputFrame rotation
+// (Rotation uniform + rotated presentation), the fit-and-center present path
+// for final passes that do not resolve to the output target size, and
+// Image::update for per-frame host uploads.
 
 #include <cstdint>
 #include <expected>
@@ -66,6 +69,14 @@ struct DeviceOptions {
         std::string_view appName;
         uint32_t minApiVersion = VK_API_VERSION_1_1; ///< API version the device must support.
         bool validationLayers = false;               ///< Enable VK_LAYER_KHRONOS_validation when present.
+        /**
+         * @brief Extra instance extensions requested verbatim (M4: e.g.
+         * VK_KHR_surface + a platform-surface extension for swapchain use).
+         * A missing name fails instance creation with the driver's error.
+         */
+        std::vector<const char *> instanceExtensions;
+        /** @brief Extra device extensions requested verbatim (e.g. VK_KHR_swapchain). */
+        std::vector<const char *> deviceExtensions;
 };
 
 /**
@@ -160,6 +171,16 @@ public:
 
         SLANGVK_API static auto create(Device &, const CreateInfo &) -> std::expected<Image, Error>;
 
+        /**
+         * @brief Replaces the image content with tightly packed texel data
+         * (M4 host-upload path: the converted game frame every present).
+         *
+         * Synchronous staging copy; the image must be a 1-mip Image created
+         * by this class and rests in its creation layout before and after.
+         * pixelBytes must equal width*height*bytesPerTexel.
+         */
+        SLANGVK_API auto update(const void *pixels, size_t pixelBytes) -> std::expected<void, Error>;
+
         SLANGVK_API Image(Image &&) noexcept;
         SLANGVK_API auto operator=(Image &&) noexcept -> Image &;
         SLANGVK_API ~Image();
@@ -253,7 +274,15 @@ struct InputFrame {
         Rotation rotation = Rotation::None;
 };
 
-/** @brief Render into a host-provided image view the host composites itself (headless/CI mode). */
+/**
+ * @brief Render into a host-provided image view the host composites itself
+ * (headless/CI mode).
+ *
+ * When the final pass resolves to exactly the target size and rotation is
+ * None it draws straight into this view (byte-exact golden path). Otherwise
+ * the chain output is drawn centered with a fit-scale and black letterbox
+ * (the swapchain presentation math, same code path).
+ */
 struct Offscreen {
         VkImageView view = VK_NULL_HANDLE;
         /**
@@ -269,12 +298,41 @@ struct Offscreen {
         uint32_t height = 0;
 };
 
-/** @brief Render into a swapchain image view (DevilutionX presentation mode; lands in M4). */
+/**
+ * @brief Pixel rectangle. x/y may be negative or place the rect partially
+ * outside the target only through an explicit host rect (validated).
+ */
+struct Rect {
+        int32_t x = 0;
+        int32_t y = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+};
+
+/**
+ * @brief Render into an already-acquired swapchain image view (DevilutionX
+ * presentation mode, plan §8 output (a)). M4.
+ *
+ * Per-frame contract: the host acquires the image (vkAcquireNextImageKHR,
+ * optionally signaling `acquireSemaphore`), calls render() with the image's
+ * view, then presents after render() returns. render() waits the acquire
+ * semaphore at submit and leaves the image in VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+ * ready for vkQueuePresentKHR; because render() is synchronous (fenced), the
+ * present needs no wait semaphore. Letterbox: the final-pass output is drawn
+ * into `outputRect` (all-zero rect = fit and center, reference-host math).
+ * The chain's pass FBOs keep rendering at their preset-derived sizes; only
+ * the presentation draw touches the swapchain image.
+ */
 struct SwapchainFrame {
         VkImageView swapchainImageView = VK_NULL_HANDLE;
+        /// The swapchain's current format (from the surface/vkGetPhysicalDeviceSurfaceFormatsKHR).
         VkFormat format = VK_FORMAT_UNDEFINED;
         uint32_t width = 0;
         uint32_t height = 0;
+        /// Content rect inside the swapchain image; zero rect = fit + center.
+        Rect outputRect{};
+        /// Semaphore signaled by the host's acquire (optional; waited before drawing).
+        VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
 };
 
 using OutputTarget = std::variant<SwapchainFrame, Offscreen>;
@@ -309,9 +367,15 @@ public:
          * @brief Renders one frame: uploads uniforms, binds pipelines/descriptors,
          * draws every pass, writes the final pass into the output target.
          *
-         * Synchronous for M1: records + submits one command buffer and waits.
+         * Synchronous: records + submits one command buffer and waits.
          * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays
-         * untouched; the output target image is left in SHADER_READ_ONLY_OPTIMAL.
+         * untouched; an Offscreen target image is left in
+         * SHADER_READ_ONLY_OPTIMAL, a SwapchainFrame image in PRESENT_SRC_KHR.
+         *
+         * Rotation (M4): the chain renders the input in its source orientation
+         * (shaders read the `Rotation` uniform 0..3); the presentation draw
+         * rotates the final output clockwise into the output rect and sizes
+         * the fit rect from the rotated aspect.
          */
         SLANGVK_API auto render(const InputFrame &, const OutputTarget &, const FrameInfo &)
             -> std::expected<void, Error>;

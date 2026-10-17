@@ -120,12 +120,16 @@ auto CreateStagingBuffer(Device &device, VkDeviceSize bytes, VkBuffer *outBuffer
 // UBO fill — semantics ported from the reference host's Runner::FillBlockBytes
 // (PROVENANCE.md): SourceSize/OutputSize/OriginalSize/FinalViewportSize as
 // vec4(w, h, 1/w, 1/h), FrameCount with frame_count_mod, FrameDirection,
-// FrameTime (µs), PASSINDEX, Rotation, <Texture>Size forms, then parameters
-// (preset override first, pragma default second, zero fallback).
+// FrameTime (µs), PASSINDEX, Rotation (the input frame's rotation, M4),
+// <Texture>Size forms, then parameters (preset override first, pragma default
+// second, zero fallback).
 //
 // MVP divergence (documented): the Vulkan-native quad pairs uv (0,0) with
 // NDC (-1,-1) top-left, so no per-draw mirror and no flip-cancel dance is
 // needed; MVP members receive the unit-quad -> NDC matrix for every pass.
+// Rotation (M4) is NOT folded into the pass MVPs: the chain renders the input
+// in source orientation (shaders read the Rotation uniform, SPEC gap #5), and
+// the presentation draw applies the rotation to the final output.
 
 struct BlockFillContext {
         uint32_t passIndex = 0;
@@ -141,6 +145,7 @@ struct BlockFillContext {
         uint64_t frameCount = 0;
         float frameDeltaUs = 0.0F;
         int32_t frameDirection = 1;
+        uint32_t rotation = 0; // InputFrame rotation (0..3, SPEC Rotation semantic).
         bool vertexStage = false;
         bool isLastPass = false;
         const std::vector<std::pair<uint32_t, uint32_t>> *passOutputSizes = nullptr; // PassOutput# size lookups.

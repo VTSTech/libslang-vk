@@ -51,8 +51,15 @@ struct Device::Impl {
         }
 
         // One-shot command recording: allocates from the pool, records, submits
-        // with a fence and waits. M1 is deliberately synchronous (plan §6).
-        auto SubmitAndWait(const std::function<void(VkCommandBuffer)> &record) -> std::expected<void, Error>
+        // with a fence and waits. Deliberately synchronous (plan §6). The
+        // optional wait semaphore is the M4 swapchain contract: the host's
+        // acquire semaphore is waited at `waitDstStageMask` before the recorded
+        // work runs; completion is fence-gated, so the host may present right
+        // after this returns.
+        auto SubmitAndWait(const std::function<void(VkCommandBuffer)> &record,
+            VkSemaphore waitSemaphore = VK_NULL_HANDLE,
+            VkPipelineStageFlags waitDstStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT)
+            -> std::expected<void, Error>
         {
                 VkCommandBufferAllocateInfo allocInfo{};
                 allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -78,6 +85,11 @@ struct Device::Impl {
                 submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                 submitInfo.commandBufferCount = 1;
                 submitInfo.pCommandBuffers = &cmd;
+                if (waitSemaphore != VK_NULL_HANDLE) {
+                        submitInfo.waitSemaphoreCount = 1;
+                        submitInfo.pWaitSemaphores = &waitSemaphore;
+                        submitInfo.pWaitDstStageMask = &waitDstStageMask;
+                }
                 const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence);
                 if (submitted != VK_SUCCESS) {
                         vkDestroyFence(device, fence, nullptr);

@@ -73,4 +73,12 @@ if(SLANGVK_ENABLE_VK)
         target_compile_definitions(test_runner_m3 PRIVATE
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_m3 COMMAND test_runner_m3)
+
+        # M4 links the vendored volk directly: the swapchain end-to-end case
+        # drives acquire/present/layout transitions through the loaded loader.
+        add_executable(test_runner_m4 test_runner_m4.cpp)
+        target_link_libraries(test_runner_m4 PRIVATE slangvk slv-volk)
+        target_compile_definitions(test_runner_m4 PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_m4 COMMAND test_runner_m4)
 endif()

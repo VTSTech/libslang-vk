@@ -11,8 +11,8 @@
 //
 //   --render         execute each chain on the Vulkan device after load
 //                    (needs an ICD; presets whose final pass does not
-//                    resolve to the output size are reported size-skip —
-//                    final-pass letterbox lands in M4)
+//                    resolve to the output size render through the M4
+//                    letterbox present path)
 //   --frames N       frames per chain in --render mode (default 2: the
 //                    second frame exercises feedback readers)
 //   --lut            upload LUT images (default: compile-only, noLutImages)
@@ -37,7 +37,6 @@ struct SweepEntry {
         std::string relativePath;
         bool loaded = false;
         bool rendered = false;   // --render mode only
-        bool sizeSkip = false;   // final pass does not resolve to the target
         std::string error;
         uint32_t passes = 0;
         uint32_t parameters = 0;
@@ -183,9 +182,6 @@ int main(int argc, char **argv)
                                         if (!drawn) {
                                                 ok = false;
                                                 record.error = drawn.error().message;
-                                                if (drawn.error().message.find("final pass resolves to")
-                                                    != std::string::npos)
-                                                        record.sizeSkip = true; // M4 letterbox path
                                         }
                                 }
                                 record.rendered = ok;
@@ -197,20 +193,17 @@ int main(int argc, char **argv)
         uint32_t loaded = 0;
         uint32_t failed = 0;
         uint32_t rendered = 0;
-        uint32_t sizeSkips = 0;
         for (const SweepEntry &record : ledger) {
                 if (record.loaded)
                         ++loaded;
                 else
                         ++failed;
-                if (record.sizeSkip)
-                        ++sizeSkips;
                 if (record.rendered)
                         ++rendered;
         }
         std::printf("\ncorpus_sweep: %zu presets — %u loaded, %u failed", ledger.size(), loaded, failed);
         if (render)
-                std::printf(", %u rendered, %u size-skip (M4 letterbox)", rendered, sizeSkips);
+                std::printf(", %u rendered", rendered);
         std::printf("\n");
 
         uint32_t reported = 0;

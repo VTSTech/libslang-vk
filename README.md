@@ -14,14 +14,15 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M2 (full chain semantics).** The M0 core suite passes and the M1
+**Status: M4 (presentation).** The M0 core suite passes and the M1
 runner skeleton (Device adopt/create, offscreen `Chain::render`, golden blit
 round-trips) is joined by the M2 execution contract: history rings
 (`OriginalHistory#`), feedback double-buffering (`PassFeedback#` /
 `<name>Feedback`), per-pass FBO formats (`#pragma format`, srgb/float
 framebuffers), `mipmap_input` refill, FBO recreation on resize and live
-parameters. LUT image upload lands in M3 (corpus sweep); rotation and
-swapchain output in M4 per the plan.
+parameters, M3 LUT uploads, and — since M4 — swapchain presentation:
+the final pass draws into an acquired swapchain image with letterbox
+rect and orientation handled by the library (plan §8 output mode (a)).
 
 ## Consuming
 
@@ -59,7 +60,7 @@ The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the upcoming
 Vulkan runner consumes; a host rolling its own pipeline can use them too.
 
-## Vulkan runner (M1 + M2 + M3)
+## Vulkan runner (M1 + M2 + M3 + M4)
 
 The runner executes compiled presets on a Vulkan device. The host either
 adopts its own context or goes headless; errors come back as
@@ -104,12 +105,21 @@ uploaded size, and git-lfs pointer files fail the load with an explicit
 diagnostic. `PresetLoadOptions::noLutImages` keeps compile-only sweeps
 (no device work); chains then fail at bind time with a named error. A
 `Preset` must outlive the `Chain`s created from it (LUT views are
-borrowed). Rotation and swapchain targets return
-`slv::Errc::unsupported_feature` until M4. Gates: golden blit + full
-chain semantics + LUT goldens headless on lavapipe with a **live**
+borrowed). M4 adds presentation: render into an acquired swapchain image
+with `SwapchainFrame` (the host acquires and presents, the library waits
+the acquire semaphore and leaves the image in `PRESENT_SRC_KHR`), with
+fit-and-center or explicit-rect letterboxing (reference-host present
+math, linear sampling, black margins), input-frame rotation (the chain
+renders in source orientation, every `Rotation` uniform carries the
+value, the present draw rotates the output), and `Image::update` for
+per-frame host uploads. Final passes that do not resolve to the output
+target size letterbox through the same draw instead of failing. Gates:
+golden blit + full chain semantics + LUT goldens + letterbox/rotation
+goldens + a full acquire/render/present/readback cycle on
+`VK_EXT_headless_surface` — headless on lavapipe with a **live**
 validation-error gate — `tests/test_runner_headless.cpp` (M1),
-`tests/test_runner_m2.cpp` (M2 field canaries) and
-`tests/test_runner_m3.cpp` (M3).
+`tests/test_runner_m2.cpp` (M2 field canaries), `tests/test_runner_m3.cpp`
+(M3) and `tests/test_runner_m4.cpp` (M4).
 
 Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
 (no link-time libvulkan); memory comes from vendored
@@ -150,8 +160,9 @@ cmake --build build --target corpus_sweep
 ./build/examples/corpus_sweep pack --fail-on-broken        # nonzero exit on failures
 ```
 
-`--render` reports presets whose final pass does not resolve to the output
-size as size-skips (final-pass letterbox lands in M4) and fails the run on
+`--render` executes every chain through the real render path — presets
+whose final pass does not resolve to the output size go through the M4
+letterbox present draw instead of failing — and fails the run on
 any validation-layer error. The bundled-fixture smoke runs as a ctest
 (`example_corpus_sweep_smoke`); the full shader-pack corpus sweep runs
 out of CI against a slang-shaders checkout.

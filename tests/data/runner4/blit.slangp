@@ -1,0 +1,8 @@
+# libslang-vk M4 test: identity blit (scale 1) for letterbox/rotation
+# goldens. Final pass output = input size; the presentation draw letterboxes
+# or rotates it into the output target.
+shaders = 1
+shader0 = shaders/blit.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

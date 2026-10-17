@@ -25,8 +25,21 @@
 //   - sampler policy (SPEC 5.4): Source uses the reading pass's
 //     filter/wrap/mipmap; every other binding is nearest/clamp-to-edge.
 //
-// Not yet (unsupported_feature): LUT image upload (M3), rotation != None
-// and swapchain targets (M4), final-pass blit/letterbox (M4).
+// M4 semantics (plan §8 output (a), the DevilutionX presentation mode):
+//   - final passes that do not resolve to the output target size, feedback
+//     final passes with rotation, and every swapchain target render into the
+//     pass's own FBO and then go through the present draw: a fit-and-center
+//     (or explicit-rect) letterbox quad with a linear sampler, black margins
+//     (reference-host present math, PROVENANCE.md);
+//   - rotation: the chain renders the input in source orientation and every
+//     pass's Rotation uniform carries InputFrame::rotation (SPEC gap #5);
+//     the present draw rotates the final output clockwise into the rect;
+//   - swapchain targets: the host acquires (optionally signaling
+//     acquireSemaphore, waited at COLOR_ATTACHMENT_OUTPUT) and presents
+//     after the synchronous render returns; the image rests in PRESENT_SRC.
+//
+// Not yet: sync2/dynamic-rendering fast path (capability-gated perf path,
+// plan §8), async upload timeline semaphores.
 
 #include <algorithm>
 #include <array>
@@ -83,6 +96,7 @@ auto FormatTexelSize(VkFormat format) -> uint32_t
                 case VK_FORMAT_R8G8B8A8_UNORM:
                 case VK_FORMAT_R8G8B8A8_SRGB:
                 case VK_FORMAT_B8G8R8A8_UNORM:
+                case VK_FORMAT_B8G8R8A8_SRGB:
                 case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
                         return 4;
                 case VK_FORMAT_R16G16B16A16_SFLOAT:
@@ -207,7 +221,10 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                         continue;
                 }
                 if (name == "Rotation") {
-                        WriteUint(out, member.offset, 0); // M1 frontend never rotates (ported semantic).
+                        // SPEC gap #5 semantic: uint 0..3 = 0/90/180/270 degrees
+                        // (M4: the input frame's rotation; shaders use it to
+                        // adapt, the runner applies the rotation at present).
+                        WriteUint(out, member.offset, ctx.rotation);
                         continue;
                 }
 
@@ -334,7 +351,11 @@ struct Chain::Impl {
                 SlangTranslation translation;
                 VkShaderModule vertexModule = VK_NULL_HANDLE;
                 VkShaderModule fragmentModule = VK_NULL_HANDLE;
-                VkPipeline pipeline = VK_NULL_HANDLE;
+                // One graphics pipeline per render-pass format the pass is used
+                // with (M4: the final pass renders into its own FBO under the
+                // present path but straight into the host target on the direct
+                // path — the host and pass formats can differ).
+                std::unordered_map<VkFormat, VkPipeline> pipelines;
                 VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
                 uint32_t outputWidth = 0;
                 uint32_t outputHeight = 0;
@@ -383,6 +404,26 @@ struct Chain::Impl {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAllocation = VK_NULL_HANDLE;
 
+        // M4 presentation: letterbox/rotation draw of the final pass output
+        // into the output target (Offscreen fit-and-center or SwapchainFrame
+        // rect). Quad shaders compiled once at create; one pipeline per
+        // target format (lazily created against its render pass), one
+        // combined-image-sampler set, a host-mapped 4-vertex buffer rewritten
+        // per present, and a UNDEFINED -> PRESENT_SRC render pass variant for
+        // swapchain images.
+        VkShaderModule presentVertexModule = VK_NULL_HANDLE;
+        VkShaderModule presentFragmentModule = VK_NULL_HANDLE;
+        VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
+        std::unordered_map<VkFormat, VkPipeline> presentPipelines;
+        VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
+        VkDescriptorSet presentSet = VK_NULL_HANDLE;
+        VkSampler presentSampler = VK_NULL_HANDLE;
+        VkBuffer presentVertexBuffer = VK_NULL_HANDLE;
+        VmaAllocation presentVertexAllocation = VK_NULL_HANDLE;
+        void *presentVertexMapped = nullptr;
+        std::unordered_map<VkFormat, VkRenderPass> presentSwapchainPasses;
+        std::unordered_map<VkImageView, VkFramebuffer> presentSwapchainFramebuffers;
+
         // History ring (SPEC 5.2): depth+1 RGBA8 slots at game resolution;
         // OriginalHistoryN binds slot [(slot - N) mod count] = frame T-N. All
         // slots are seeded with the current frame on the first render and
@@ -418,8 +459,8 @@ struct Chain::Impl {
                         return;
                 VkDevice dev = device->device();
                 for (PassRuntime &pass : passes) {
-                        if (pass.pipeline != VK_NULL_HANDLE)
-                                vkDestroyPipeline(dev, pass.pipeline, nullptr);
+                        for (auto &entry : pass.pipelines)
+                                vkDestroyPipeline(dev, entry.second, nullptr);
                         if (pass.pipelineLayout != VK_NULL_HANDLE)
                                 vkDestroyPipelineLayout(dev, pass.pipelineLayout, nullptr);
                         if (pass.vertexModule != VK_NULL_HANDLE)
@@ -453,6 +494,24 @@ struct Chain::Impl {
                         vkDestroyPipelineLayout(dev, pipelineLayout, nullptr);
                 if (vertexBuffer != VK_NULL_HANDLE)
                         vmaDestroyBuffer(device->impl().allocator, vertexBuffer, vertexAllocation);
+                for (auto &entry : presentPipelines)
+                        vkDestroyPipeline(dev, entry.second, nullptr);
+                if (presentVertexModule != VK_NULL_HANDLE)
+                        vkDestroyShaderModule(dev, presentVertexModule, nullptr);
+                if (presentFragmentModule != VK_NULL_HANDLE)
+                        vkDestroyShaderModule(dev, presentFragmentModule, nullptr);
+                if (presentPipelineLayout != VK_NULL_HANDLE)
+                        vkDestroyPipelineLayout(dev, presentPipelineLayout, nullptr);
+                if (presentSetLayout != VK_NULL_HANDLE)
+                        vkDestroyDescriptorSetLayout(dev, presentSetLayout, nullptr);
+                if (presentSampler != VK_NULL_HANDLE)
+                        vkDestroySampler(dev, presentSampler, nullptr);
+                if (presentVertexBuffer != VK_NULL_HANDLE)
+                        vmaDestroyBuffer(device->impl().allocator, presentVertexBuffer, presentVertexAllocation);
+                for (auto &entry : presentSwapchainPasses)
+                        vkDestroyRenderPass(dev, entry.second, nullptr);
+                for (auto &entry : presentSwapchainFramebuffers)
+                        vkDestroyFramebuffer(dev, entry.second, nullptr);
         }
 
         void DestroyPassTarget(PassTarget &t)
@@ -783,6 +842,241 @@ struct Chain::Impl {
                 return renderPass;
         }
 
+        // Present render pass for swapchain images: UNDEFINED -> PRESENT_SRC
+        // (acquired images arrive UNDEFINED; the host presents after render).
+        auto GetPresentSwapchainPass(VkFormat format) -> VkRenderPass
+        {
+                const auto it = presentSwapchainPasses.find(format);
+                if (it != presentSwapchainPasses.end())
+                        return it->second;
+
+                VkAttachmentDescription attachment{};
+                attachment.format = format;
+                attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+                VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+                VkSubpassDescription subpass{};
+                subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+                subpass.colorAttachmentCount = 1;
+                subpass.pColorAttachments = &colorRef;
+
+                std::array<VkSubpassDependency, 2> deps{};
+                deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+                deps[0].dstSubpass = 0;
+                deps[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                deps[1].srcSubpass = 0;
+                deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+                deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                deps[1].dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                deps[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+                VkRenderPassCreateInfo info{};
+                info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+                info.attachmentCount = 1;
+                info.pAttachments = &attachment;
+                info.subpassCount = 1;
+                info.pSubpasses = &subpass;
+                info.dependencyCount = static_cast<uint32_t>(deps.size());
+                info.pDependencies = deps.data();
+
+                VkRenderPass renderPass = VK_NULL_HANDLE;
+                if (vkCreateRenderPass(device->device(), &info, nullptr, &renderPass) != VK_SUCCESS)
+                        return VK_NULL_HANDLE;
+                presentSwapchainPasses.emplace(format, renderPass);
+                return renderPass;
+        }
+
+        // Present pipeline for one target format, created lazily against its
+        // render pass (pipeline-renderpass compatibility) and cached.
+        auto GetPresentPipeline(VkFormat format, VkRenderPass renderPass) -> std::expected<VkPipeline, Error>
+        {
+                const auto it = presentPipelines.find(format);
+                if (it != presentPipelines.end())
+                        return it->second;
+
+                std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+                stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+                stages[0].module = presentVertexModule;
+                stages[0].pName = "main";
+                stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                stages[1].module = presentFragmentModule;
+                stages[1].pName = "main";
+
+                const VkVertexInputBindingDescription bindingDesc = {0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+                std::array<VkVertexInputAttributeDescription, 2> attributes{};
+                attributes[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+                attributes[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 8};
+                VkPipelineVertexInputStateCreateInfo vertexInput{};
+                vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                vertexInput.vertexBindingDescriptionCount = 1;
+                vertexInput.pVertexBindingDescriptions = &bindingDesc;
+                vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+                vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+                VkPipelineInputAssemblyStateCreateInfo assembly{};
+                assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+                VkPipelineViewportStateCreateInfo viewportState{};
+                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                viewportState.viewportCount = 1;
+                viewportState.scissorCount = 1;
+
+                VkPipelineRasterizationStateCreateInfo raster{};
+                raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                raster.polygonMode = VK_POLYGON_MODE_FILL;
+                raster.cullMode = VK_CULL_MODE_NONE;
+                raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+                raster.lineWidth = 1.0F;
+
+                VkPipelineMultisampleStateCreateInfo multisample{};
+                multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                VkPipelineColorBlendAttachmentState blendAttachment{};
+                blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                    | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                VkPipelineColorBlendStateCreateInfo blend{};
+                blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                blend.attachmentCount = 1;
+                blend.pAttachments = &blendAttachment;
+
+                std::array<VkDynamicState, 2> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+                VkPipelineDynamicStateCreateInfo dynamic{};
+                dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+                dynamic.pDynamicStates = dynamicStates.data();
+
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                pipelineInfo.stageCount = 2;
+                pipelineInfo.pStages = stages.data();
+                pipelineInfo.pVertexInputState = &vertexInput;
+                pipelineInfo.pInputAssemblyState = &assembly;
+                pipelineInfo.pViewportState = &viewportState;
+                pipelineInfo.pRasterizationState = &raster;
+                pipelineInfo.pMultisampleState = &multisample;
+                pipelineInfo.pColorBlendState = &blend;
+                pipelineInfo.pDynamicState = &dynamic;
+                pipelineInfo.layout = presentPipelineLayout;
+                pipelineInfo.renderPass = renderPass;
+
+                VkPipeline pipeline = VK_NULL_HANDLE;
+                const VkResult created = vkCreateGraphicsPipelines(device->device(), VK_NULL_HANDLE, 1,
+                    &pipelineInfo, nullptr, &pipeline);
+                if (created != VK_SUCCESS)
+                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile, "present pipeline"));
+                presentPipelines.emplace(format, pipeline);
+                return pipeline;
+        }
+
+        // One pass pipeline per render-pass format (lazy, cached). The final
+        // pass can be bound against the host target format (direct offscreen
+        // path) or its own FBO format (present path) — these can differ.
+        auto MakePassPipeline(PassRuntime &pass, VkFormat renderFormat) -> std::expected<VkPipeline, Error>
+        {
+                std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+                stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+                stages[0].module = pass.vertexModule;
+                stages[0].pName = "main";
+                stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                stages[1].module = pass.fragmentModule;
+                stages[1].pName = "main";
+
+                const VkVertexInputBindingDescription vertexBinding = {0, 24, VK_VERTEX_INPUT_RATE_VERTEX};
+                std::array<VkVertexInputAttributeDescription, 2> attributes{};
+                attributes[0] = {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+                attributes[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 16};
+                VkPipelineVertexInputStateCreateInfo vertexInput{};
+                vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                vertexInput.vertexBindingDescriptionCount = 1;
+                vertexInput.pVertexBindingDescriptions = &vertexBinding;
+                vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+                vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+                VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+                inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+                VkPipelineViewportStateCreateInfo viewportState{};
+                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                viewportState.viewportCount = 1;
+                viewportState.scissorCount = 1;
+
+                VkPipelineRasterizationStateCreateInfo raster{};
+                raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                raster.polygonMode = VK_POLYGON_MODE_FILL;
+                raster.cullMode = VK_CULL_MODE_NONE;
+                raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+                raster.lineWidth = 1.0F;
+
+                VkPipelineMultisampleStateCreateInfo multisample{};
+                multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                VkPipelineColorBlendAttachmentState blendAttachment{};
+                blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                    | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                VkPipelineColorBlendStateCreateInfo blend{};
+                blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                blend.attachmentCount = 1;
+                blend.pAttachments = &blendAttachment;
+
+                std::array<VkDynamicState, 2> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+                VkPipelineDynamicStateCreateInfo dynamic{};
+                dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+                dynamic.pDynamicStates = dynamicStates.data();
+
+                const VkRenderPass renderPass = GetRenderPass(renderFormat);
+                if (renderPass == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "render pass creation failed"));
+
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                pipelineInfo.stageCount = 2;
+                pipelineInfo.pStages = stages.data();
+                pipelineInfo.pVertexInputState = &vertexInput;
+                pipelineInfo.pInputAssemblyState = &inputAssembly;
+                pipelineInfo.pViewportState = &viewportState;
+                pipelineInfo.pRasterizationState = &raster;
+                pipelineInfo.pMultisampleState = &multisample;
+                pipelineInfo.pColorBlendState = &blend;
+                pipelineInfo.pDynamicState = &dynamic;
+                pipelineInfo.layout = pass.pipelineLayout;
+                pipelineInfo.renderPass = renderPass;
+
+                VkPipeline pipeline = VK_NULL_HANDLE;
+                const VkResult created = vkCreateGraphicsPipelines(device->device(), VK_NULL_HANDLE, 1,
+                    &pipelineInfo, nullptr, &pipeline);
+                if (created != VK_SUCCESS)
+                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile, "pass pipeline"));
+                pass.pipelines.emplace(renderFormat, pipeline);
+                return pipeline;
+        }
+
+        auto GetPassPipeline(PassRuntime &pass, VkFormat renderFormat) -> std::expected<VkPipeline, Error>
+        {
+                const auto it = pass.pipelines.find(renderFormat);
+                if (it != pass.pipelines.end())
+                        return it->second;
+                return MakePassPipeline(pass, renderFormat);
+        }
+
         auto GetSampler(FilterMode filter, WrapMode wrap, bool mipmap) -> VkSampler
         {
                 const uint64_t key = (static_cast<uint64_t>(wrap) << 8) | (static_cast<uint64_t>(filter) << 1)
@@ -1062,7 +1356,9 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::create: zero output size"));
         if (preset.passCount() == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::create: preset has no passes"));
-        if (vk::FormatTexelSize(options.outputFormat) == 0)
+        // VK_FORMAT_UNDEFINED is allowed for swapchain-only chains: the present
+        // draw uses the per-frame SwapchainFrame format (validated at render).
+        if (options.outputFormat != VK_FORMAT_UNDEFINED && vk::FormatTexelSize(options.outputFormat) == 0)
                 return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
                     "Chain::create: unsupported output VkFormat"));
 
@@ -1119,17 +1415,18 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         set3Info.pBindings = &set3Binding;
         SLV_VK(vkCreateDescriptorSetLayout(device.device(), &set3Info, nullptr, &impl.set3Layout), Errc::vk_error);
 
-        // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts.
+        // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts,
+        // plus the M4 present set.
         VkDescriptorPoolSize poolSizes[2]{};
         poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(2 * passCount)};
         uint32_t samplerCount = 0;
         for (const SlangTranslation &translation : presetTranslations)
                 samplerCount += static_cast<uint32_t>(translation.fragment.textures.size());
-        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(samplerCount, 1u)};
+        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(samplerCount, 1u) + 1};
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = static_cast<uint32_t>(4 * passCount);
+        poolInfo.maxSets = static_cast<uint32_t>(4 * passCount) + 1;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = poolSizes;
         SLV_VK(vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &impl.descriptorPool), Errc::vk_error);
@@ -1210,84 +1507,19 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 layoutInfo.pSetLayouts = setLayouts.data();
                 SLV_VK(vkCreatePipelineLayout(device.device(), &layoutInfo, nullptr, &pass.pipelineLayout), Errc::vk_error);
 
-                std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-                stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-                stages[0].module = pass.vertexModule;
-                stages[0].pName = "main";
-                stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-                stages[1].module = pass.fragmentModule;
-                stages[1].pName = "main";
-
-                const VkVertexInputBindingDescription vertexBinding = {0, 24, VK_VERTEX_INPUT_RATE_VERTEX};
-                std::array<VkVertexInputAttributeDescription, 2> attributes{};
-                attributes[0] = {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
-                attributes[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 16};
-                VkPipelineVertexInputStateCreateInfo vertexInput{};
-                vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-                vertexInput.vertexBindingDescriptionCount = 1;
-                vertexInput.pVertexBindingDescriptions = &vertexBinding;
-                vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
-                vertexInput.pVertexAttributeDescriptions = attributes.data();
-
-                VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-                inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-                inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-
-                VkPipelineViewportStateCreateInfo viewportState{};
-                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-                viewportState.viewportCount = 1;
-                viewportState.scissorCount = 1;
-
-                VkPipelineRasterizationStateCreateInfo raster{};
-                raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-                raster.polygonMode = VK_POLYGON_MODE_FILL;
-                raster.cullMode = VK_CULL_MODE_NONE;
-                raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-                raster.lineWidth = 1.0F;
-
-                VkPipelineMultisampleStateCreateInfo multisample{};
-                multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-                multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-                VkPipelineColorBlendAttachmentState blendAttachment{};
-                blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-                    | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-                VkPipelineColorBlendStateCreateInfo blend{};
-                blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                blend.attachmentCount = 1;
-                blend.pAttachments = &blendAttachment;
-
-                std::array<VkDynamicState, 2> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-                VkPipelineDynamicStateCreateInfo dynamic{};
-                dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-                dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-                dynamic.pDynamicStates = dynamicStates.data();
-
-                VkGraphicsPipelineCreateInfo pipelineInfo{};
-                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                pipelineInfo.stageCount = 2;
-                pipelineInfo.pStages = stages.data();
-                pipelineInfo.pVertexInputState = &vertexInput;
-                pipelineInfo.pInputAssemblyState = &inputAssembly;
-                pipelineInfo.pViewportState = &viewportState;
-                pipelineInfo.pRasterizationState = &raster;
-                pipelineInfo.pMultisampleState = &multisample;
-                pipelineInfo.pColorBlendState = &blend;
-                pipelineInfo.pDynamicState = &dynamic;
-                pipelineInfo.layout = pass.pipelineLayout;
-                // The final pass renders straight into the host output target
-                // (host format) unless it is feedback-read — then it renders
-                // into its own double-buffered target like the intermediates
-                // and a resolve blit copies the result to the host image.
-                const bool isLastPass = i + 1 == passCount;
-                const bool rendersToHost = isLastPass && !pass.feedbackRead;
-                pipelineInfo.renderPass = impl.GetRenderPass(rendersToHost ? impl.targetFormat : pass.targetFormat);
-                if (pipelineInfo.renderPass == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "render pass creation failed"));
-                SLV_VK(vkCreateGraphicsPipelines(device.device(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                    &pass.pipeline), Errc::shader_compile);
+                // Default-format pipeline (built at load so pipeline problems
+                // surface at Preset/Chain creation time). The final pass may
+                // render straight into the host target (host format) or into
+                // its own FBO (present path) — the render loop lazily builds
+                // the variant it needs for the other format.
+                const bool isLastPassAtCreate = i + 1 == passCount;
+                const bool rendersToHostAtCreate = isLastPassAtCreate && !pass.feedbackRead;
+                const VkFormat defaultFormat = rendersToHostAtCreate && impl.targetFormat != VK_FORMAT_UNDEFINED
+                    ? impl.targetFormat
+                    : pass.targetFormat;
+                auto madePipeline = impl.MakePassPipeline(pass, defaultFormat);
+                if (!madePipeline)
+                        return std::unexpected(madePipeline.error());
 
                 // Descriptor sets (empty slots bound as real empty sets).
                 pass.set1 = impl.AllocateSet(hasVertexUbo ? impl.set1Layout : impl.emptyLayout);
@@ -1357,6 +1589,94 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
             != VK_SUCCESS)
                 return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "vertex buffer allocation failed"));
         std::memcpy(vertexMapped.pMappedData, kQuad, sizeof(kQuad));
+
+        // --- M4 present pipeline (letterbox/rotation draw) -------------------
+        {
+                // Trivial quad shaders, compiled with the same in-process
+                // glslang path as preset passes (bare GLSL, Vulkan 1.0).
+                preset::SlangTranslation presentTranslation;
+                presentTranslation.vertex.present = true;
+                presentTranslation.vertex.glsl =
+                    "#version 450\n"
+                    "layout(location = 0) in vec2 aPos;\n" // NDC
+                    "layout(location = 1) in vec2 aUV;\n"
+                    "layout(location = 0) out vec2 vUV;\n"
+                    "void main() { vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+                presentTranslation.fragment.present = true;
+                presentTranslation.fragment.glsl =
+                    "#version 450\n"
+                    "layout(set = 0, binding = 0) uniform sampler2D uTex;\n"
+                    "layout(location = 0) in vec2 vUV;\n"
+                    "layout(location = 0) out vec4 oColor;\n"
+                    "void main() { oColor = texture(uTex, vUV); }\n";
+                preset::PassSpirv presentSpirv;
+                std::string compileError;
+                if (!preset::CompilePass(presentTranslation, presentSpirv, compileError))
+                        return std::unexpected(
+                            SLV_ERROR(Errc::shader_compile, "present pipeline compile failed: " + compileError));
+
+                VkShaderModuleCreateInfo moduleInfo{};
+                moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.vertex.data());
+                moduleInfo.codeSize = presentSpirv.vertex.size();
+                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &impl.presentVertexModule),
+                    Errc::shader_compile);
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.fragment.data());
+                moduleInfo.codeSize = presentSpirv.fragment.size();
+                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &impl.presentFragmentModule),
+                    Errc::shader_compile);
+
+                VkDescriptorSetLayoutBinding presentBinding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                    VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                VkDescriptorSetLayoutCreateInfo presentLayoutInfo{};
+                presentLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                presentLayoutInfo.bindingCount = 1;
+                presentLayoutInfo.pBindings = &presentBinding;
+                SLV_VK(vkCreateDescriptorSetLayout(device.device(), &presentLayoutInfo, nullptr,
+                    &impl.presentSetLayout), Errc::vk_error);
+
+                VkPipelineLayoutCreateInfo presentPipelineLayoutInfo{};
+                presentPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                presentPipelineLayoutInfo.setLayoutCount = 1;
+                presentPipelineLayoutInfo.pSetLayouts = &impl.presentSetLayout;
+                SLV_VK(vkCreatePipelineLayout(device.device(), &presentPipelineLayoutInfo, nullptr,
+                    &impl.presentPipelineLayout), Errc::vk_error);
+
+                impl.presentSet = impl.AllocateSet(impl.presentSetLayout);
+                if (impl.presentSet == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "present descriptor set allocation failed"));
+
+                // Linear + clamp-to-edge: the reference host's present blit
+                // filtering (letterbox edges never wrap; sampling stays inside
+                // the rect's uv range).
+                VkSamplerCreateInfo samplerInfo{};
+                samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                samplerInfo.magFilter = VK_FILTER_LINEAR;
+                samplerInfo.minFilter = VK_FILTER_LINEAR;
+                samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.maxLod = 0.0F;
+                SLV_VK(vkCreateSampler(device.device(), &samplerInfo, nullptr, &impl.presentSampler), Errc::vk_error);
+
+                // Host-mapped quad buffer, rewritten every present draw.
+                VkBufferCreateInfo presentBufferInfo{};
+                presentBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                presentBufferInfo.size = 4 * 2 * 2 * sizeof(float);
+                presentBufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+                VmaAllocationCreateInfo presentAllocInfo{};
+                presentAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+                presentAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                VmaAllocationInfo presentMapped{};
+                if (vmaCreateBuffer(device.impl().allocator, &presentBufferInfo, &presentAllocInfo,
+                        &impl.presentVertexBuffer, &impl.presentVertexAllocation, &presentMapped)
+                    != VK_SUCCESS)
+                        return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "present vertex buffer allocation failed"));
+                impl.presentVertexMapped = presentMapped.pMappedData;
+        }
+
         return out;
 }
 
@@ -1404,25 +1724,35 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         Impl &impl = *impl_;
         if (input.view == VK_NULL_HANDLE || input.width == 0 || input.height == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid input frame"));
-        if (input.rotation != Rotation::None)
-                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                    "rotation != None lands in M4 (presentation path)"));
 
-        if (std::holds_alternative<SwapchainFrame>(target))
-                return std::unexpected(SLV_ERROR(Errc::unsupported_feature, "swapchain output lands in M4"));
-        const Offscreen &offscreen = std::get<Offscreen>(target);
-        if (offscreen.view == VK_NULL_HANDLE || offscreen.width == 0 || offscreen.height == 0)
-                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid offscreen target"));
-        if (offscreen.width != impl.targetWidth || offscreen.height != impl.targetHeight
-            || offscreen.format != impl.targetFormat)
-                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                    "render: offscreen target must match ChainOptions size/format (resize() to change)"));
-
-        // The final-pass feedback resolve blits into the host image itself.
-        const bool finalFeedbackResolve = !impl.passes.empty() && impl.passes.back().feedbackRead;
-        if (finalFeedbackResolve && offscreen.image == VK_NULL_HANDLE)
-                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                    "render: Offscreen::image is required when the final pass is feedback-read"));
+        // M4 output dispatch: swapchain targets always go through the present
+        // draw (letterbox + rotation); offscreen targets keep the direct
+        // byte-exact path only when the final pass matches the target exactly.
+        const bool swapchainTarget = std::holds_alternative<SwapchainFrame>(target);
+        const SwapchainFrame *swap = nullptr;
+        const Offscreen *offscreen = nullptr;
+        if (swapchainTarget) {
+                swap = &std::get<SwapchainFrame>(target);
+                if (swap->swapchainImageView == VK_NULL_HANDLE || swap->width == 0 || swap->height == 0)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid swapchain target"));
+                if (swap->format == VK_FORMAT_UNDEFINED || vk::FormatTexelSize(swap->format) == 0)
+                        return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
+                            "render: unsupported swapchain VkFormat"));
+                if (swap->width != impl.targetWidth || swap->height != impl.targetHeight)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                            "render: swapchain size changed; call resize() with the new extent"));
+        } else {
+                offscreen = &std::get<Offscreen>(target);
+                if (offscreen->view == VK_NULL_HANDLE || offscreen->width == 0 || offscreen->height == 0)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid offscreen target"));
+                if (impl.targetFormat == VK_FORMAT_UNDEFINED)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                            "render: offscreen targets need a concrete ChainOptions::outputFormat"));
+                if (offscreen->width != impl.targetWidth || offscreen->height != impl.targetHeight
+                    || offscreen->format != impl.targetFormat)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                            "render: offscreen target must match ChainOptions size/format (resize() to change)"));
+        }
 
         impl.gameWidth = input.width;
         impl.gameHeight = input.height;
@@ -1435,15 +1765,22 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument,
                     "render: InputFrame::image is required for history/mipmap presets"));
 
-        // 1. Resolve pass sizes; the final pass must land on the output target.
+        // 1. Resolve pass sizes. M4: the final pass may resolve to any size —
+        // it renders into its own FBO and the present draw letterboxes the
+        // result into the output target (rotation-aware fit).
         ResolvePassSizes(impl, input.width, input.height, impl.targetWidth, impl.targetHeight);
+        const uint32_t rotation = static_cast<uint32_t>(input.rotation);
         Chain::Impl::PassRuntime &last = impl.passes.back();
-        if (last.outputWidth != impl.targetWidth || last.outputHeight != impl.targetHeight)
-                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
-                    "final pass resolves to " + std::to_string(last.outputWidth) + "x"
-                        + std::to_string(last.outputHeight) + " but the output target is "
-                        + std::to_string(impl.targetWidth) + "x" + std::to_string(impl.targetHeight)
-                        + "; final-pass blit/letterbox lands in M4"));
+        const bool finalSizeMatches = last.outputWidth == impl.targetWidth
+            && last.outputHeight == impl.targetHeight;
+        const bool presentNeeded = swapchainTarget || rotation != 0 || !finalSizeMatches;
+
+        // The 1:1 feedback resolve blit (direct offscreen path) needs the host
+        // image handle; the present path only samples the pass's own target.
+        const bool feedbackDirectResolve = !swapchainTarget && impl.passes.back().feedbackRead && !presentNeeded;
+        if (feedbackDirectResolve && offscreen->image == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "render: Offscreen::image is required when the final pass is feedback-read"));
 
         // 2. Ensure pass targets exist; recreate on size drift (M2: resize()
         // no longer requires a new Chain). Intermediate passes always render
@@ -1453,7 +1790,11 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         // buffer so first-frame samples are defined (SPEC 5.3).
         for (size_t i = 0; i < impl.passes.size(); ++i) {
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
-                const bool needsOwnTarget = i + 1 < impl.passes.size() || pass.feedbackRead;
+                // M4: a non-feedback final pass still needs its own target when
+                // the present draw runs (size mismatch, rotation, swapchain).
+                const bool isLastPass = i + 1 == impl.passes.size();
+                const bool needsOwnTarget = i + 1 < impl.passes.size() || pass.feedbackRead
+                    || (isLastPass && presentNeeded);
                 if (!needsOwnTarget)
                         continue;
                 if (pass.targets[0].img.image == VK_NULL_HANDLE || pass.outputWidth != pass.allocatedWidth
@@ -1469,10 +1810,12 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 }
         }
 
-        // 3. Output framebuffer over the host view (cached per view).
+        // 3. Output framebuffer over the host view (cached per view). Offscreen
+        // targets only; the present draw reuses it, swapchain targets get their
+        // framebuffer per acquired image view (step 5b).
         VkFramebuffer outputFramebuffer = VK_NULL_HANDLE;
-        {
-                const auto it = impl.outputFramebuffers.find(offscreen.view);
+        if (!swapchainTarget) {
+                const auto it = impl.outputFramebuffers.find(offscreen->view);
                 if (it != impl.outputFramebuffers.end()) {
                         outputFramebuffer = it->second;
                 } else {
@@ -1481,13 +1824,13 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
                         fbInfo.renderPass = renderPass;
                         fbInfo.attachmentCount = 1;
-                        fbInfo.pAttachments = &offscreen.view;
+                        fbInfo.pAttachments = &offscreen->view;
                         fbInfo.width = impl.targetWidth;
                         fbInfo.height = impl.targetHeight;
                         fbInfo.layers = 1;
                         SLV_VK(vkCreateFramebuffer(impl.device->device(), &fbInfo, nullptr, &outputFramebuffer),
                             Errc::vk_error);
-                        impl.outputFramebuffers.emplace(offscreen.view, outputFramebuffer);
+                        impl.outputFramebuffers.emplace(offscreen->view, outputFramebuffer);
                 }
         }
 
@@ -1497,17 +1840,17 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 passSizes.emplace_back(pass.outputWidth, pass.outputHeight);
 
         // Alias / #pragma name size lookups resolve to the OWNING pass's
-        // output size (the fill context carries them case-insensitively).
+        // output size (the fill context carries them case-insensitively). M4:
+        // the final pass renders at its own FBO size — the present draw
+        // letterboxes it — so <alias>Size reflects that actual output.
         std::vector<vk::BlockFillContext::AliasSize> aliasSizes;
         for (size_t j = 0; j < impl.passes.size(); ++j) {
                 const Chain::Impl::PassRuntime &owner = impl.passes[j];
-                const bool isFinal = j + 1 == impl.passes.size();
-                const uint32_t w = isFinal ? impl.targetWidth : owner.outputWidth;
-                const uint32_t h = isFinal ? impl.targetHeight : owner.outputHeight;
                 if (!owner.def.alias.empty())
-                        aliasSizes.push_back({owner.def.alias, w, h});
+                        aliasSizes.push_back({owner.def.alias, owner.outputWidth, owner.outputHeight});
                 if (!owner.translation.pragmaName.empty())
-                        aliasSizes.push_back({owner.translation.pragmaName, w, h});
+                        aliasSizes.push_back(
+                            {owner.translation.pragmaName, owner.outputWidth, owner.outputHeight});
         }
 
         // LUT sizes (M3): declared names plus User# positional aliases; the
@@ -1582,6 +1925,7 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 ctx.frameCount = frame.frameCount;
                 ctx.frameDeltaUs = frame.frameDeltaUs;
                 ctx.frameDirection = frame.frameDirection;
+                ctx.rotation = rotation;
                 ctx.passOutputSizes = &passSizes;
                 ctx.aliasSizes = &aliasSizes;
                 ctx.lutSizes = &lutSizes;
@@ -1641,7 +1985,147 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                     nullptr);
         }
 
-        // 6. Record + submit (synchronous).
+        // 5b. Present draw setup (M4): dest rect, quad vertices, present
+        // descriptor and the target render pass/framebuffer. All host-side so
+        // error paths stay outside the command lambda.
+        VkRect2D presentDest{};
+        VkRenderPass presentRenderPass = VK_NULL_HANDLE;
+        VkFramebuffer presentFramebuffer = VK_NULL_HANDLE;
+        VkPipeline presentPipeline = VK_NULL_HANDLE;
+        if (presentNeeded) {
+                const Chain::Impl::PassRuntime &lastPass = impl.passes.back();
+                // Content dims: a quarter turn swaps the aspect for the fit.
+                const bool quarterTurn = rotation == 1 || rotation == 3;
+                const uint32_t contentW = quarterTurn ? lastPass.outputHeight : lastPass.outputWidth;
+                const uint32_t contentH = quarterTurn ? lastPass.outputWidth : lastPass.outputHeight;
+                if (swapchainTarget && swap->outputRect.width != 0 && swap->outputRect.height != 0) {
+                        const Rect &r = swap->outputRect;
+                        if (r.x < 0 || r.y < 0 || static_cast<uint32_t>(r.x) + r.width > impl.targetWidth
+                            || static_cast<uint32_t>(r.y) + r.height > impl.targetHeight)
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "render: outputRect lies outside the swapchain target"));
+                        presentDest.offset = {r.x, r.y};
+                        presentDest.extent = {r.width, r.height};
+                } else {
+                        // Reference-host present math: fit scale, lround, clamp
+                        // overshoot, integer-center (PROVENANCE.md).
+                        const float fitScale = std::min(
+                            static_cast<float>(impl.targetWidth) / static_cast<float>(contentW),
+                            static_cast<float>(impl.targetHeight) / static_cast<float>(contentH));
+                        const int32_t dw = std::min(static_cast<int32_t>(impl.targetWidth),
+                            static_cast<int32_t>(std::lround(static_cast<float>(contentW) * fitScale)));
+                        const int32_t dh = std::min(static_cast<int32_t>(impl.targetHeight),
+                            static_cast<int32_t>(std::lround(static_cast<float>(contentH) * fitScale)));
+                        if (dw <= 0 || dh <= 0)
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "render: output target is smaller than one pixel of chain output"));
+                        presentDest.offset = {static_cast<int32_t>((impl.targetWidth - static_cast<uint32_t>(dw)) / 2),
+                            static_cast<int32_t>((impl.targetHeight - static_cast<uint32_t>(dh)) / 2)};
+                        presentDest.extent = {static_cast<uint32_t>(dw), static_cast<uint32_t>(dh)};
+                }
+
+                // Quad vertices: positions map the rect to NDC; uvs apply the
+                // rotation. Dest normalized (nx, ny) samples the source at:
+                //   0: (nx, ny)   1 Cw90: (ny, 1-nx)
+                //   2 Cw180: (1-nx, 1-ny)   3 Cw270: (1-ny, nx)
+                struct PresentVert {
+                        float x, y, u, v;
+                };
+                static_assert(sizeof(PresentVert) == 4 * sizeof(float));
+                const float tw = static_cast<float>(impl.targetWidth);
+                const float th = static_cast<float>(impl.targetHeight);
+                const float ndcX0 = 2.0F * static_cast<float>(presentDest.offset.x) / tw - 1.0F;
+                const float ndcX1 = 2.0F * static_cast<float>(presentDest.offset.x
+                                                      + static_cast<int32_t>(presentDest.extent.width))
+                        / tw
+                    - 1.0F;
+                // Vulkan NDC is y-down (y=-1 is the top row), matching texture
+                // v=0 — the same convention as the pass quad's MVP.
+                const float ndcY0 = 2.0F * static_cast<float>(presentDest.offset.y) / th - 1.0F;
+                const float ndcY1 = 2.0F * static_cast<float>(presentDest.offset.y
+                                                      + static_cast<int32_t>(presentDest.extent.height))
+                        / th
+                    - 1.0F;
+                const auto mapUv = [&](float nx, float ny) {
+                        switch (rotation) {
+                                case 1: return std::pair<float, float>{ny, 1.0F - nx};
+                                case 2: return std::pair<float, float>{1.0F - nx, 1.0F - ny};
+                                case 3: return std::pair<float, float>{1.0F - ny, nx};
+                                default: return std::pair<float, float>{nx, ny};
+                        }
+                };
+                const auto fillVert = [&](size_t i, float ndcX, float ndcY, float nx, float ny) {
+                        const auto [u, v] = mapUv(nx, ny);
+                        PresentVert vert{ndcX, ndcY, u, v};
+                        std::memcpy(static_cast<unsigned char *>(impl.presentVertexMapped) + i * sizeof(PresentVert),
+                            &vert, sizeof(PresentVert));
+                };
+                fillVert(0, ndcX0, ndcY0, 0.0F, 0.0F); // TL
+                fillVert(1, ndcX1, ndcY0, 1.0F, 0.0F); // TR
+                fillVert(2, ndcX0, ndcY1, 0.0F, 1.0F); // BL
+                fillVert(3, ndcX1, ndcY1, 1.0F, 1.0F); // BR
+
+                // Present descriptor: the final pass's freshly written buffer
+                // (SHADER_READ_ONLY after its render pass).
+                const VkImageView presentSrcView = lastPass.targets[lastPass.writeIndex].img.view;
+                VkDescriptorImageInfo presentImage{
+                    impl.presentSampler, presentSrcView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                VkWriteDescriptorSet presentWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, impl.presentSet,
+                    0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &presentImage, nullptr, nullptr};
+                vkUpdateDescriptorSets(impl.device->device(), 1, &presentWrite, 0, nullptr);
+
+                if (swapchainTarget) {
+                        // UNDEFINED -> PRESENT_SRC variant over the acquired image.
+                        presentRenderPass = impl.GetPresentSwapchainPass(swap->format);
+                        if (presentRenderPass == VK_NULL_HANDLE)
+                                return std::unexpected(
+                                    SLV_ERROR(Errc::vk_error, "present render pass creation failed"));
+                        const auto it = impl.presentSwapchainFramebuffers.find(swap->swapchainImageView);
+                        if (it != impl.presentSwapchainFramebuffers.end()) {
+                                presentFramebuffer = it->second;
+                        } else {
+                                VkFramebufferCreateInfo fbInfo{};
+                                fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                                fbInfo.renderPass = presentRenderPass;
+                                fbInfo.attachmentCount = 1;
+                                fbInfo.pAttachments = &swap->swapchainImageView;
+                                fbInfo.width = impl.targetWidth;
+                                fbInfo.height = impl.targetHeight;
+                                fbInfo.layers = 1;
+                                SLV_VK(vkCreateFramebuffer(impl.device->device(), &fbInfo, nullptr,
+                                    &presentFramebuffer), Errc::vk_error);
+                                impl.presentSwapchainFramebuffers.emplace(
+                                    swap->swapchainImageView, presentFramebuffer);
+                        }
+                } else {
+                        // Shared SHADER_READ_ONLY pass over the host image view.
+                        presentRenderPass = impl.GetRenderPass(impl.targetFormat);
+                        presentFramebuffer = outputFramebuffer;
+                }
+                // One pipeline per target format, built against its render pass.
+                auto madePipeline = impl.GetPresentPipeline(
+                    swapchainTarget ? swap->format : impl.targetFormat, presentRenderPass);
+                if (!madePipeline)
+                        return std::unexpected(madePipeline.error());
+                presentPipeline = *madePipeline;
+        }
+
+        // Pipelines for this frame's render modes, fetched before recording so
+        // lazy per-format creation errors stay on the error path.
+        std::vector<VkPipeline> framePipelines(impl.passes.size());
+        for (size_t i = 0; i < impl.passes.size(); ++i) {
+                Chain::Impl::PassRuntime &pass = impl.passes[i];
+                const bool isLast = i + 1 == impl.passes.size();
+                const bool rendersToHost = isLast && !pass.feedbackRead && !presentNeeded;
+                auto pipeline = impl.GetPassPipeline(pass, rendersToHost ? impl.targetFormat : pass.targetFormat);
+                if (!pipeline)
+                        return std::unexpected(pipeline.error());
+                framePipelines[i] = *pipeline;
+        }
+
+        // 6. Record + submit (synchronous). Swapchain frames wait the host's
+        // acquire semaphore at COLOR_ATTACHMENT_OUTPUT; the submit fence makes
+        // the image present-ready when render() returns.
         auto recorded = impl.device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
                 // The input image is borrowed as a blit source for the history
                 // ring and the pass-0 mip copy, then restored to
@@ -1733,9 +2217,10 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                                     src.allocatedWidth, src.allocatedHeight, false);
                         }
                         const bool isLast = i + 1 == impl.passes.size();
-                        const bool rendersToHost = isLast && !pass.feedbackRead;
-                        const uint32_t outW = isLast ? impl.targetWidth : pass.outputWidth;
-                        const uint32_t outH = isLast ? impl.targetHeight : pass.outputHeight;
+                        const bool rendersToHost = isLast && !pass.feedbackRead && !presentNeeded;
+                        const uint32_t outW = rendersToHost ? impl.targetWidth : pass.outputWidth;
+                        const uint32_t outH = rendersToHost ? impl.targetHeight : pass.outputHeight;
+                        const VkPipeline passPipeline = framePipelines[i];
 
                         VkRenderPassBeginInfo beginInfo{};
                         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1753,7 +2238,7 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         vkCmdSetViewport(cmd, 0, 1, &viewport);
                         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.pipeline);
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, passPipeline);
                         std::array<VkDescriptorSet, 4> sets = {impl.emptySet, pass.set1, pass.set2, pass.set3};
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.pipelineLayout, 0,
                             static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
@@ -1763,16 +2248,48 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                         vkCmdEndRenderPass(cmd);
                 }
 
-                // (d) Final-pass feedback resolve: the last pass rendered into
-                // its own double-buffered target; copy it into the host image
-                // (1:1, nearest — the final pass resolves to the target size).
-                if (finalFeedbackResolve) {
+                // (d) Present draw (M4): letterbox/rotation composite of the
+                // final pass output into the output target; margins come from
+                // the render pass clear (opaque black, like the reference
+                // host's present blit).
+                if (presentNeeded) {
+                        const uint32_t outW = impl.targetWidth;
+                        const uint32_t outH = impl.targetHeight;
+                        VkRenderPassBeginInfo beginInfo{};
+                        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                        beginInfo.renderPass = presentRenderPass;
+                        beginInfo.framebuffer = presentFramebuffer;
+                        beginInfo.renderArea = {{0, 0}, {outW, outH}};
+                        std::array<float, 4> black = {0.F, 0.F, 0.F, 1.F};
+                        beginInfo.clearValueCount = 1;
+                        beginInfo.pClearValues = reinterpret_cast<const VkClearValue *>(&black);
+                        vkCmdBeginRenderPass(cmd, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+                        VkViewport viewport{0.F, 0.F, static_cast<float>(outW), static_cast<float>(outH), 0.F, 1.F};
+                        VkRect2D scissor{{0, 0}, {outW, outH}};
+                        vkCmdSetViewport(cmd, 0, 1, &viewport);
+                        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, presentPipeline);
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl.presentPipelineLayout, 0,
+                            1, &impl.presentSet, 0, nullptr);
+                        const VkDeviceSize presentOffset = 0;
+                        vkCmdBindVertexBuffers(cmd, 0, 1, &impl.presentVertexBuffer, &presentOffset);
+                        vkCmdDraw(cmd, 4, 1, 0, 0);
+                        vkCmdEndRenderPass(cmd);
+                }
+
+                // (e) Final-pass feedback resolve: the last pass rendered into
+                // its own double-buffered target and the chain output matches
+                // the target 1:1 (direct offscreen path); copy it into the host
+                // image (nearest — sizes are equal).
+                if (feedbackDirectResolve) {
                         Chain::Impl::PassRuntime &lastPass = impl.passes.back();
                         const VkImage srcImage = lastPass.targets[lastPass.writeIndex].img.image;
                         BarrierMipLevel(cmd, srcImage, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-                        BarrierMipLevel(cmd, offscreen.image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        BarrierMipLevel(cmd, offscreen->image, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
                         VkImageBlit resolve{};
@@ -1781,18 +2298,20 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                             static_cast<int32_t>(impl.targetHeight), 1};
                         resolve.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                         resolve.dstOffsets[1] = resolve.srcOffsets[1];
-                        vkCmdBlitImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, offscreen.image,
+                        vkCmdBlitImage(cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, offscreen->image,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve, VK_FILTER_NEAREST);
                         BarrierMipLevel(cmd, srcImage, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                             VK_ACCESS_SHADER_READ_BIT);
-                        BarrierMipLevel(cmd, offscreen.image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        BarrierMipLevel(cmd, offscreen->image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                             VK_ACCESS_SHADER_READ_BIT);
                 }
-        });
+        },
+            swapchainTarget ? swap->acquireSemaphore : VK_NULL_HANDLE,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         if (!recorded)
                 return std::unexpected(recorded.error());
 

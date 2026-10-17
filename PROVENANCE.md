@@ -216,6 +216,83 @@ text, not from RetroArch or the reference host.
    `Chain` created from it (new documented API contract; LUT GPU objects
    live in `Preset::Impl`, chains reference the views).
 
+## M4 — Presentation: swapchain output, letterbox, rotation (all new code, MIT, authored for this repo)
+
+M4 implements plan §8 output mode (a) — the DevilutionX presentation mode:
+the final pass draws into an acquired swapchain image, the host owns
+acquire/present, and the library handles letterbox rect + orientation.
+The letterbox geometry is black-box ported from the reference host's
+present blit (`gpu_scaler.cpp`: fit scale → lround → overshoot clamp →
+center); rotation semantics are defined from the SPEC (`Rotation` uint
+0..3, gap #5) with the rotation applied by the presentation draw.
+
+### M4 semantics
+
+1. **Swapchain targets (`SwapchainFrame`).** The host acquires
+   (`vkAcquireNextImageKHR`, optionally signaling `acquireSemaphore`),
+   calls `render()`, then presents. The library waits the acquire
+   semaphore at `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT`, records
+   the frame plus a present draw (final layout `PRESENT_SRC_KHR`), and
+   fences — so the host presents immediately after `render()` returns,
+   with no extra wait semaphore. The chain's pass FBOs keep rendering at
+   their preset-derived sizes; only the present draw touches the swapchain
+   image (cached framebuffer per swapchain view, per-format render pass +
+   pipeline).
+2. **Letterbox.** The final pass output is drawn into the output target as
+   a quad: fit scale = min(tw/cw, th/ch), dest = lround + overshoot clamp,
+   integer-centered (reference-host math); explicit rects come through
+   `SwapchainFrame::outputRect` (validated inside the target). Zero rect =
+   fit + center. Margins are the render pass clear (opaque black), the
+   sampling filter is linear + clamp-to-edge — exactly the reference
+   host's present blit contract. Offscreen targets take the same path when
+   the final pass does not resolve to the target size (the M2 hard error
+   is gone) or when rotation is set; equal sizes at rotation None keep the
+   byte-exact direct path.
+3. **Rotation.** The chain renders the input in source orientation and
+   every stage's `Rotation` uniform carries `InputFrame::rotation`
+   (SPEC gap #5 semantic; previously pinned 0). The present draw rotates
+   the final output clockwise into the dest rect (uv mapping per quarter
+   turn, pinned by byte-exact goldens for Cw90/180/270) and sizes the fit
+   rect from the rotated aspect. The fork's SDL_GPU runner has no rotation
+   source (frontend never rotates); this is an extension defined from the
+   SPEC, not a port.
+4. **Per-format pass pipelines.** Pass pipelines are cached per
+   render-pass format: the final pass renders into its own FBO (pass
+   `#pragma format`) under the present path but straight into the host
+   target (host format) on the direct path — the two can differ, and a
+   pipeline is only compatible with one. The default variant is built at
+   `Chain::create` (load-time validation); other formats build lazily at
+   first use. The present draw has its own per-format pipeline + render
+   pass pair (UNDEFINED → `PRESENT_SRC_KHR` for swapchain images).
+5. **`Image::update`.** Hosts upload the converted game frame every
+   present (plan §5.2) through a synchronous staging copy; the image rests
+   in its creation layout before/after. The DevilutionX adapter uses this
+   per frame.
+6. **Surface-capable `Device::create`.** `DeviceOptions` gained verbatim
+   `instanceExtensions`/`deviceExtensions` lists so internally created
+   contexts can opt into `VK_KHR_surface` + a platform surface and
+   `VK_KHR_swapchain` (the fork adapter creates its own device, so this
+   matters only for hosts/tests that create internally).
+
+### M4 documented divergences
+
+1. **Rotation at presentation, not per pass.** RetroArch applies the
+   frontend rotation through the final pass MVP; the reference host has no
+   rotation source at all. libslang-vk renders the chain in source
+   orientation (shaders read `Rotation` to adapt) and rotates only the
+   present draw — the chain output stays byte-identical across rotation
+   values, which keeps golden contracts and the swapchain path
+   independent.
+2. **Synchronous swapchain frames.** v1 is single-threaded per `Chain`
+   (plan §5): acquire/render/present happen on the host thread with the
+   library fence as the only sync. Acquire/present semaphores from plan
+   §8 reduce to the acquire semaphore wait; async presentation is a
+   post-1.0 lever.
+3. **No integer-scaling option.** The reference host floors the fit scale
+   when its Integer Scaling option is set; the library always fits
+   continuously and hosts that want integer scaling pass an explicit
+   `outputRect` (the adapter keeps the option host-side).
+
 ## Documented divergences (v1 decisions, plan §2/§5/§13)
 
 1. **No SPIR-V disk cache / sidecars.** v1 compiles with glslang on every
@@ -290,3 +367,30 @@ text, not from RetroArch or the reference host.
 - Core-only build (`SLANGVK_ENABLE_VK=OFF`): **14/14 tests pass** (runner
   tests + corpus_sweep correctly excluded; Vulkan headers now propagate for
   the public header in core-only builds).
+
+### M4 exit
+- Release build (static + shared), Linux GCC 14.2, CMake Ninja: **19/19 tests
+  pass** (M3 suite + new `runner_m4`).
+- `runner_m4` on **lavapipe**, byte-exact goldens: fit-and-center letterbox
+  (96x64 content in a 96x128 target, scale-1 rect, black bands); rotation
+  Cw90/180/270 (32x16 content in a 32x32 target, per-quarter-turn texel
+  mapping); `Rotation` uniform encodes the input frame's rotation value;
+  `Image::update` re-upload round-trip; and the full negative matrix (null
+  swapchain view, zero size, UNDEFINED format, size mismatch, out-of-bounds
+  rect, offscreen render on a swapchain-only chain). **Zero validation-layer
+  errors.**
+- **Swapchain end-to-end on `VK_EXT_headless_surface`** (lavapipe presents
+  BGRA8, minImageCount honored): three frames acquired → rendered →
+  presented through the library (acquire semaphore waited at
+  COLOR_ATTACHMENT_OUTPUT, images rest in PRESENT_SRC), read back and
+  compared byte-exact against the offscreen reference — auto fit rect
+  (16,0,96,64) and explicit rects (32,0) / (0,0). The case skips cleanly
+  when the surface or swapchain extension is unavailable (Windows CI has no
+  ICD; mingw still compiles the full suite).
+- Debug + ASan/UBSan build: **19/19 tests pass** (sanitizers active across
+  the swapchain + present path on lavapipe).
+- Core-only build (`SLANGVK_ENABLE_VK=OFF`): **14/14 tests pass**.
+- Hardware half of the DevilutionX-mode exit: exercised by the fork's
+  M4 adapter spike (dual-path with the SDL_GPU runner) and its field loop on
+  Windows + Linux; the headless swapchain test is the device-agnostic CI
+  gate for the same code path.

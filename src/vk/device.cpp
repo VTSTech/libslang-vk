@@ -214,6 +214,11 @@ auto Device::create(const DeviceOptions &options) -> std::expected<Device, Error
         }
 
         std::vector<const char *> extensions;
+        // Caller-requested extensions come first (verbatim, M4: surface
+        // extensions for swapchain use); a missing name fails instance
+        // creation with the driver's own error.
+        for (const char *name : options.instanceExtensions)
+                extensions.push_back(name);
         if (!layers.empty()) {
                 // The ValidationLog collector needs the messenger, and the
                 // messenger needs VK_EXT_debug_utils enabled on the instance —
@@ -262,6 +267,11 @@ auto Device::create(const DeviceOptions &options) -> std::expected<Device, Error
         deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         deviceInfo.queueCreateInfoCount = 1;
         deviceInfo.pQueueCreateInfos = &queueInfo;
+        // Caller-requested device extensions, verbatim (M4: VK_KHR_swapchain
+        // for internally created contexts rendering into a swapchain).
+        deviceInfo.enabledExtensionCount = static_cast<uint32_t>(options.deviceExtensions.size());
+        deviceInfo.ppEnabledExtensionNames = options.deviceExtensions.empty() ? nullptr
+                                                                              : options.deviceExtensions.data();
 
         VkDevice device = VK_NULL_HANDLE;
         SLV_VK(vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device), Errc::vk_init_failed);

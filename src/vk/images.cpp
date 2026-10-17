@@ -222,6 +222,60 @@ Image::~Image() = default;
 Image::Image(Image &&) noexcept = default;
 auto Image::operator=(Image &&) noexcept -> Image & = default;
 
+auto Image::update(const void *pixels, size_t pixelBytes) -> std::expected<void, Error>
+{
+        if (impl_ == nullptr || impl_->device == nullptr)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Image::update: image is not initialized"));
+        if (pixels == nullptr)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Image::update: null pixels"));
+        const uint32_t texelSize = vk::FormatTexelSize(impl_->desc.format);
+        if (texelSize == 0)
+                return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
+                    "Image::update: unsupported VkFormat " + std::to_string(static_cast<int>(impl_->desc.format))));
+        if (pixelBytes != static_cast<size_t>(impl_->desc.width) * impl_->desc.height * texelSize)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "Image::update: pixelBytes mismatch (want width*height*texelSize)"));
+
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+        void *stagingMapped = nullptr;
+        auto stagingOk = vk::CreateStagingBuffer(
+            *impl_->device, static_cast<VkDeviceSize>(pixelBytes), &stagingBuffer, &stagingAllocation, &stagingMapped);
+        if (!stagingOk)
+                return std::unexpected(stagingOk.error());
+        std::memcpy(stagingMapped, pixels, pixelBytes);
+
+        const VkImageLayout current = impl_->layout;
+        auto recorded = impl_->device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
+                VkImageMemoryBarrier toDst{};
+                toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toDst.oldLayout = current;
+                toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                toDst.image = impl_->obj.image;
+                toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &toDst);
+
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.imageExtent = {impl_->desc.width, impl_->desc.height, 1};
+                vkCmdCopyBufferToImage(
+                    cmd, stagingBuffer, impl_->obj.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+                VkImageMemoryBarrier toRest = toDst;
+                toRest.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                toRest.newLayout = current;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &toRest);
+        });
+        vmaDestroyBuffer(impl_->device->impl().allocator, stagingBuffer, stagingAllocation);
+        if (!recorded)
+                return std::unexpected(recorded.error());
+        return {};
+}
+
 auto Image::image() const -> VkImage { return impl_->obj.image; }
 auto Image::view() const -> VkImageView { return impl_->obj.view; }
 auto Image::desc() const -> const ImageDesc & { return impl_->desc; }

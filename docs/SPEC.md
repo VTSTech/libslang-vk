@@ -240,7 +240,7 @@ All size semantics carry the spec's `vec4(x, y, 1/x, 1/y)` payload; a `vec2` mem
 | `FrameDirection` | int | Supported (divergent) | Constant `+1`. Spec: `-1` while rewinding — there is no rewind state in this game |
 | `FrameTime` | float | Supported | Duration of the previous frame in microseconds (RetroArch extension; 5 corpus presets) |
 | `PASSINDEX` | int | Extension | Current pass index. Not in the libretro spec or RetroArch; supported because packs use it |
-| `Rotation` | uint | Supported | Spec builtin (0..3 = 0/90/180/270 degrees). Added to the member whitelist (gap #5, 2026-10-14) and filled with the identity value `0` — this frontend never rotates the view. 16 corpus shaders declare `uniform uint Rotation;` (crt-effects, authentic_gbc, border fills, subframe BFI); all previously failed translation loudly |
+| `Rotation` | uint | Supported | Spec builtin (0..3 = 0/90/180/270 degrees). Added to the member whitelist (gap #5, 2026-10-14). Since M4 the runner fills the input frame's rotation value (host-supplied, `InputFrame::rotation`); the chain renders in source orientation and the presentation draw applies the rotation — 16 corpus shaders declare `uniform uint Rotation;` (crt-effects, authentic_gbc, border fills, subframe BFI); all previously failed translation loudly |
 | `<Texture>Size` | vec4 | Supported | Texture size by name: `Source` → input; `Original`/`OriginalHistory#` → game frame; `PassOutput#` → that pass's output; alias/`#pragma name`/LUT → that texture's size. It is valid per spec to declare a size without the texture itself. (The one latent bug this family had — the `PassFeedback#Size` index parse — is fixed, next row) |
 | `PassFeedback#Size` | vec4 | Supported | Fixed in `6f13d787f` (gap #4): the index parse is prefix-length-aware (10 for `PassOutput#`, 12 for `PassFeedback#`); previously `stoi` got `"ck#"` and the uncaught `std::invalid_argument` aborted the process. Covers both the `<PassFeedback#>Size` and `<PassFeedback#>FeedbackSize` member forms (the Feedback-suffix strip lands on the same branch). Regression-tested in `tools/audit/test_uniform_names.cpp` |
 | `<Texture>FeedbackSize` | vec4 | Supported | Same size as the texture (feedback shares the pass output's size) |
@@ -309,7 +309,7 @@ Unchanged from the handoff (§12 acceptance criteria): compiles clean, first fra
 | Sampler arrays, multi-name samplers | Arrays error, multi-name OK | translate | 0 array hits in corpus (T4) |
 | `frame_count_mod` per pass | Supported | parser, runner | |
 | `FrameCount` / `FrameDirection` / `FrameTime` / `PASSINDEX` | Supported | runner | Direction constant +1; PASSINDEX is an extension |
-| `Rotation` | Supported | translate, runner | uint semantic, filled with 0 (no rotation source; gap #5) — 16 corpus shaders declare it |
+| `Rotation` | Supported | translate, runner | uint semantic, M4: filled with the input frame's rotation; the presentation draw rotates the output (rotation-at-present divergence, PROVENANCE.md M4) |
 | `#include` (recursive, include-once) | Supported | translate | Depth 24; flat-layout fallback |
 | `#pragma name/stage/parameter/format` | Supported | translate | |
 | `#pragma alias` / `include_optional` / `#error` skip | Unimplemented | translate | Ignored / unresolved / compile-fails (4.2) |

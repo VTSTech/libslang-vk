@@ -1,0 +1,8 @@
+# libslang-vk M4 test: Rotation uniform fill. The fragment writes
+# float(Rotation)/3.0 so the readback pixel encodes the input frame's
+# rotation value (0..3).
+shaders = 1
+shader0 = shaders/rot.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0
