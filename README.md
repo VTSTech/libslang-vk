@@ -27,7 +27,8 @@ swapchain presentation: the final pass draws into an acquired swapchain
 image with letterbox rect and orientation handled by the library (plan §8
 output mode (a)). All library-side M0–M4 gates are green — 19/19 ctest,
 byte-exact goldens, zero validation-layer errors on lavapipe (verification
-record in [PROVENANCE.md](PROVENANCE.md)).
+record in [PROVENANCE.md](PROVENANCE.md)). Per-item M0–M4 implementation
+status, audited against the plan: [CHECKLIST.md](CHECKLIST.md).
 
 **DevilutionX integration (plan §11 M4) is underway** on the fork's
 [`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)
