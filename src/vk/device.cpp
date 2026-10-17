@@ -11,6 +11,7 @@
 // (documented limitation; per-device tables are an M2 refinement).
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <utility>
@@ -26,15 +27,36 @@ auto VkResultToString(VkResult result) -> const char *
                 case VK_SUCCESS: return "VK_SUCCESS";
                 case VK_NOT_READY: return "VK_NOT_READY";
                 case VK_TIMEOUT: return "VK_TIMEOUT";
+                case VK_EVENT_SET: return "VK_EVENT_SET";
                 case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
                 case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
                 case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
                 case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
-                case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+                case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
                 case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+                case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+                case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
                 case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
-                default: return "VK_ERROR (see vulkan_core.h)";
+                case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+                case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+                case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+                case VK_ERROR_UNKNOWN: return "VK_ERROR_UNKNOWN";
+                case VK_ERROR_OUT_OF_POOL_MEMORY: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+                case VK_ERROR_INVALID_EXTERNAL_HANDLE: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+                case VK_ERROR_FRAGMENTATION: return "VK_ERROR_FRAGMENTATION";
+                case VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS: return "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS";
+                case VK_ERROR_PIPELINE_COMPILE_REQUIRED_EXT: return "VK_ERROR_PIPELINE_COMPILE_REQUIRED";
+                case VK_ERROR_INVALID_SHADER_NV: return "VK_ERROR_INVALID_SHADER_NV";
+                case VK_ERROR_VALIDATION_FAILED_EXT: return "VK_ERROR_VALIDATION_FAILED_EXT";
+                default: break;
         }
+        // Unmapped result codes carry the numeric value so field logs stay
+        // diagnosable across driver-specific results (the previous fallback
+        // string hid the actual code, which turned an AMD pipeline rejection
+        // into an unactionable "VK_ERROR (see vulkan_core.h)").
+        static char buffer[32];
+        std::snprintf(buffer, sizeof(buffer), "VkResult(%d)", static_cast<int>(result));
+        return buffer;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL ValidationCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
