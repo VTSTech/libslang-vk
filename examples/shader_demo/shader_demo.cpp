@@ -40,7 +40,14 @@
 //   set NAME VALUE   override a parameter (applies on the next frame)
 //   q         quit
 
+// This TU hosts the demo's own stb implementations. STB_*_STATIC keeps them
+// private to this object file: libslangvk.a already exports a stb_image
+// decoder copy (src/vk/lut.cpp, memory-loads only, no stdio variants), and a
+// second external definition would break every link. The demo needs the
+// stdio path (stbi_load on files), so it compiles a complete private copy.
+#define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 
 #ifdef SLANGVK_DEMO_WINDOW

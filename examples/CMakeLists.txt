@@ -20,9 +20,15 @@ target_compile_definitions(preset_info PRIVATE
 
 # shader_demo options. SLANGVK_DEMO_WINDOW fetches GLFW 3.4 and compiles the
 # windowed path (runtime still falls back to headless PNG mode when no
-# display/Vulkan-surface is available). Linux hosts need the usual GLFW dev
-# packages at configure time (libx11-dev/libxkbcommon-dev, or the Wayland
-# equivalents); turn the option OFF for a pure headless demo build.
+# display/Vulkan-surface is available). GLFW 3.4 hard-fails its own configure
+# when a Linux windowing stack is only half present ("Failed to find
+# wayland-scanner" on X11-only CI images, "RandR headers not found" without
+# libxrandr-dev), so every required dev package is probed up front: X11 needs
+# libx11/xrandr/xinerama/xext(xkb,shape)/xcursor/xi headers, Wayland needs
+# libwayland-dev (client/cursor/egl + wayland-scanner) and libxkbcommon-dev.
+# GLFW is only fetched when one full backend exists; with neither, the demo
+# builds headless-only. First-configure overrides: -DGLFW_BUILD_X11=ON/OFF
+# and -DGLFW_BUILD_WAYLAND=ON/OFF.
 option(SLANGVK_DEMO_WINDOW "Build the shader demo with GLFW window support" ON)
 # SLANGVK_DEMO_FETCH_SHADERS shallow-clones libretro/slang-shaders at configure
 # time and seeds the demo's default preset search with it (large download;
@@ -30,15 +36,109 @@ option(SLANGVK_DEMO_WINDOW "Build the shader demo with GLFW window support" ON)
 option(SLANGVK_DEMO_FETCH_SHADERS "Fetch libretro/slang-shaders for the shader demo" OFF)
 
 if(SLANGVK_ENABLE_VK)
+        # Windowed-demo backend detection (rationale in the option comment
+        # above). Every GLFW-required Linux dev package is probed before
+        # FetchContent so a partial stack degrades to headless-only instead of
+        # killing configure. Non-Linux hosts keep GLFW's always-available
+        # Win32/Cocoa backends.
+        set(SLANGVK_DEMO_BUILD_WINDOW OFF)
+        set(SLANGVK_HAVE_X11 OFF)
+        set(SLANGVK_HAVE_WAYLAND OFF)
         if(SLANGVK_DEMO_WINDOW)
+                if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                        set(SLANGVK_DEMO_BUILD_WINDOW ON)
+                else()
+                        find_package(PkgConfig QUIET)
+                        # GLFW's Wayland branch runs pkg_check_modules(... REQUIRED
+                        # wayland-client wayland-cursor wayland-egl xkbcommon),
+                        # so xkbcommon gates the Wayland backend (the X11 branch
+                        # uses Xlib's own XKB and does not need it).
+                        set(SLANGVK_HAVE_XKBCOMMON OFF)
+                        if(PKG_CONFIG_FOUND)
+                                pkg_check_modules(SLANGVK_PKG_XKBCOMMON QUIET
+                                    xkbcommon)
+                                if(SLANGVK_PKG_XKBCOMMON_FOUND)
+                                        set(SLANGVK_HAVE_XKBCOMMON ON)
+                                endif()
+                        endif()
+                        # X11: core headers plus the six extension include dirs
+                        # GLFW 3.4 fatals on (RandR, Xinerama, XKB, Xcursor,
+                        # XInput2, XShape) — mirrored on FindX11's INCLUDE_PATH
+                        # results, exactly the variables GLFW itself tests.
+                        find_package(X11 QUIET)
+                        if(X11_FOUND
+                                AND X11_Xrandr_INCLUDE_PATH
+                                AND X11_Xinerama_INCLUDE_PATH
+                                AND X11_Xkb_INCLUDE_PATH
+                                AND X11_Xcursor_INCLUDE_PATH
+                                AND X11_Xi_INCLUDE_PATH
+                                AND X11_Xshape_INCLUDE_PATH)
+                                set(SLANGVK_HAVE_X11 ON)
+                        endif()
+                        # Wayland: wayland-scanner + the client libraries
+                        # + xkbcommon (all REQUIRED by GLFW 3.4).
+                        if(PKG_CONFIG_FOUND AND SLANGVK_HAVE_XKBCOMMON)
+                                find_program(SLANGVK_WAYLAND_SCANNER_EXE
+                                    wayland-scanner)
+                                if(SLANGVK_WAYLAND_SCANNER_EXE)
+                                        pkg_check_modules(SLANGVK_PKG_WAYLAND QUIET
+                                            wayland-client wayland-cursor
+                                            wayland-egl)
+                                        if(SLANGVK_PKG_WAYLAND_FOUND)
+                                                set(SLANGVK_HAVE_WAYLAND ON)
+                                        endif()
+                                endif()
+                        endif()
+                        if(SLANGVK_HAVE_X11 OR SLANGVK_HAVE_WAYLAND)
+                                set(SLANGVK_DEMO_BUILD_WINDOW ON)
+                        endif()
+                        if(SLANGVK_HAVE_X11 AND SLANGVK_HAVE_WAYLAND)
+                                message(STATUS "shader_demo: GLFW windowed with X11 + Wayland")
+                        elseif(SLANGVK_HAVE_X11)
+                                message(STATUS "shader_demo: GLFW windowed with X11 (Wayland dev stack not found)")
+                        elseif(SLANGVK_HAVE_WAYLAND)
+                                message(STATUS "shader_demo: GLFW windowed with Wayland (X11 dev stack not found)")
+                        else()
+                                message(STATUS "shader_demo: no complete Linux windowing dev stack found, building headless-only demo")
+                        endif()
+                endif()
+        endif()
+
+        # Re-detect our own auto-written backend toggles on reconfigure; an
+        # explicit -DGLFW_BUILD_X11/GLFW_BUILD_WAYLAND that differs from the
+        # auto mirror is user intent and is left untouched.
+        foreach(_backend X11 WAYLAND)
+                if(DEFINED GLFW_BUILD_${_backend}
+                        AND DEFINED SLANGVK_AUTO_GLFW_${_backend}
+                        AND GLFW_BUILD_${_backend} STREQUAL SLANGVK_AUTO_GLFW_${_backend})
+                        unset(GLFW_BUILD_${_backend} CACHE)
+                endif()
+        endforeach()
+
+        if(SLANGVK_DEMO_BUILD_WINDOW)
                 include(FetchContent)
                 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
                 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
                 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
                 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+                if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                        if(NOT DEFINED GLFW_BUILD_X11)
+                                set(GLFW_BUILD_X11 ${SLANGVK_HAVE_X11}
+                                    CACHE BOOL "" FORCE)
+                        endif()
+                        if(NOT DEFINED GLFW_BUILD_WAYLAND)
+                                set(GLFW_BUILD_WAYLAND ${SLANGVK_HAVE_WAYLAND}
+                                    CACHE BOOL "" FORCE)
+                        endif()
+                        set(SLANGVK_AUTO_GLFW_X11 ${GLFW_BUILD_X11}
+                            CACHE INTERNAL "Auto-detected GLFW X11 toggle")
+                        set(SLANGVK_AUTO_GLFW_WAYLAND ${GLFW_BUILD_WAYLAND}
+                            CACHE INTERNAL "Auto-detected GLFW Wayland toggle")
+                endif()
                 FetchContent_Declare(glfw
                     GIT_REPOSITORY https://github.com/glfw/glfw.git
-                    GIT_TAG 3.4)
+                    GIT_TAG 3.4
+                    GIT_SHALLOW TRUE)
                 FetchContent_MakeAvailable(glfw)
         endif()
 
@@ -58,7 +158,7 @@ if(SLANGVK_ENABLE_VK)
         # library's own LUT decoder.
         target_include_directories(shader_demo PRIVATE
             ${CMAKE_SOURCE_DIR}/vendor/stb)
-        if(SLANGVK_DEMO_WINDOW)
+        if(SLANGVK_DEMO_BUILD_WINDOW)
                 target_link_libraries(shader_demo PRIVATE glfw)
                 target_compile_definitions(shader_demo PRIVATE SLANGVK_DEMO_WINDOW=1)
         endif()

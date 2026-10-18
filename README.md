@@ -127,8 +127,15 @@ CMake options:
 
 - `SLANGVK_DEMO_WINDOW` (default `ON`) — fetches GLFW 3.4 and compiles the
   windowed path; `OFF` gives a pure headless demo build with no GLFW fetch.
-  Linux configure-time needs the usual GLFW dev packages (`libx11-dev`,
-  `libxkbcommon-dev`, or the Wayland equivalents).
+  GLFW 3.4 hard-fails its configure when a Linux windowing stack is only
+  half present, so every required dev package is probed up front and GLFW is
+  only fetched when one full backend exists: X11 needs the `libx11-dev`,
+  `libxrandr-dev`, `libxinerama-dev`, `libxext-dev`, `libxcursor-dev`,
+  `libxi-dev` headers, Wayland needs `libwayland-dev` (with
+  `wayland-scanner`) plus `libxkbcommon-dev`. With neither stack installed
+  (typical CI images), the demo silently builds headless-only instead of
+  failing configure. First-configure overrides: `-DGLFW_BUILD_X11=ON/OFF`,
+  `-DGLFW_BUILD_WAYLAND=ON/OFF`.
 - `SLANGVK_DEMO_FETCH_SHADERS` (default `OFF`) — shallow-clones
   [libretro/slang-shaders](https://github.com/libretro/slang-shaders) at
   configure time and seeds the demo's default preset search with it (large
