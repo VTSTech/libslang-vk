@@ -322,8 +322,17 @@ int main()
         }
 
         // --- Format canary: 3-pass chain through default/float/srgb targets -
-        // Pass 1 renders into an R16_SFLOAT FBO (#pragma format); the final
-        // pass writes the host target directly, so the golden is the input.
+        // Pass 1 renders into a real R16_SFLOAT FBO (#pragma format, Vulkan
+        // spelling; retroarch glslang_find_format accepts the same token).
+        // A single-channel target stores R only — sampling it yields G=B=0,
+        // A=1 (Vulkan "missing components" rule) — so the identity shaders
+        // cannot preserve the input through pass 1: the golden is
+        // (R, 0, 0, 255), R byte-exact via the UNORM->fp16->UNORM roundtrip
+        // (8-bit/255 values survive fp16 to well under the tolerance-1).
+        // The final pass writes the host target directly; its SRGB pragma is
+        // a no-op there (host format wins). Before the Field round 4 format
+        // table (crt-beans-s-video) the R16_SFLOAT token silently fell back
+        // to RGBA8, which made this golden accidentally identical to input.
         {
                 auto preset = slv::Preset::load(*device, fieldDir + "/format.slangp");
                 Check(preset.has_value(), "format preset loads");
@@ -340,8 +349,17 @@ int main()
                                 if (r) {
                                         auto px = fx64.Readback();
                                         Check(px.has_value(), "format readback");
-                                        if (px)
-                                                CheckBytesTolerant(*px, pattern, 1, "format golden matches input");
+                                        if (px) {
+                                                std::vector<uint8_t> wantR16(pattern.size());
+                                                for (size_t i = 0; i < wantR16.size(); i += 4) {
+                                                        wantR16[i + 0] = pattern[i + 0];
+                                                        wantR16[i + 1] = 0; // R16F: G not stored
+                                                        wantR16[i + 2] = 0; // R16F: B not stored
+                                                        wantR16[i + 3] = 0xFF; // missing alpha reads 1
+                                                }
+                                                CheckBytesTolerant(*px, wantR16, 1,
+                                                    "format golden = (R,0,0,255) via R16F FBO");
+                                        }
                                 }
                         }
                 }
