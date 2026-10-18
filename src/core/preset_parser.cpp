@@ -294,6 +294,10 @@ bool DirContainsPreset(const std::filesystem::path &dir, int maxDepth)
 
 } // namespace
 
+// Defined next to ResolvePresetFilePath (it wraps one of its results);
+// forward-declared here because the #reference merge below runs first.
+static std::string RebaseReferenceFilePath(const std::string &resolved);
+
 bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, int depth, bool isReferenceTarget)
 {
         constexpr int kMaxReferenceDepth = 8;
@@ -389,7 +393,8 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
                         // the merge (the runner resolves pass paths against the folder
                         // of the referencing preset).
                         for (PassDef &pass : parentPreset.passes)
-                                pass.shaderPath = ResolvePresetFilePath(parentPreset.dir, pass.shaderPath);
+                                pass.shaderPath = RebaseReferenceFilePath(
+                                    ResolvePresetFilePath(parentPreset.dir, pass.shaderPath));
                         preset.passes = std::move(parentPreset.passes);
                 }
                 for (TextureDef &tex : parentPreset.textures) {
@@ -397,7 +402,7 @@ bool ParsePresetImpl(const std::string &path, Preset &out, std::string &error, i
                         for (const TextureDef &existing : preset.textures)
                                 exists = exists || ToLower(existing.name) == ToLower(tex.name);
                         if (!exists) {
-                                tex.path = ResolvePresetFilePath(parentPreset.dir, tex.path);
+                                tex.path = RebaseReferenceFilePath(ResolvePresetFilePath(parentPreset.dir, tex.path));
                                 preset.textures.push_back(std::move(tex));
                         }
                 }
@@ -853,6 +858,33 @@ std::string ResolvePresetPath(const std::string &relativePath)
         if (!std::filesystem::exists(p, ec) || ec)
                 return {};
         return NormalizeSeparators(p.string());
+}
+
+/** @brief Absolutizes a #reference-rebased file path inside the shaders root.
+ *
+ *  The #reference merge rebases a referenced preset's pass/texture paths so
+ *  they stay resolvable after the merge (the loader re-resolves them against
+ *  the IMPORTING preset's dir, and IsAbsolutePath() is what makes that
+ *  re-resolution a no-op). ResolvePresetFilePath only promises an absolute
+ *  result when its inputs were absolute; a relative scan root — the
+ *  documented `corpus_sweep slang-shaders ...` invocation — yielded
+ *  cwd-relative strings that the second resolution then joined onto the
+ *  importing preset's dir (field log 2026-10-18: 693 Mega_Bezel/koko-aio/
+ *  hdr/uborder presets failing with ".../Base_CRT_Presets/scratch/..."
+ *  duplicated-path garbage). Resolve here and pin the absolute form, still
+ *  gated by the SEC-01 sandbox. */
+static std::string RebaseReferenceFilePath(const std::string &resolved)
+{
+        if (resolved.empty())
+                return {};
+        std::error_code ec;
+        std::filesystem::path absolute = std::filesystem::absolute(std::filesystem::path(resolved), ec);
+        if (ec)
+                return resolved; // Unresolvable cwd: keep the input, loader reports it.
+        absolute = absolute.lexically_normal();
+        if (!IsPathInsideShaderRoot(absolute))
+                return {}; // Same refusal shape as ResolvePresetFilePath's sandbox miss.
+        return NormalizeSeparators(absolute.generic_string());
 }
 
 std::string ResolvePresetFilePath(const std::string &presetDir, const std::string &referencedPath)

@@ -90,6 +90,7 @@ jobs:
         run: |
           mkdir -p stage/shader-demo/presets
           cp build/examples/shader_demo stage/shader-demo/
+          cp build/examples/corpus_sweep stage/shader-demo/
           cp -r examples/presets/. stage/shader-demo/presets/
           cp examples/shader_demo/assets/testcard.png stage/shader-demo/
           cat > stage/shader-demo/USAGE.txt <<EOF
@@ -117,6 +118,12 @@ jobs:
           argument at any preset directory (e.g. a slang-shaders checkout).
           Controls: 1-9 switch preset, n/p next/prev, i input source,
           l list, params / set NAME VALUE, q quit.
+
+          corpus_sweep         full-corpus load sweep + ledger tool (see
+                               corpus/baseline-ledger.txt and the corpus
+                               workflow). Pass .slangp roots; use an
+                               ABSOLUTE root path. Example:
+            ./corpus_sweep /abs/path/slang-shaders --ledger new.txt --baseline old.txt
           EOF
           (cd stage && zip -qr ../shader-demo-linux-x64.zip shader-demo)
 
@@ -229,6 +236,7 @@ jobs:
         run: |
           mkdir -p stage/shader-demo/presets
           cp build/examples/shader_demo.exe stage/shader-demo/
+          cp build/examples/corpus_sweep.exe stage/shader-demo/
           # MinGW runtime DLLs the exe needs on machines without MSYS2.
           cp /mingw64/bin/libstdc++-6.dll /mingw64/bin/libgcc_s_seh-1.dll \
              /mingw64/bin/libwinpthread-1.dll stage/shader-demo/
@@ -262,6 +270,12 @@ jobs:
           directory (e.g. a slang-shaders checkout).
           Controls: 1-9 switch preset, n/p next/prev, i input source,
           l list, params / set NAME VALUE, q quit.
+
+          corpus_sweep.exe     full-corpus load sweep + ledger tool (see
+                               corpus/baseline-ledger.txt and the corpus
+                               workflow). Pass .slangp roots; use an
+                               ABSOLUTE root path. Example:
+            .\corpus_sweep.exe F:\abs\path\slang-shaders --ledger new.txt --baseline old.txt
           EOF
 
       - name: Zip shader_demo

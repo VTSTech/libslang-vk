@@ -119,6 +119,44 @@ int main()
                 std::filesystem::remove_all(root);
         }
 
+        // --- #reference rebase stays resolvable under a RELATIVE shader root
+        // (field log 2026-10-18): the merge rebased parent pass paths with
+        // ResolvePresetFilePath, which returns a cwd-relative string when the
+        // caller's dirs are relative — the documented
+        // `corpus_sweep slang-shaders ...` invocation. The loader's second
+        // resolution then joined that onto the importing preset's dir
+        // (".../Base_CRT_Presets/scratch/..." duplicated-path garbage, 693
+        // Mega_Bezel/koko-aio/hdr/uborder corpus presets). The merged pass
+        // path must come out ABSOLUTE so the re-resolution is a no-op. ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_reference_relative");
+                const std::filesystem::path savedCwd = std::filesystem::current_path();
+                std::filesystem::current_path(root);
+                SetShaderRootDir("shaders-root");
+                WriteText(root / "shaders-root" / "presets" / "parent.slangp",
+                    "shader0=\"../src/parent.slang\"\n");
+                WriteText(root / "shaders-root" / "src" / "parent.slang", "#pragma name parent\n");
+                WriteText(root / "shaders-root" / "presets" / "child.slangp",
+                    "#reference \"parent.slangp\"\n");
+                Preset preset;
+                std::string error;
+                const bool ok = ParsePreset("shaders-root/presets/child.slangp", preset, error);
+                std::filesystem::current_path(savedCwd);
+                Check(ok, "#reference relative-root child parses");
+                if (!ok) {
+                        std::printf("  error: %s\n", error.c_str());
+                } else if (!preset.passes.empty()) {
+                        const std::string merged = preset.passes[0].shaderPath;
+                        Check(std::filesystem::path(merged).is_absolute(),
+                            "#reference relative-root rebase stores an absolute pass path");
+                        Check(std::filesystem::exists(merged),
+                            "#reference relative-root rebase path resolves to the parent's shader");
+                } else {
+                        Check(false, "#reference relative-root rebase produced a pass");
+                }
+                std::filesystem::remove_all(root);
+        }
+
         // --- Texture declaration order (M3): the materialized list keeps the
         // declared sequence so User# positional access matches spec 3.5
         // (User0 = first declared, NOT the alphabetically sorted first) ---

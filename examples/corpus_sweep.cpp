@@ -50,6 +50,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <slangvk/slangvk.hpp>
@@ -79,7 +80,34 @@ void PrintUsage()
 {
         std::printf("usage: corpus_sweep <root> [<root> ...] [--render] [--frames N] [--lut] "
                     "[--fail-on-broken] [--max-report K] [--ledger FILE] [--baseline FILE] "
-                    "[--corpus-rev SHA]\n");
+                    "[--corpus-rev SHA] [--only-from FILE]\n");
+}
+
+/** @brief Loads a newline-separated whitelist of ledger-relative paths.
+ *
+ *  Enables chunked rescans: each invocation keeps <root> as the shader root
+ *  (identical include-policy semantics to a full run) but only loads the
+ *  presets whose relativePath appears in the list. Unknown paths and a
+ *  missing file disable the filter, so a stale list degrades to a full
+ *  sweep of the given roots instead of an empty ledger. */
+std::unordered_set<std::string> LoadOnlyList(const char *path)
+{
+        std::unordered_set<std::string> only;
+        if (path == nullptr)
+                return only;
+        FILE *file = std::fopen(path, "r");
+        if (file == nullptr)
+                return only;
+        char line[4096];
+        while (std::fgets(line, sizeof(line), file) != nullptr) {
+                std::string entry(line);
+                while (!entry.empty() && (entry.back() == '\n' || entry.back() == '\r'))
+                        entry.pop_back();
+                if (!entry.empty())
+                        only.insert(entry);
+        }
+        std::fclose(file);
+        return only;
 }
 
 std::vector<uint8_t> MakePattern(uint32_t width, uint32_t height)
@@ -206,6 +234,7 @@ int main(int argc, char **argv)
         int maxReport = 25;
         const char *ledgerPath = nullptr;
         const char *baselinePath = nullptr;
+        const char *onlyFromPath = nullptr;
         std::string corpusRev;
         for (int i = 1; i < argc; ++i) {
                 const std::string arg = argv[i];
@@ -221,6 +250,8 @@ int main(int argc, char **argv)
                         baselinePath = argv[++i];
                 else if (arg == "--corpus-rev" && i + 1 < argc)
                         corpusRev = argv[++i];
+                else if (arg == "--only-from" && i + 1 < argc)
+                        onlyFromPath = argv[++i];
                 else if (arg == "--frames" && i + 1 < argc)
                         frames = std::atoi(argv[++i]);
                 else if (arg == "--max-report" && i + 1 < argc)
@@ -236,6 +267,8 @@ int main(int argc, char **argv)
                 return 2;
         }
         frames = std::max(1, frames);
+        // Chunked-rescan whitelist (--only-from): empty set = no filter.
+        const std::unordered_set<std::string> onlyPaths = LoadOnlyList(onlyFromPath);
 
         slv::DeviceOptions options;
         options.appName = "libslang-vk-corpus-sweep";
@@ -282,6 +315,8 @@ int main(int argc, char **argv)
                 const std::vector<slv::preset::PresetEntry> presets = slv::preset::ScanPresets(root, 12);
                 std::printf("root %s: %zu presets\n", root.c_str(), presets.size());
                 for (const slv::preset::PresetEntry &entry : presets) {
+                        if (!onlyPaths.empty() && onlyPaths.find(entry.relativePath) == onlyPaths.end())
+                                continue;
                         SweepEntry record;
                         record.relativePath = entry.relativePath;
 
