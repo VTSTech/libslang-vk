@@ -1,0 +1,45 @@
+# libslang-vk golden-image conformance manifest (conformance golden).
+#
+# Each entry: <preset-path> \t <golden-name> [\t <max-delta> \t <max-mismatch-pct>]
+#   preset-path  relative to one of the sweep roots (tests/data and examples
+#                for the in-repo suite; the first root that contains the
+#                preset wins and drives the SEC-01 include sandbox), or an
+#                absolute path.
+#   golden-name  PNG inside tests/golden/images/ (derived from the preset
+#                path when omitted). --update (re)writes goldens and
+#                refreshes the generated-by stamp below.
+#   tolerances   per-channel delta (0..255, default 2) and max % of
+#                mismatched pixels (default 0.5). Same backend + same
+#                driver is byte-exact in practice; the slack absorbs
+#                cross-version LSB drift.
+#
+# Render procedure behind every golden: deterministic procedural testcard
+# 320x240 -> chain render 3 frames at 640x480 RGBA8 -> final frame readback.
+# Regenerate the whole set: conformance golden tests/data examples --update
+#
+# The suite covers every chain semantic: single-pass blit, multi-pass,
+# feedback ping-pong, history ring, mipmap refill, FBO formats, max FBO
+# passes, push-fragment uniforms, parameter fill, input-size uniforms,
+# smoothness qualifiers, named/User LUTs, LUT mipmaps, LUT size uniform,
+# rotation, include composition and the two interactive-demo presets.
+# generated-by: llvmpipe (LLVM 19.1.7, 256 bits)
+runner/blit.slangp	blit.png
+runner/twopass.slangp	twopass.png
+runner/mip.slangp	mip.png
+runner/maxfbo.slangp	maxfbo.png
+runner/param.slangp	param.png
+runner/pushfrag.slangp	pushfrag.png
+runner/sizeparam.slangp	sizeparam.png
+runner/smoothqual.slangp	smoothqual.png
+runner3/lut.slangp	lut.png
+runner3/lut_user.slangp	lut_user.png
+runner3/lut_size.slangp	lut_size.png
+runner3/lut_mip.slangp	lut_mip.png
+runner4/blit.slangp	runner4_blit.png
+runner4/rot.slangp	rot.png
+field-presets/test/feedback.slangp	feedback.png
+field-presets/test/history.slangp	history.png
+field-presets/test/format.slangp	format.png
+field-presets/test/r4-include.slangp	r4_include.png
+presets/demo-bright.slangp	demo_bright.png
+presets/demo-glow.slangp	demo_glow.png

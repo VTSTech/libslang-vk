@@ -1,0 +1,31 @@
+# libslang-vk perf budget (conformance perf --budgets)
+# <preset-path> \t <max-ms-per-frame>  (mean-of-timed-frames gate)
+#
+# Reference budgets for the bundled fixtures generated on the
+# sandbox CPU renderer (llvmpipe, 640x480, warmup 3 / timed 20).
+# Deliberately generous (5x measured, 5 ms floor): they document the
+# format and keep CI green on slow machines. For real hardware, run
+#   conformance perf <roots...> --report my-gpu.txt
+# on the target machine and set budgets from the measured means
+# (e.g. 16.6 ms = 60 fps ceiling, or mean * 1.5 for a regression
+# guard rather than an fps target).
+field-presets/test/feedback.slangp	6.245
+field-presets/test/format.slangp	9.538
+field-presets/test/history.slangp	11.235
+field-presets/test/r4-include.slangp	6.174
+presets/demo-bright.slangp	11.379
+presets/demo-glow.slangp	6.175
+runner/blit.slangp	6.319
+runner/maxfbo.slangp	5.000
+runner/mip.slangp	15.235
+runner/param.slangp	6.093
+runner/pushfrag.slangp	6.243
+runner/sizeparam.slangp	5.652
+runner/smoothqual.slangp	5.770
+runner/twopass.slangp	11.990
+runner3/lut.slangp	6.060
+runner3/lut_mip.slangp	11.457
+runner3/lut_size.slangp	6.106
+runner3/lut_user.slangp	6.078
+runner4/blit.slangp	6.193
+runner4/rot.slangp	5.637

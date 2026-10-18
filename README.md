@@ -17,7 +17,7 @@ is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
 **Status: M4 (presentation) — library milestones complete.** All library-side
-M0–M4 gates are green: 23/23 ctest, byte-exact goldens, zero validation-layer
+M0–M4 gates are green: 25/25 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
 M2 execution contract (history rings `OriginalHistory#`, feedback
@@ -54,6 +54,7 @@ exit gate.
 - [Consuming](#consuming)
 - [Vulkan runner](#vulkan-runner-m1--m2--m3--m4)
 - [Example](#example)
+- [Conformance: golden images + perf budgets](#conformance-golden-images--perf-budgets)
 - [Building and testing](#building-and-testing)
 - [CI artifacts](#ci-artifacts)
 - [Documentation](#documentation)
@@ -309,7 +310,7 @@ LOAD→FAIL regressions (improvements are reported as review material);
 FILE while keeping corpus-root semantics — the chunked-rescan escape hatch
 for slow machines. This is the tool behind
 [`corpus/baseline-ledger.txt`](corpus/baseline-ledger.txt) (2,658 presets:
-2,567 loaded / 91 failed at the pinned revision) and the nightly gate.
+2,637 loaded / 21 failed at the pinned revision) and the nightly gate.
 
 `--render` executes every chain through the real render path — presets
 whose final pass does not resolve to the output size go through the M4
@@ -335,6 +336,63 @@ pass 1 shaders/demo_glow_combine.slang: OK
 result: 2/2 pass(es) compiled to SPIR-V — ready for the Vulkan runner.
 ```
 
+## Conformance: golden images + perf budgets
+
+The two M3 leftovers ship as one tool, `conformance` — golden-image
+rendering for visual regressions and per-frame wall-clock budgets for
+performance regressions. Both modes skip cleanly (exit 0) when no Vulkan
+device is available, like `corpus_sweep`.
+
+**Golden images** render every preset listed in
+[`tests/golden/manifest.txt`](tests/golden/manifest.txt) — 20 bundled
+fixtures covering every chain semantic (blit, multi-pass, feedback
+ping-pong, history ring, mipmap refill, FBO formats, push-fragment
+uniforms, parameters, size uniforms, smoothness qualifiers, named / `User#`
+LUTs, LUT mipmaps, LUT size, rotation, include composition, the two demo
+presets) — from a deterministic procedural testcard (320×240) at a fixed
+target (640×480, `--size WxH`), 3 frames per chain, and compare the final
+frame against the committed PNG in `tests/golden/images/`. A pixel passes
+when every channel differs by ≤ `max-delta` (default 2); the image passes
+when the mismatched-pixel fraction is ≤ `max-mismatch-pct` (default 0.5%)
+— same backend + driver is byte-exact in practice, the slack absorbs
+cross-version LSB drift. The manifest's last header line,
+`# generated-by:`, records the backend that produced the goldens; a
+different local device prints a WARN once (cross-backend drift on real
+GPUs is expected — regenerate with `--update` when adopting a new
+reference backend).
+
+```sh
+cmake --build build --target conformance
+./build/examples/conformance golden tests/data examples        # compare (ctest: example_conformance_golden)
+./build/examples/conformance golden tests/data examples --update   # (re)generate goldens + stamp
+```
+
+**Perf budgets** load every preset under the roots (`--only-from FILE`
+whitelist to restrict), render `--warmup` (default 3) + `--timed`
+(default 20) frames and time each frame — `Chain::render` is synchronous
+(one fenced submit per frame), so wall-clock around it is the honest
+per-frame cost including submit + execute + fence wait. `--report FILE`
+writes a TAB ledger (mean/min/max ms, fps, pass count) suitable for
+committing and diffing across driver/hardware changes; `--budgets FILE`
+gates the mean — `path<TAB>max-ms` lines, breach exits 1, presets absent
+from the budgets file are informational only, budget entries whose preset
+was not measured are tolerated (the corpus-ledger gate philosophy).
+[`tests/golden/budgets-lavapipe.txt`](tests/golden/budgets-lavapipe.txt)
+is the format reference (5× measured + 5 ms floor, sandbox-informational);
+for your own GPU run `--report` there and set budgets from the measured
+means — 16.6 ms is the 60 fps ceiling, mean × 1.5 a pure regression guard.
+
+```sh
+./build/examples/conformance perf tests/data examples --report my-gpu.txt
+./build/examples/conformance perf tests/data examples --budgets tests/golden/budgets-lavapipe.txt
+```
+
+The golden compare and a light perf smoke (no budgets — sandbox timing
+must never flake the suite) run as ctests
+(`example_conformance_golden`, `example_conformance_perf`); the CI
+shader-demo artifacts bundle `conformance(.exe)` with `tests-golden/` +
+`tests-data/` so the golden suite runs from the artifact too.
+
 ## Building and testing
 
 ```sh
@@ -346,7 +404,7 @@ ctest --test-dir build --output-on-failure
 Options: `SLANGVK_BUILD_SHARED` (default `ON`, builds `libslangvk.so/dll`
 alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
 `SLANGVK_BUILD_EXAMPLES` (default `ON`, builds `preset_info`,
-`shader_demo` and `corpus_sweep`), `SLANGVK_ENABLE_VK` (default `ON`,
+`shader_demo`, `corpus_sweep` and `conformance`), `SLANGVK_ENABLE_VK` (default `ON`,
 builds the Vulkan runner; `OFF` gives a core-only build) and the demo
 options `SLANGVK_DEMO_WINDOW` / `SLANGVK_DEMO_FETCH_SHADERS` (see
 [Shader demo](#shader-demo)). `SLANGVK_SANITIZE=address,undefined` is
@@ -373,9 +431,13 @@ same-toolchain-ABI API (`include/slangvk/export.h`):
   the Khronos validation layer installed.
 - **`shader-demo-linux-x64` / `shader-demo-windows-x64`** — the runnable
   demo (windowed GLFW build on Linux; headless-capable on Windows) bundled
-  with `corpus_sweep` / `corpus_sweep.exe`, the demo presets, `testcard.png`
-  and a USAGE.txt covering both tools. Assets resolve relative to the
-  executable, so the zip runs from anywhere.
+  with `corpus_sweep` / `corpus_sweep.exe`, `conformance` / `conformance.exe`,
+  the demo presets, `testcard.png`, the golden-image kit (`tests-golden/`:
+  manifest + images + budgets) and the fixture presets (`tests-data/`) —
+  the golden suite runs straight from the artifact with
+  `conformance golden --manifest tests-golden/manifest.txt --golden-dir
+  tests-golden tests-data .` — plus a USAGE.txt covering the tools. Assets
+  resolve relative to the executable, so the zip runs from anywhere.
 
 A sanitized (address + undefined) Linux test build runs alongside the
 Release jobs — with synchronization validation enabled whenever the

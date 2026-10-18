@@ -1,0 +1,6 @@
+# conformance perf ctest whitelist: the light fixtures the informational
+# perf smoke measures (runner/blit.slangp and friends, relative to the
+# tests/data root). Kept tiny so the smoke stays fast on CPU renderers.
+runner/blit.slangp
+runner/twopass.slangp
+runner3/lut.slangp

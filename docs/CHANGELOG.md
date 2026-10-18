@@ -10,9 +10,33 @@ tags yet). Format adapted from
 
 ## [Unreleased]
 
+### Added
+
+- **Golden-image conformance suite + perf budgets** — the two M3 leftovers
+  ship as one tool, `examples/conformance.cpp` (M4.04 scope). `conformance
+  golden` renders every preset in `tests/golden/manifest.txt` (20 bundled
+  fixtures covering every chain semantic: blit, multi-pass, feedback
+  ping-pong, history ring, mipmap refill, FBO formats, push-fragment
+  uniforms, parameters, size uniforms, smoothness qualifiers, named /
+  `User#` LUTs, LUT mipmaps, LUT size, rotation, include composition, the
+  two demo presets) from a deterministic procedural testcard at a fixed
+  target and compares the final frame against committed PNGs in
+  `tests/golden/images/` — per-channel delta + mismatched-fraction
+  tolerances per entry, `--update` regenerates, and the manifest's
+  `# generated-by:` stamp names the backend that produced the goldens
+  (a different local device warns once). `conformance perf` times
+  `--timed` frames per preset after `--warmup` (wall-clock around the
+  synchronous fenced `Chain::render`), writes a TAB `--report` ledger and
+  gates `--budgets` files (`path<TAB>max-ms`, breach exits 1, unmeasured
+  entries tolerated); `tests/golden/budgets-lavapipe.txt` documents the
+  format with generous sandbox reference budgets. Both modes skip cleanly
+  without a Vulkan device; ctests `example_conformance_golden` /
+  `example_conformance_perf` (suite now 25/25); the CI shader-demo
+  artifacts bundle `conformance(.exe)` with the golden kit and fixture
+  presets so the suite runs from the artifact.
+
 ### Planned
 
-- M3 leftovers: golden-image conformance suite, perf budgets.
 - M5 (1.0): API freeze, packaging, `docs/API.md`.
 - The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
   no library action planned; they stay pinned as FAIL in the baseline.

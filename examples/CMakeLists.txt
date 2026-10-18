@@ -188,6 +188,32 @@ if(SLANGVK_ENABLE_VK)
         target_link_libraries(corpus_sweep PRIVATE slangvk)
 endif()
 
+# conformance — M4.04: golden-image rendering + perf budgets (the M3
+# leftovers). golden: renders every tests/golden/manifest.txt entry at a
+# fixed size from the procedural testcard and compares the final frame
+# against the committed PNGs in tests/golden/images (tolerances per entry;
+# --update regenerates). perf: per-frame wall-clock around the synchronous
+# fenced Chain::render, --budgets gate for real hardware, --report ledger.
+# Both modes skip cleanly (exit 0) when no Vulkan device exists. The perf
+# ctest is an informational smoke over a fixed whitelist without budgets so
+# sandbox/CPU timing variance can never flake the suite.
+if(SLANGVK_ENABLE_VK)
+        add_executable(conformance conformance.cpp)
+        target_link_libraries(conformance PRIVATE slangvk)
+        target_include_directories(conformance PRIVATE ${CMAKE_SOURCE_DIR}/vendor/stb)
+        target_compile_definitions(conformance PRIVATE
+            SLANGVK_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
+
+        add_test(NAME example_conformance_golden
+            COMMAND conformance golden
+                "${CMAKE_SOURCE_DIR}/tests/data" "${CMAKE_SOURCE_DIR}/examples")
+        add_test(NAME example_conformance_perf
+            COMMAND conformance perf
+                "${CMAKE_SOURCE_DIR}/tests/data"
+                --only-from "${CMAKE_SOURCE_DIR}/tests/golden/perf-smoke.txt"
+                --warmup 1 --timed 5)
+endif()
+
 foreach(demo demo-bright demo-glow)
         add_test(NAME example_preset_info_${demo}
             COMMAND preset_info "${SLANGVK_EXAMPLES_DATA_DIR}/${demo}.slangp")
