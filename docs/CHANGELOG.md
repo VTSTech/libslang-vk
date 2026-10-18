@@ -10,6 +10,21 @@ tags yet). Format adapted from
 
 ## [Unreleased]
 
+### Planned
+
+- M5 (1.0): API freeze, packaging, `docs/API.md`.
+- The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
+  no library action planned; they stay pinned as FAIL in the baseline.
+
+## [M4.04] — 2026-10-18/19
+
+The conformance + hardware wave that closes M4: the two M3 leftovers ship
+as one conformance/perf tool with the first real-GPU (RX 560) numbers and
+pixel-level cross-backend verification, the fallback contract gains a
+standing regression drill, `docs/API.md` lands as the M5 freeze baseline,
+and the sweep's one real fork failure became a library fix — integer
+samplers now join the canonical descriptor layout.
+
 ### Added
 
 - **`docs/API.md` (draft)** — the full public-surface reference pulled from
@@ -142,12 +157,6 @@ tags yet). Format adapted from
   integer samplers on par with float ones; `stage.textures` records
   them identically (combined-image-sampler descriptors are
   type-agnostic).
-
-### Planned
-
-- M5 (1.0): API freeze, packaging, `docs/API.md`.
-- The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
-  no library action planned; they stay pinned as FAIL in the baseline.
 
 ## [M4.03] — 2026-10-18
 
@@ -347,7 +356,9 @@ Conformance + perf wave (partial per PLAN.md §11).
 
 ---
 
-[Unreleased]: https://github.com/VTSTech/libslang-vk/compare/cf91f52...HEAD
+[Unreleased]: https://github.com/VTSTech/libslang-vk/compare/31519c8...HEAD
+[M4.04]: https://github.com/VTSTech/libslang-vk/compare/89963da...31519c8
+[M4.03]: https://github.com/VTSTech/libslang-vk/commit/89963da
 [M4.02]: https://github.com/VTSTech/libslang-vk/commit/cf91f52
 [M4.01]: https://github.com/VTSTech/libslang-vk/commit/3a6ec45
 [M4]: https://github.com/VTSTech/libslang-vk/compare/b7c6583...3a6ec45
