@@ -199,14 +199,14 @@ interface preserved, host context adopted, dual-path with the SDL_GPU
 runner until corpus parity (§12 risk 5). The spike closes when the lib path
 passes the hardware field sweep on Windows + Linux (§11 M4); library-side
 M0–M4 gates it consumes are green (PROVENANCE.md verification record).
-Hardware sessions (first Windows RX 560, then a Linux llvmpipe run) are
-logged in PROVENANCE.md's **hardware field log**: four sessions / five
-host runs across two OSes — 24 preset loads over 20 unique presets,
-9,093 frames counted — including 26- and 25-pass chains, the
-hqx/ScaleFX/ScaleHQ/FSR scale-rule families, two in-game level-load
-transitions survived with no Reinit, and (session 4, Linux) the
-fit-and-center letterbox present path on mismatched game/swapchain sizes
-— zero skipped frames and no fallbacks throughout. Open: heavy-suite
+Hardware sessions (Windows RX 560, a Linux llvmpipe run, then the HDR
+preset family on Windows) are logged in PROVENANCE.md's **hardware field
+log**: five sessions / six host runs across two OSes — 40 preset loads
+over 29 unique presets, 14,509 frames counted — including 26- and 25-pass
+chains, the hqx/ScaleFX/ScaleHQ/FSR scale-rule families, two in-game
+level-load transitions survived with no Reinit, and (session 4, Linux)
+the fit-and-center letterbox present path on mismatched
+game/swapchain sizes — zero skipped frames and no fallbacks throughout. Open: heavy-suite
 steady-state perf (crt-maximus-royale ~19 fps post-load window; 4.05 s
 synchronous load), a real-GPU (dGPU) Linux run, history/feedback/format/
 mipmap coverage targets, and the VRAM soak.

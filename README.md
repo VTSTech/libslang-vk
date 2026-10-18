@@ -16,19 +16,17 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4 (presentation) — library milestones complete.** The M0 core
-suite passes and the M1 runner skeleton (Device adopt/create, offscreen
-`Chain::render`, golden blit round-trips) is joined by the M2 execution
-contract: history rings (`OriginalHistory#`), feedback double-buffering
-(`PassFeedback#` / `<name>Feedback`), per-pass FBO formats
-(`#pragma format`, srgb/float framebuffers), `mipmap_input` refill, FBO
-recreation on resize and live parameters, M3 LUT uploads, and — since M4 —
-swapchain presentation: the final pass draws into an acquired swapchain
-image with letterbox rect and orientation handled by the library (plan §8
-output mode (a)). All library-side M0–M4 gates are green — 19/19 ctest,
-byte-exact goldens, zero validation-layer errors on lavapipe (verification
-record in [PROVENANCE.md](PROVENANCE.md)). Per-item M0–M4 implementation
-status, audited against the plan: [CHECKLIST.md](CHECKLIST.md).
+**Status: M4 (presentation) — library milestones complete.** All library-side
+M0–M4 gates are green: 19/19 ctest, byte-exact goldens, zero validation-layer
+errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
+(Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
+M2 execution contract (history rings `OriginalHistory#`, feedback
+double-buffering `PassFeedback#` / `<name>Feedback`, per-pass FBO formats,
+`mipmap_input` refill, FBO recreation on resize, live parameters), M3 LUT
+uploads, and — since M4 — swapchain presentation: the final pass draws into an
+acquired swapchain image with the letterbox rect and orientation handled by
+the library (plan §8 output mode (a)). Per-item implementation status,
+audited against the plan: [CHECKLIST.md](CHECKLIST.md).
 
 **DevilutionX integration (plan §11 M4) is underway** on the fork's
 [`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)
@@ -37,6 +35,104 @@ Vulkan runner dual-path with the SDL_GPU runner — preset browser, ini
 persistence, OSD overlay and the `(Unavailable)` fallback continue unchanged
 on top (plan §9). Hardware field sweeps on Windows + Linux are the spike's
 exit gate.
+
+## Contents
+
+- [Quickstart](#quickstart)
+- [Shader demo](#shader-demo)
+- [Consuming](#consuming)
+- [Vulkan runner](#vulkan-runner-m1--m2--m3--m4)
+- [Example](#example)
+- [Building and testing](#building-and-testing)
+- [CI artifacts](#ci-artifacts)
+- [Documentation](#documentation)
+- [License](#license)
+
+## Quickstart
+
+Build and test — glslang, Vulkan-Headers, volk and VMA are fetched and
+SHA-256-pinned automatically, so no Vulkan SDK is needed at link time:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Then load, render and switch real shader presets with the bundled demo:
+
+```sh
+./build/examples/shader_demo                                 # menu over the bundled presets
+./build/examples/shader_demo path/to/slang-shaders           # browse any preset pack
+./build/examples/shader_demo --no-menu --out shots           # headless: PNG per preset, exit
+```
+
+And embed the library in four calls:
+
+```cpp
+auto device = slv::Device::create({.appName = "myhost"});
+auto preset = slv::Preset::load(*device, "shaders/crt-royale.slangp");
+auto chain  = slv::Chain::create(*device, *preset, {.outputWidth = 1280, .outputHeight = 720});
+chain->render(inputFrame, outputTarget, {});   // once per frame
+```
+
+## Shader demo
+
+[`examples/shader_demo`](examples/shader_demo) is a working host built
+directly on the public API — the end-to-end embedding story. It discovers
+presets, renders chains and switches presets, input sources and shader
+parameters live, in two forms:
+
+- **Windowed** (default when GLFW is buildable): opens a Vulkan window and
+  plays the M4 presentation contract from the host side — the demo owns the
+  window, surface and swapchain and the acquire/present pair, while the
+  library draws the chain into the acquired image with fit-and-center
+  letterboxing.
+- **Headless** (automatic fallback when no display exists, or `--headless`):
+  renders warmup frames offscreen and writes the final frame as a PNG — how
+  the ctest smoke runs on CI/lavapipe.
+
+```sh
+shader_demo                                          # menu over the bundled presets
+shader_demo ~/slang-shaders                          # browse a full shader pack
+shader_demo crt/blend.slangp                         # load one preset directly
+shader_demo --no-menu --frames 2 --out shots pack/   # dump one PNG per preset, exit
+shader_demo --list                                   # print what would be offered
+```
+
+Menu commands (terminal-driven, both modes):
+
+| Command        | Action                                                         |
+|----------------|----------------------------------------------------------------|
+| `<number>`     | load + switch to preset number N                               |
+| `n` / `p`      | next / previous preset                                         |
+| `i`            | toggle input: animated test pattern ↔ bundled `testcard.png`   |
+| `w`            | write PNG (headless: render + dump now; windowed: screenshot)  |
+| `l` / `list`   | list presets around the current one                            |
+| `params`       | show the current preset's shader parameters                    |
+| `set NAME VAL` | override a parameter (applies on the next frame)               |
+| `q`            | quit                                                           |
+
+Notes:
+
+- Both input sources are uploaded through `Image::update` — the M4 per-frame
+  host-upload path a game host uses for its converted frame. `--input image`
+  starts on the bundled static test card instead of the animated pattern.
+- Preset switching re-points the SEC-01 shader-root sandbox per source, so a
+  single menu can mix the bundled demos, the test fixture trees and a full
+  slang-shaders checkout.
+- `--validate` turns on `VK_LAYER_KHRONOS_validation` when installed.
+
+CMake options:
+
+- `SLANGVK_DEMO_WINDOW` (default `ON`) — fetches GLFW 3.4 and compiles the
+  windowed path; `OFF` gives a pure headless demo build with no GLFW fetch.
+  Linux configure-time needs the usual GLFW dev packages (`libx11-dev`,
+  `libxkbcommon-dev`, or the Wayland equivalents).
+- `SLANGVK_DEMO_FETCH_SHADERS` (default `OFF`) — shallow-clones
+  [libretro/slang-shaders](https://github.com/libretro/slang-shaders) at
+  configure time and seeds the demo's default preset search with it (large
+  download; runtime paths work without it too).
 
 ## Consuming
 
@@ -208,13 +304,15 @@ ctest --test-dir build --output-on-failure
 
 Options: `SLANGVK_BUILD_SHARED` (default `ON`, builds `libslangvk.so/dll`
 alongside the static lib), `SLANGVK_BUILD_TESTS` (default `ON`),
-`SLANGVK_BUILD_EXAMPLES` (default `ON`, builds the `preset_info` demo),
-`SLANGVK_ENABLE_VK` (default `ON`, builds the Vulkan runner; `OFF` gives a
-core-only build), `SLANGVK_SANITIZE=address,undefined` (test builds).
-Size levers (opt-in, off by default): `SLANGVK_LTO` enables IPO + `-Oz`
-release codegen for the glslang-bearing library, and
-`SLANGVK_SYSTEM_GLSLANG=ON` links a system-installed glslang via
-`find_package(glslang CONFIG)` instead of the pinned FetchContent copy.
+`SLANGVK_BUILD_EXAMPLES` (default `ON`, builds `preset_info`,
+`shader_demo` and `corpus_sweep`), `SLANGVK_ENABLE_VK` (default `ON`,
+builds the Vulkan runner; `OFF` gives a core-only build) and the demo
+options `SLANGVK_DEMO_WINDOW` / `SLANGVK_DEMO_FETCH_SHADERS` (see
+[Shader demo](#shader-demo)). `SLANGVK_SANITIZE=address,undefined` is
+available for test builds. Size levers (opt-in, off by default):
+`SLANGVK_LTO` enables IPO + `-Oz` release codegen for the glslang-bearing
+library, and `SLANGVK_SYSTEM_GLSLANG=ON` links a system-installed glslang
+via `find_package(glslang CONFIG)` instead of the pinned FetchContent copy.
 glslang, Vulkan-Headers, volk and VMA are fetched and built automatically
 (SHA-256 pinned; see [PROVENANCE.md](PROVENANCE.md)).
 
@@ -247,6 +345,16 @@ clones `libretro/slang-shaders` nightly (or via workflow_dispatch), loads
 and compiles every preset headlessly on lavapipe, and uploads the ledger
 artifact — bootstrap mode until the first baseline ledger is pinned,
 then the documented no-regression gate (plan §10) flips on.
+
+## Documentation
+
+- [docs/SPEC.md](docs/SPEC.md) — the preset-format contract (parsing,
+  translation and execution semantics, section by section).
+- [docs/PLAN.md](docs/PLAN.md) — milestones, API sketch, risk register.
+- [CHECKLIST.md](CHECKLIST.md) — per-item M0–M4 implementation status,
+  audited against the plan.
+- [PROVENANCE.md](PROVENANCE.md) — upstream provenance, documented
+  divergences, pinned dependency hashes and the corpus ledger.
 
 ## License
 

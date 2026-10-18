@@ -561,11 +561,11 @@ and never baseline away a library-side regression.
 Verbatim-log summaries from the fork's field loop — the hardware half of
 the M4 exit above. Hosts: Windows (Radeon RX 560 Series, vsync on,
 game + swapchain 1920x1080, equal-size direct present path) for sessions
-1–3; Linux (llvmpipe, LLVM 21.1.8 — Mesa software rasterizer, the CI
+1–3 and 5; Linux (llvmpipe, LLVM 21.1.8 — Mesa software rasterizer, the CI
 conformance vehicle's hardware-side cousin) for session 4. The adapter
 build advances between sessions (`338827ff4` Oct 17 18:21:36 →
-`ff3999a6f` Oct 17 18:57:45 → `a98c6d5` Oct 17 20:16:39); builds are
-recorded per session. "0 skipped" in every heartbeat of every session so
+`ff3999a6f` Oct 17 18:57:45 → `a98c6d5` Oct 17 20:16:39 →
+`01ea2bf7` Oct 17 23:37:02); builds are recorded per session. "0 skipped" in every heartbeat of every session so
 far; no `(Unavailable)` fallback, no validation output, clean shutdowns
 throughout.
 
@@ -624,6 +624,26 @@ did not report in this short session. A real-GPU (dGPU) Linux run remains
 open against the M4 exit's "hardware field sweep on Windows + Linux"
 wording — see the still-open list.
 
+**Session 5 — HDR preset family + CRT suite hot-swap matrix (16 loads,
+build `01ea2bf7`, exe 1.6.0-dev-Release-01ea2bf7d, Oct 17 23:37:02).**
+Host: Windows, RX 560, vsync=1, equal-size 1920x1080 direct present.
+First field exposure of the **HDR preset family**: crt-adamant-default-ntsc
+(13 passes — the hand-written `hdr/` variant), crt-adamant-default (3),
+crt-sony-megatron-default-hdr-NTSC (9), crt-sony-megatron-default-hdr (3),
+hdr-config-adamant (1), then a CRT sweep — crt-1tap-bloom (26, repeat),
+crt-geom-deluxe (5), crt-guest-advanced-hd (12), crt-hyllian-fast (1),
+crt-maximus-royale (25), crt-mattias (1), crt-hyllian (5), crt-super-xbr
+(11), smaa / smaa+sharpen / smaa+linear (4/5/5). Fifteen hot-swap
+transitions, all ok; zero skipped / dest-skipped in every heartbeat;
+no fallback, no validation output; clean shutdown ~141 s in; 5,416
+frames counted. Frame pacing by weight: heavy 25/26-pass chains in the
+~28–40 fps heartbeat windows, light chains ~45–60. Note for the parser
+cap fix (this build predates it): the 13-pass `hdr/` adamant variant does
+not approach the old 32-pass cap — the fix targets the generated
+mega-preset adamant variants that failed with "preset pass index 93
+exceeds the limit of 32" (kMaxPresetPasses 32→128 shipped in the same
+cycle; see the parser hardening note above).
+
 **Still open in the sweep:** a real-GPU (dGPU) Linux run (session 4 was
 llvmpipe, software); feedback double-buffering
 readers (named `<name>Feedback` / numeric `PassFeedback#` forms),
@@ -639,8 +659,8 @@ FBO sizes in the runner (`maxfbo.slangp` runner case + parser pins);
 `histories` stays informational (ring depth derives from max referenced
 tap) with parse/clamp/merge pinned in `test_preset_parser`.
 
-**Cumulative after 4 sessions (5 host runs, 2 OSes):** 24 preset loads over
-20 unique presets — max 26 passes — 9,093 frames counted (session 4's
+**Cumulative after 5 sessions (6 host runs, 2 OSes):** 40 preset loads over
+29 unique presets — max 26 passes — 14,509 frames counted (session 4's
 short run uncounted), zero skipped, zero fallbacks, zero validation
 output, clean shutdowns. Device coverage: RX 560 (dGPU) + llvmpipe
 (software rasterizer); present-path coverage: direct equal-size +
