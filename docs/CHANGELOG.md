@@ -4,8 +4,8 @@ All notable changes to **libslang-vk** — a C++23 Vulkan runner for libretro
 slang shader presets — are documented in this file.
 
 Milestones follow the M-series plan in [PLAN.md §11](PLAN.md) (`M0` → `M5`).
-Each milestone corresponds to the matching `M*` commit(s) on `main` (no git
-tags yet). Format adapted from
+Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
+`M0` … `M4.04`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
