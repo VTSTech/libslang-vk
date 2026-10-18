@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 """Generate the shader_demo bundled input image (examples/shader_demo/assets/testcard.png).
 
 A 480x320 test card:

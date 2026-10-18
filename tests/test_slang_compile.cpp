@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M0 unit test — glslang compile path (real library code).
 //
 // End-to-end check of the glslang FetchContent wiring: a trivial stage pair

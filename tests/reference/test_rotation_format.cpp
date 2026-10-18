@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for the SLANG_SPEC gap #5 + #6 round (no SDL needed).
 // #5: the `Rotation` builtin uniform member is whitelisted by the translator's
 //     ValidateBlockMembers and filled by Runner::FillBlockBytes with the

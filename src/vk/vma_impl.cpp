@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk internal — VMA implementation translation unit (M1).
 //
 // volk is included first so VMA's dynamic function fetch binds to the

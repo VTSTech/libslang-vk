@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M3 unit test — LUT texture upload on the Vulkan runner
 // (plan §11 M3): decode + RGBA8 upload, binding by declared name (F9
 // case-insensitive) and positionally via User# (SPEC 4.5 declaration

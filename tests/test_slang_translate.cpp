@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M0 unit test — .slang translation (real library code).
 //
 // Exercises the largest core TU end-to-end on a minimal slang source:

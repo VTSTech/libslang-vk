@@ -1,3 +1,7 @@
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 # libslang-vk corpus ledger (plan §10, miss list #5).
 #
 # Nightly compile-sweep over the full libretro/slang-shaders corpus: parse +

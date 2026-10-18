@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk — Image helpers (M1): owning 2D images + pixel readback for
 // hosts/tests without their own allocator (headless CI, golden images).
 // M3: hosts the shared mip-chain / barrier / staging utilities consumed by

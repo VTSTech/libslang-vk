@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk runner regression test — the stock libretro shader shape.
 //
 // pins: global MVP UBO + push-constant block, push block READ by the

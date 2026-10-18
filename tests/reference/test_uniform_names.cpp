@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for the SLANG_SPEC gap #3/#4 fixes (no SDL needed).
 // 1. PassOutput#/PassFeedback# index parsing in FillBlockBytes: the old
 //    substr(10) sliced "ck#" for the 12-char PassFeedback prefix and aborted

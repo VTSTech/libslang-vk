@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk — LUT texture upload (M3, plan §11): decodes image files to
 // RGBA8 and uploads them as R8G8B8A8_UNORM with the LUT's own sampler
 // options and a pre-generated full mip chain when the preset sets

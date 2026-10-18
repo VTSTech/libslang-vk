@@ -1,3 +1,7 @@
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 # 3.22 matches the floor of downstream embedders (DevilutionX declares 3.22)
 # and of the fetched deps (glslang 16.6.0 and Vulkan-Headers 1.4.364 need
 # 3.22.1); DevilutionX's Linux CI image ships CMake 3.25.1, which sits

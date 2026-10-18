@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M2 unit test — full chain semantics on the Vulkan runner
 // (plan §11 M2 exit criteria): feedback double-buffering, history rings,
 // per-pass FBO formats, mipmap refill, include/cycle presets, FBO

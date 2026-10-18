@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for the history-ring fix (no SDL needed).
 // Emulates the runner's ring: blit current frame at slot S, advance S each
 // frame, then check what OriginalHistoryN resolves to for every frame.

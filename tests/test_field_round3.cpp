@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone regression test for field round 3 (links the REAL parser and
 // translator; no SDL device, no glslang — translate stage only, plus copies
 // of the new pure-logic helpers).

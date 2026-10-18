@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for the F1 mipmap fix (no SDL needed).
 // F1 makes `mipmap_input` effective for pass inputs: a pass output is
 // allocated with a full mip chain exactly when the NEXT pass reads it as

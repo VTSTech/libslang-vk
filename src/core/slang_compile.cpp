@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // slang_compile.cpp — glslang frontend glue.
 //
 // Ported from the reference host (VTSTech/DevilutionX,

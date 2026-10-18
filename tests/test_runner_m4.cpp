@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M4 unit test — presentation (plan §11 M4 / §8 output (a)):
 // SwapchainFrame rendering into an acquired swapchain image (headless
 // surface), the fit-and-center / explicit-rect letterbox draw, input-frame

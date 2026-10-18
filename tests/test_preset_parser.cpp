@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk M0 unit test — .slangp parser (real library code).
 //
 // Pins the semantics the reference host's audit campaign established:

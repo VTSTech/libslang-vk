@@ -1,3 +1,7 @@
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 # libslang-vk test suite (M0).
 #
 # Two tiers, inherited from the reference host's audit methodology:

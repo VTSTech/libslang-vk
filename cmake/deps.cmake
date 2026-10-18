@@ -1,3 +1,7 @@
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 # Third-party dependencies — all permissively licensed (plan §4).
 #
 # M0 wires glslang only: it is the one dependency the core layer consumes.

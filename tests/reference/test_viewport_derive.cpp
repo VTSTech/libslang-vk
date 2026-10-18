@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for the F6 viewport-aspect fix (no SDL needed).
 // DeriveViewportSize replaces the raw-swapchain base for ScaleType::Viewport
 // and FinalViewportSize with the aspect-corrected game rect (letterbox fit,

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+# AI Assisted by Super-Z (GLM-5.3-Flash)
+# License: MIT
+
 """Provenance gate: scan source for RetroArch code fingerprints (plan section 4, risk 1).
 
 libslang-vk is clean-room against RetroArch's GPL-3 slang implementation. The

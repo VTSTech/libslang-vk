@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // libslang-vk — Chain implementation (M1): pipelines, FBOs, samplers,
 // descriptor sets and the per-frame execution loop.
 //

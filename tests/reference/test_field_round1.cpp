@@ -1,3 +1,7 @@
+// Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
+// License: MIT
+
 // Standalone logic test for field round 1 (no SDL needed).
 // The first field log (game-side gpu-scaler log, 2026-10-14) surfaced four
 // failure classes, each verified against the libretro/slang-shaders corpus:
