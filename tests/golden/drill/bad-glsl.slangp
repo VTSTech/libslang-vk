@@ -1,0 +1,8 @@
+# libslang-vk drill case: the shader file exists but its GLSL does not
+# compile (fragment-body syntax error) — the compile stage must fail the
+# load cleanly.
+shaders = 1
+shader0 = shaders/broken.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

@@ -3,9 +3,10 @@
 // License: MIT
 
 // libslang-vk — conformance suite (M4.04, plan §11): golden-image rendering
-// and performance budgets, the two M3 leftovers.
+// and performance budgets, the two M3 leftovers, plus the CHECKLIST-#11
+// fallback drill.
 //
-// Two modes, one binary:
+// Three modes, one binary:
 //
 //   conformance golden <root> [<root> ...] [--manifest FILE] [--golden-dir DIR]
 //                      [--update] [--frames N] [--size WxH] [--no-lut]
@@ -63,6 +64,25 @@
 // only; budget lines whose preset was not measured are reported as
 // UNMEASURED and tolerated (the corpus-ledger gate philosophy: only
 // regressions against a recorded expectation fail the run).
+//
+// conformance drill <root> [<root> ...] [--manifest FILE] [--size WxH]
+//                    [--no-lut]
+//
+//     The library half of the fallback drill (CHECKLIST miss #11): every
+//     manifest entry is a preset that MUST fail to load, each exercising a
+//     distinct failure layer (parser, missing shader, GLSL compile,
+//     live-sampled unknown sampler, missing LUT, #reference target,
+//     PassOutput causality). Per case the drill requires a clean rejection
+//     with a non-empty error, zero validation-layer messages, and a
+//     pixel-identical re-render of a known-good preset on the same device —
+//     a loaded "broken" preset, a poisoned device or a drifted recovery
+//     frame all exit 1. Manifest format: like the golden manifest, but
+//     only the preset-path column is read (default
+//     <golden-dir>/drill/manifest.txt). The fork-side half of the drill
+//     (broken preset -> (Unavailable) -> stock renderer -> recovery) is
+//     exercised by the host; on hardware it fired for real 2026-10-19
+//     (test/feedback-noncausal -> regular renderer -> next-session
+//     recovery) — this mode is the standing in-repo regression for it.
 
 #include <algorithm>
 #include <chrono>
@@ -229,9 +249,9 @@ std::vector<std::string> SplitTabs(const std::string &line)
 // ----------------------------------------------------------------- options
 
 struct Options {
-        std::string mode;                  // "golden" | "perf"
+        std::string mode;                  // "golden" | "perf" | "drill"
         std::vector<std::string> roots;
-        std::string manifest;              // golden
+        std::string manifest;              // golden, drill
         std::string goldenDir;             // golden (PNG images live in <goldenDir>/images)
         bool update = false;               // golden: (re)write goldens from this run
         int frames = kDefaultFrames;       // golden
@@ -254,7 +274,8 @@ void PrintUsage()
                     "                     [--frames N] [--size WxH] [--no-lut] [--max-report K]\n"
                     "  conformance perf   <root> [...] [--warmup N] [--timed N] [--budgets FILE]\n"
                     "                     [--report FILE] [--only-from FILE] [--size WxH] [--no-lut]\n"
-                    "                     [--fail-on-broken] [--max-report K]\n");
+                    "                     [--fail-on-broken] [--max-report K]\n"
+                    "  conformance drill  <root> [...] [--manifest FILE] [--size WxH] [--no-lut]\n");
 }
 
 bool ParseSize(const std::string &text, uint32_t &w, uint32_t &h)
@@ -825,6 +846,118 @@ int RunPerf(slv::Device &device, const Options &options, slv::Image &input, slv:
         return 0;
 }
 
+// --------------------------------------------------------------- drill mode
+
+/** @brief The preset the drill renders between failure cases: a known-good
+ *  1-pass fixture resolved against the roots like the manifest entries. Its
+ *  pixels are the recovery oracle — byte-comparison against the pre-drill
+ *  reference catches device-state poisoning that still "renders". */
+constexpr char kRecoveryPreset[] = "runner/blit.slangp";
+
+int RunDrill(slv::Device &device, const Options &options, slv::Image &input, slv::Image &output)
+{
+        const GoldenManifest manifest = ReadManifest(options.manifest.c_str());
+        if (manifest.entries.empty()) {
+                std::printf("FAIL conformance drill: manifest %s empty or unreadable\n", options.manifest.c_str());
+                return 1;
+        }
+
+        const auto resolve = [&options](const std::string &path, std::string &full, std::string &root) {
+                if (fs::path(path).is_absolute()) {
+                        full = path;
+                        root = fs::path(path).parent_path().string();
+                        return true;
+                }
+                for (const std::string &candidate : options.roots) {
+                        if (fs::exists(fs::path(candidate) / path)) {
+                                full = (fs::path(candidate) / path).string();
+                                root = candidate;
+                                return true;
+                        }
+                }
+                return false;
+        };
+
+        struct DrillCase {
+                std::string name, path, root;
+        };
+        std::vector<DrillCase> cases;
+        size_t unresolved = 0;
+        for (const GoldenEntry &entry : manifest.entries) {
+                DrillCase c;
+                c.name = entry.path;
+                if (resolve(entry.path, c.path, c.root))
+                        cases.push_back(std::move(c));
+                else
+                        ++unresolved;
+        }
+        std::string recoveryPath, recoveryRoot;
+        const bool haveRecovery = resolve(kRecoveryPreset, recoveryPath, recoveryRoot);
+        if (unresolved != 0 || !haveRecovery || cases.empty()) {
+                std::printf("FAIL conformance drill: %zu unresolved case(s); recovery preset '%s' %s\n", unresolved,
+                    kRecoveryPreset, haveRecovery ? "resolved" : "missing (must sit under a root)");
+                return 1;
+        }
+
+        // Reference render BEFORE any failure attempt: the recovery oracle.
+        slv::preset::SetShaderRootDir(recoveryRoot);
+        const RenderResult reference = RenderEntry(device, input, output, recoveryPath, options, true);
+        if (!reference.ok) {
+                std::printf("FAIL conformance drill: recovery preset failed before the drill: %s\n",
+                    reference.error.c_str());
+                return 1;
+        }
+
+        uint32_t hits = 0, surprises = 0, recoveryFails = 0, valFails = 0;
+        for (const DrillCase &c : cases) {
+                // (1) the broken preset must be rejected with a non-empty error.
+                slv::preset::SetShaderRootDir(c.root);
+                const RenderResult broken = RenderEntry(device, input, output, c.path, options, false);
+                if (!broken.ok) {
+                        ++hits;
+                        std::string msg = broken.error;
+                        if (msg.size() > 140)
+                                msg = msg.substr(0, 137) + "...";
+                        std::printf("  EXPECT-FAIL %s -> %s\n", c.name.c_str(), msg.c_str());
+                } else {
+                        ++surprises;
+                        std::printf("  SURPRISE    %s LOADED (expected a clean rejection)\n", c.name.c_str());
+                }
+
+                // (2) the device must stay clean — no validation-layer output.
+                if (const std::vector<std::string> validation = device.validationErrors(); !validation.empty()) {
+                        ++valFails;
+                        std::printf("  VALIDATION  %zu message(s) after %s\n", validation.size(), c.name.c_str());
+                        for (int i = 0; i < 3 && i < int(validation.size()); ++i)
+                                std::printf("    %s\n", validation[i].c_str());
+                }
+
+                // (3) recovery: the good preset must still load AND render
+                // pixel-identically on the same device.
+                slv::preset::SetShaderRootDir(recoveryRoot);
+                const RenderResult after = RenderEntry(device, input, output, recoveryPath, options, true);
+                if (!after.ok) {
+                        ++recoveryFails;
+                        std::printf("  RECOVERY-FAIL after %s: %s\n", c.name.c_str(), after.error.c_str());
+                        continue;
+                }
+                const CompareStats stats = CompareRgba(after.pixels, reference.pixels, kDefaultMaxDelta);
+                if (stats.mismatchPct() <= kDefaultMaxPct) {
+                        std::printf("  RECOVERY    %s ok (worst %d, mismatch %.3f%%)\n", c.name.c_str(), stats.worst,
+                            stats.mismatchPct());
+                } else {
+                        ++recoveryFails;
+                        std::printf("  RECOVERY-DIFF after %s: worst %d, mismatch %.3f%% > %.2f%%\n", c.name.c_str(),
+                            stats.worst, stats.mismatchPct(), kDefaultMaxPct);
+                }
+        }
+
+        std::printf("\nconformance drill: %zu cases — %u clean failure(s), %u surprise(s), %u recovery fail(s), "
+                    "%u validation fail(s)\n",
+            cases.size(), hits, surprises, recoveryFails, valFails);
+        return (hits == cases.size() && surprises == 0 && recoveryFails == 0 && valFails == 0) ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -835,14 +968,14 @@ int main(int argc, char **argv)
                 return 2;
         }
         options.mode = argv[1];
-        if (options.mode != "golden" && options.mode != "perf") {
+        if (options.mode != "golden" && options.mode != "perf" && options.mode != "drill") {
                 PrintUsage();
                 return 2;
         }
         for (int i = 2; i < argc; ++i) {
                 const std::string arg = argv[i];
                 const auto next = [&]() -> const char * { return i + 1 < argc ? argv[++i] : nullptr; };
-                if (arg == "--manifest" && options.mode == "golden") {
+                if (arg == "--manifest" && (options.mode == "golden" || options.mode == "drill")) {
                         if (const char *v = next())
                                 options.manifest = v;
                 } else if (arg == "--golden-dir" && options.mode == "golden") {
@@ -890,7 +1023,8 @@ int main(int argc, char **argv)
                 return 2;
         }
         if (options.manifest.empty())
-                options.manifest = std::string(SLANGVK_GOLDEN_DIR) + "/manifest.txt";
+                options.manifest = std::string(SLANGVK_GOLDEN_DIR)
+                    + (options.mode == "drill" ? "/drill/manifest.txt" : "/manifest.txt");
         if (options.goldenDir.empty())
                 options.goldenDir = SLANGVK_GOLDEN_DIR;
 
@@ -923,7 +1057,9 @@ int main(int argc, char **argv)
                 return 1;
         }
 
-        const int rc = options.mode == "golden" ? RunGolden(*device, options, *input, *output)
-                                                : RunPerf(*device, options, *input, *output);
-        return rc;
+        if (options.mode == "golden")
+                return RunGolden(*device, options, *input, *output);
+        if (options.mode == "perf")
+                return RunPerf(*device, options, *input, *output);
+        return RunDrill(*device, options, *input, *output);
 }

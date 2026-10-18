@@ -1,0 +1,3 @@
+# libslang-vk drill case: #reference points at a preset that does not
+# exist — the parser must fail the load ("referenced preset failed").
+#reference "drill/absent-parent.slangp"

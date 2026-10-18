@@ -58,6 +58,23 @@ tags yet). Format adapted from
   cross-run headroom at 38%, and observed single-frame spikes up to 4.3×
   mean stay invisible to the mean-of-20 gate). Opt-in on hardware —
   ctest/CI keep `budgets-lavapipe.txt`.
+- **Fallback drill closed (CHECKLIST miss #11), both halves.** (a) *The
+  event* — on the fork (Radeon RX 560, exe `996e5afcc`, 2026-10-19) the
+  broken preset `test/feedback-noncausal.slangp` was rejected in 25 ms
+  with the precise diagnosis (`slang: PassOutput0 is not causal in pass
+  0`), the scaler session shut down cleanly into "GPU scaler unavailable,
+  using the regular renderer instead", the error surfaced on the OSD, and
+  the next session recovered end-to-end. (b) *The standing regression* —
+  new `conformance drill` mode + `tests/golden/drill/` fixtures (7
+  expect-fail cases across distinct failure layers: comments-only preset,
+  missing shader, GLSL compile error, live-sampled unknown sampler,
+  missing LUT, absent `#reference`, `PassOutput0` causality): each case
+  must reject cleanly, leave zero validation messages, and let a
+  pixel-identical recovery render of `runner/blit.slangp` succeed on the
+  same device; surprises, poisoned devices or drifted frames exit 1
+  (pass and fail directions both verified). ctest
+  `example_conformance_drill` (suite 25→26); drill fixtures + a USAGE
+  line ship in the CI shader-demo artifacts.
 
 ### Planned
 

@@ -1,0 +1,8 @@
+# libslang-vk drill case: the referenced shader file does not exist — the
+# load path must reject with a file error, not a crash or a silent
+# pass-through.
+shaders = 1
+shader0 = shaders/absent.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

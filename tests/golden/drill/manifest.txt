@@ -1,0 +1,30 @@
+# conformance drill manifest — presets that MUST fail to load, each one
+# exercising a distinct failure layer of the load path. Per case the drill
+# asserts: (1) the preset is rejected with a non-empty error, (2) the Vulkan
+# device stays clean (no validation-layer messages), and (3) a known-good
+# preset (runner/blit.slangp from the fixture roots) still renders
+# pixel-identically afterwards — the library half of CHECKLIST miss #11
+# (broken preset -> (Unavailable) -> stock renderer -> recovery), paired
+# with the 2026-10-19 hardware event on the fork: test/feedback-noncausal
+# was rejected in 25 ms with "slang: PassOutput0 is not causal in pass 0",
+# the scaler fell back to the regular renderer, and the next session
+# recovered cleanly.
+#
+# Format: '#' lines are comments; each entry line is the preset path
+# relative to one of the drill roots (first root that contains it wins).
+#
+# Case -> failure layer:
+#   empty.slangp           parser: comments-only preset (zero passes)
+#   missing-shader.slangp  load: shader file absent
+#   bad-glsl.slangp        glslang: GLSL compile error
+#   unknown-texture.slangp translate: live-sampled, never-declared sampler
+#   missing-lut.slangp     load: LUT image file absent
+#   bad-reference.slangp   parser: #reference target absent
+#   noncausal.slangp       translate: PassOutput0 sampled in pass 0
+drill/empty.slangp
+drill/missing-shader.slangp
+drill/bad-glsl.slangp
+drill/unknown-texture.slangp
+drill/missing-lut.slangp
+drill/bad-reference.slangp
+drill/noncausal.slangp

@@ -1,0 +1,10 @@
+# libslang-vk drill case: a 1-pass chain whose shader samples PassOutput0 —
+# output 0 does not exist before pass 0, so the causality check must reject
+# the load. This is the exact class the fork hit on hardware 2026-10-19
+# (test/feedback-noncausal -> "slang: PassOutput0 is not causal in pass 0"
+# -> (Unavailable) -> stock renderer -> next-session recovery).
+shaders = 1
+shader0 = shaders/nc.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

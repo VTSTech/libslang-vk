@@ -402,6 +402,28 @@ must never flake the suite) run as ctests
 shader-demo artifacts bundle `conformance(.exe)` with `tests-golden/` +
 `tests-data/` so the golden suite runs from the artifact too.
 
+**Fallback drill** (`conformance drill`) is the library half of the
+`(Unavailable)` fallback contract: every preset in
+[`tests/golden/drill/manifest.txt`](tests/golden/drill/manifest.txt) must
+FAIL to load, each exercising a distinct failure layer (comments-only
+preset → parser; missing shader file; GLSL compile error; live-sampled
+never-declared sampler; missing LUT image; absent `#reference` target;
+`PassOutput0` sampled in pass 0 — the exact class a fork session hit on
+hardware, see PROVENANCE). Per case the drill requires a clean rejection
+with a non-empty error, zero validation-layer messages, and a
+pixel-identical re-render of a known-good preset (`runner/blit.slangp`)
+on the same device — a loaded "broken" preset, a poisoned device or a
+drifted recovery frame all exit 1.
+
+```sh
+./build/examples/conformance drill tests/golden tests/data   # ctest: example_conformance_drill
+```
+
+```sh
+# from a CI shader-demo artifact (fixtures ride along in tests-golden/):
+./conformance drill --manifest tests-golden/drill/manifest.txt tests-golden tests-data
+```
+
 ## Building and testing
 
 ```sh

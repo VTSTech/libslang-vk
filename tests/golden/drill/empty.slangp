@@ -1,0 +1,2 @@
+# libslang-vk drill case: comments-only preset (zero passes) — the parser
+# must reject a preset that never declares a chain.

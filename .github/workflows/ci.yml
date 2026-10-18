@@ -140,8 +140,12 @@ jobs:
             ./conformance golden --manifest tests-golden/manifest.txt \
                 --golden-dir tests-golden tests-data .
             ./conformance perf tests-data . --budgets tests-golden/budgets-lavapipe.txt
+            ./conformance drill --manifest tests-golden/drill/manifest.txt \
+                tests-golden tests-data
           Goldens were generated on a lavapipe CPU renderer; on a real GPU
-          expect drift — regenerate in place with --update.
+          expect drift — regenerate in place with --update. The drill is
+          the fallback regression: every listed preset must be rejected
+          cleanly with the device unharmed (CHECKLIST miss #11).
           EOF
           (cd stage && zip -qr ../shader-demo-linux-x64.zip shader-demo)
 
@@ -304,8 +308,11 @@ jobs:
                                budgets) and the fixture presets (tests-data\):
             conformance.exe golden --manifest tests-golden/manifest.txt --golden-dir tests-golden tests-data .
             conformance.exe perf tests-data . --budgets tests-golden/budgets-lavapipe.txt
+            conformance.exe drill --manifest tests-golden/drill/manifest.txt tests-golden tests-data
           Goldens were generated on a lavapipe CPU renderer; on a real GPU
-          expect drift — regenerate in place with --update.
+          expect drift — regenerate in place with --update. The drill is
+          the fallback regression: every listed preset must be rejected
+          cleanly with the device unharmed (CHECKLIST miss #11).
           EOF
 
       - name: Zip shader_demo

@@ -1,0 +1,10 @@
+# libslang-vk drill case: the declared LUT texture file does not exist —
+# the LUT upload stage of the load path must reject cleanly.
+textures = "gone"
+gone = "textures/absent.png"
+gone_linear = "false"
+
+shader0 = shaders/gone.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

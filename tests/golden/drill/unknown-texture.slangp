@@ -1,0 +1,8 @@
+# libslang-vk drill case: the shader live-samples a sampler ('ghost') that
+# no pass output, alias or texture declaration can bind — the M4.03
+# sampling oracle must hard-fail the load (live use, not dead code).
+shaders = 1
+shader0 = shaders/ghost.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

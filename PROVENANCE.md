@@ -665,3 +665,22 @@ short run uncounted), zero skipped, zero fallbacks, zero validation
 output, clean shutdowns. Device coverage: RX 560 (dGPU) + llvmpipe
 (software rasterizer); present-path coverage: direct equal-size +
 letterbox fit-and-center; vsync on/off both field-verified.
+
+**Session 6 (2026-10-19, Windows, RX 560, fork exe 1.6.0-dev-Release-
+`996e5afcc`) — the fallback drill, fired for real.** Session flow:
+`blendoverlay` loaded (1 pass) → 551 healthy frames, 0 skipped → preset
+change to `test/feedback-noncausal.slangp` → **load rejected in 25 ms**
+with the precise diagnosis `pass 0 'feedback-noncausal.slang': slang:
+PassOutput0 is not causal in pass 0` (the same error class the corpus
+ledger pins as an intentional negative and the `conformance drill`
+`noncausal.slangp` case exercises) → the host honored the contract:
+"Shader Filter is off for this session", scaler shutdown, "GPU scaler
+unavailable, using the regular renderer instead", main window recreated
+for the presentation path switch, full error surfaced on the OSD
+("Shader: Custom (failed: pass 0 'feedback-noncausal.slang': slang:
+PassOutput0 is not …") → next Reinit (~11.5 s later) created a fresh
+device, loaded `scanlines-Modern` (1 pass) and rendered 278 frames, 0
+skipped, clean shutdown. This is the event CHECKLIST miss #11 asked for:
+broken preset → `(Unavailable)` → stock renderer → recovery, observed —
+not asserted. In-repo standing regression for the library half shipped
+the same day (`conformance drill`, CHECKLIST #11).

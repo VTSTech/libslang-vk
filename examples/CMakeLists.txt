@@ -189,14 +189,19 @@ if(SLANGVK_ENABLE_VK)
 endif()
 
 # conformance — M4.04: golden-image rendering + perf budgets (the M3
-# leftovers). golden: renders every tests/golden/manifest.txt entry at a
-# fixed size from the procedural testcard and compares the final frame
-# against the committed PNGs in tests/golden/images (tolerances per entry;
-# --update regenerates). perf: per-frame wall-clock around the synchronous
-# fenced Chain::render, --budgets gate for real hardware, --report ledger.
-# Both modes skip cleanly (exit 0) when no Vulkan device exists. The perf
-# ctest is an informational smoke over a fixed whitelist without budgets so
-# sandbox/CPU timing variance can never flake the suite.
+# leftovers) + the CHECKLIST-#11 fallback drill. golden: renders every
+# tests/golden/manifest.txt entry at a fixed size from the procedural
+# testcard and compares the final frame against the committed PNGs in
+# tests/golden/images (tolerances per entry; --update regenerates). perf:
+# per-frame wall-clock around the synchronous fenced Chain::render,
+# --budgets gate for real hardware, --report ledger. drill: every
+# tests/golden/drill/manifest.txt entry must FAIL to load (parser, missing
+# shader, GLSL compile, unknown sampler, missing LUT, #reference,
+# causality), with a clean device and a pixel-identical recovery render of
+# runner/blit.slangp after each failure. All modes skip cleanly (exit 0)
+# when no Vulkan device exists. The perf ctest is an informational smoke
+# over a fixed whitelist without budgets so sandbox/CPU timing variance can
+# never flake the suite.
 if(SLANGVK_ENABLE_VK)
         add_executable(conformance conformance.cpp)
         target_link_libraries(conformance PRIVATE slangvk)
@@ -212,6 +217,9 @@ if(SLANGVK_ENABLE_VK)
                 "${CMAKE_SOURCE_DIR}/tests/data"
                 --only-from "${CMAKE_SOURCE_DIR}/tests/golden/perf-smoke.txt"
                 --warmup 1 --timed 5)
+        add_test(NAME example_conformance_drill
+            COMMAND conformance drill
+                "${CMAKE_SOURCE_DIR}/tests/golden" "${CMAKE_SOURCE_DIR}/tests/data")
 endif()
 
 foreach(demo demo-bright demo-glow)
