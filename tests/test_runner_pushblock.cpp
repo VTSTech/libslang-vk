@@ -201,6 +201,73 @@ int main()
                 }
         }
 
+        // --- Field round 6 canary: plain-UBO member whose NAME starts with a
+        // qualifier prefix (crt-consumer "float smoothness;").
+        // ParseBlockMembers' qualifier strip checked only the LEFT token
+        // boundary and erased "smooth" out of the name ("float ness;"); the
+        // uniform fill then matched nothing, left the member at 0, and
+        // crt-consumer's corner mask zeroed every pixel (black screen). The
+        // golden pins all three member shapes at the pragma defaults:
+        // R = smoothness*0.5-199 = 1, G = highprecision-1 = 3, B = flatline-1 = 2.
+        {
+                auto preset = slv::Preset::load(*device, dataDir + "/runner/smoothqual.slangp");
+                Check(preset.has_value(), "smoothqual preset loads");
+                if (preset) {
+                        slv::ChainOptions chainOptions;
+                        chainOptions.outputWidth = kWidth;
+                        chainOptions.outputHeight = kHeight;
+                        auto chain = slv::Chain::create(*device, *preset, chainOptions);
+                        Check(chain.has_value(), "smoothqual chain creates");
+                        if (chain) {
+                                slv::InputFrame frame;
+                                frame.view = input->view();
+                                frame.format = VK_FORMAT_R8G8B8A8_UNORM;
+                                frame.width = kWidth;
+                                frame.height = kHeight;
+                                slv::Offscreen target;
+                                target.view = output->view();
+                                target.format = VK_FORMAT_R8G8B8A8_UNORM;
+                                target.width = kWidth;
+                                target.height = kHeight;
+                                const auto rendered = chain->render(frame, target, slv::FrameInfo{});
+                                Check(rendered.has_value(),
+                                    "smoothqual renders (qualifier-prefixed member names reach the shader)");
+                                if (rendered) {
+                                        auto pixels = device->readPixels(output->image(), VK_FORMAT_R8G8B8A8_UNORM,
+                                            kWidth, kHeight, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                        Check(pixels.has_value(), "smoothqual readback");
+                                        if (pixels && pixels->size() >= pattern.size()) {
+                                                size_t bad = 0;
+                                                size_t firstBad = 0;
+                                                for (size_t i = 0; i < pattern.size(); ++i) {
+                                                        const uint8_t want = (i % 4 == 0) ? 1 : (i % 4 == 1) ? 3
+                                                            : (i % 4 == 2)   ? 2
+                                                                             : 0xFF;
+                                                        const int got = static_cast<int>((*pixels)[i]);
+                                                        if (std::abs(got - static_cast<int>(want)) > 1) {
+                                                                if (bad == 0)
+                                                                        firstBad = i;
+                                                                ++bad;
+                                                        }
+                                                }
+                                                if (bad != 0) {
+                                                        std::printf(
+                                                            "FAIL smoothqual golden (%zu diffs, first byte %zu: got %d want %d)\n",
+                                                            bad, firstBad, static_cast<int>((*pixels)[firstBad]),
+                                                            static_cast<int>((firstBad % 4 == 0) ? 1
+                                                                : (firstBad % 4 == 1)            ? 3
+                                                                  : (firstBad % 4 == 2)          ? 2
+                                                                                                 : 0xFF));
+                                                        ++failures;
+                                                } else {
+                                                        std::printf("PASS smoothqual golden = params encoded (1,3,2,255)\n");
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+
         const std::vector<std::string> validationErrors = device->validationErrors();
         if (!validationErrors.empty()) {
                 std::printf("FAIL validation reported %zu error(s):\n", validationErrors.size());

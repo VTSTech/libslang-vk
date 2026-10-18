@@ -1,0 +1,8 @@
+# libslang-vk runner regression (field round 6): UBO member names that start
+# with an interpolation-qualifier prefix (crt-consumer "float smoothness;").
+# The qualifier strip must respect token boundaries on both sides.
+shaders = 1
+shader0 = shaders/smoothqual.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

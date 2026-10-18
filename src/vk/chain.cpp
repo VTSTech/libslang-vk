@@ -367,6 +367,10 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                                 }
                         }
                 }
+                if (std::getenv("SLANGVK_FILL_DEBUG") != nullptr)
+                        std::fprintf(stderr, "fill: %-8s %-14s offset=%-3u size=%-2u value=%.3f found=%d\n",
+                            block.instanceName.c_str(), name.c_str(), member.offset, member.size, value,
+                            static_cast<int>(found));
                 WriteFloat(out, member.offset, value);
         }
         return out;

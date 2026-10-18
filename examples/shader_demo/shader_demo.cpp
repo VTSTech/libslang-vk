@@ -387,7 +387,18 @@ private:
                                 // load so the retry is the real path, not a patch.
                                 namespace fs = std::filesystem;
                                 const std::string &err1 = loaded.error().message;
-                                if (err1.find("cannot open shader file") != std::string::npos) {
+                                // Both failure shapes mean "the SEC-01 root was
+                                // set too narrow for this preset's layout":
+                                //  - "cannot open shader file" — pack presets
+                                //    referencing sibling trees via ../..
+                                //  - "include target outside the shaders root" —
+                                //    slang-shaders presets reached from a subtree
+                                //    (crt/crt-effects/*.slangp include
+                                //    ../../../include/compat_macros.inc, which
+                                //    lives at the corpus root).
+                                const bool rootTooNarrow = err1.find("cannot open shader file") != std::string::npos
+                                    || err1.find("include target outside the shaders root") != std::string::npos;
+                                if (rootTooNarrow) {
                                         fs::path dir(rec.root);
                                         for (int level = 0; level < 6 && !loaded; ++level) {
                                                 const fs::path parent = dir.parent_path();

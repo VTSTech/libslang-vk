@@ -456,10 +456,23 @@ bool ParseBlockMembers(const std::string &body, std::vector<UniformMember> &memb
                 decl = std::regex_replace(decl, layoutRe, " ");
                 for (const char *qualifier : { "flat", "smooth", "noperspective", "highp", "mediump", "lowp" }) {
                         const size_t q = decl.find(qualifier);
-                        if (q != std::string::npos
-                            && (q == 0 || std::isspace(static_cast<unsigned char>(decl[q - 1])) != 0)) {
+                        if (q == std::string::npos)
+                                continue;
+                        // A real qualifier is its own token: preceded by the
+                        // declaration start or whitespace, AND followed by
+                        // whitespace or the declaration end. Checking the left
+                        // side only glued qualifier prefixes onto member names:
+                        // "float smoothness;" lost "smooth" and parsed as the
+                        // bogus member "ness" (crt-consumer: its Border
+                        // Smoothness uniform then filled as 0 and the corner
+                        // mask zeroed every pixel -> black screen).
+                        const size_t after = q + std::strlen(qualifier);
+                        const bool leftBoundary = q == 0
+                            || std::isspace(static_cast<unsigned char>(decl[q - 1])) != 0;
+                        const bool rightBoundary = after >= decl.size()
+                            || std::isspace(static_cast<unsigned char>(decl[after])) != 0;
+                        if (leftBoundary && rightBoundary)
                                 decl.erase(q, std::strlen(qualifier));
-                        }
                 }
                 std::istringstream words(decl);
                 std::vector<std::string> tokens;
