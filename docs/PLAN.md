@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | v0.2 — living plan. Lib milestones M0–M4 complete; DevilutionX adapter spike in progress (see §11 status) |
-| **Date** | 2026-10-18 |
+| **Status** | v0.3 — living plan. Lib milestones M0–M4 complete — M3 closed 2026-10-18 (corpus ledger gate + golden-image conformance + perf budgets); DevilutionX adapter spike in progress (see §11 status) |
+| **Date** | 2026-10-19 |
 | **Author** | VTSTech · drafted with Super Z |
 | **License** | MIT |
 | **Repo (proposed)** | `github.com/VTSTech/libslang-vk` |
@@ -76,17 +76,18 @@ libslang-vk/
 ├── include/slangvk/      Public headers — C++23, namespace slv, raw VkHandle types
 ├── src/core/             GPU-agnostic: preset parser, translator, compiler
 ├── src/vk/               Vulkan runner: device, images/LUTs, chain executor, present
-├── tests/                Unit + field-round + headless runner suites, fixtures in tests/data/
-├── examples/             preset_info, corpus_sweep + bundled presets
-├── tools/                scan_codefindings.py — provenance gate (CI job `provenance`)
+├── tests/                Unit + field-round + headless runner suites; fixtures in tests/data/, golden-image kit in tests/golden/
+├── examples/             preset_info, corpus_sweep, shader_demo, conformance + bundled presets
+├── tools/                scan_codefindings.py (provenance gate, CI job `provenance`) · make_testcard.py + sprites/ (demo testcard)
 ├── cmake/deps.cmake      Pinned FetchContent deps (glslang, Vulkan-Headers, volk, VMA)
-└── docs/                 SPEC.md (format contract), PLAN.md
+└── docs/                 SPEC.md (format contract), PLAN.md, CHECKLIST.md, CHANGELOG.md, API.md (draft)
 ```
 
 (The plan's original `src/interop/` row landed as the public value types in
 `include/slangvk/runner.hpp`; `corpus/` fixtures live under `tests/data/`;
 the audit harnesses became the `tests/` suite. Map corrected 2026-10-18,
-miss-list #13.)
+miss-list #13; examples/tools/docs rows refreshed 2026-10-19 after the
+shader_demo + conformance tools and the doc set landed.)
 
 The load-bearing rule is the **core/vk boundary**: `src/core` never includes `vulkan.h`. It consumes shader source and preset files, and emits an intermediate representation — ordered passes, resource bindings, parameter blocks, compiled SPIR-V. `src/vk` consumes that IR. This is what made the fork's preset layer portable in the first place, and preserving it keeps the "Vulkan only" decision cheap to revisit later without having designed for anything.
 
@@ -153,6 +154,8 @@ using OutputTarget = std::variant<SwapchainFrame, Offscreen>;
 
 The `Offscreen` output mode is what makes headless conformance possible: the entire corpus can be exercised on lavapipe in CI with no window system at all.
 
+**Delivered API (2026-10-19).** The shipped surface is documented normatively in [`docs/API.md`](API.md) — this sketch remains the design record. Deltas worth noting against the sketch above: `Errc` is the concrete nine-value set (preset_parse, include_cycle, shader_compile, unsupported_feature, invalid_argument, vk_init_failed, vk_device_lost, vk_out_of_memory, vk_error); `Device` additionally exposes `readPixels` (headless readback used by the golden suite), `validationErrors()` and `properties()`; a convenience `Image` class (VMA-backed 2D image + view, `update()` per-frame upload) covers host-side input/target allocation; `Chain::resize` takes input *and* output sizes; `Chain::passOutputSize` exposes per-pass FBO geometry; `DeviceOptions` carries instance/device extension lists (swapchain use) and the validation-layer switch. The core layer (`slv::preset`) is fully public for hosts building custom load loops — with the `CollectSlangPragmaNames` seeding contract (README, Consuming).
+
 ## 7. Slang Spec Conformance Scope
 
 `docs/SLANG_SPEC.md` — the fork's per-key, per-pragma contract with its Supported / Partial / Divergent status matrix — moves into this repo as the normative `docs/SPEC.md`. Every row marked *Partial* or *Divergent* becomes a tracked work item with a v1 disposition: either implemented to spec, or documented divergence with a test pinning the behavior. The Divergent-class items already known and fixed in the fork set the tone — RetroArch's order-independent preset parsing and the history ring direction are both now covered by dedicated tests, and the lib inherits those tests rather than re-deriving the semantics.
@@ -218,8 +221,9 @@ One honest caveat on the "static + dylib" decision: the API uses C++23 vocabular
 ## 10. Testing and Conformance Strategy
 
 - **Unit (core, no GPU):** ported from `tools/audit/` — parser order-independence (P1 regression), include-cycle handling (`r4_cycle_*`), history ring depth and direction (F5), uniform name mapping, viewport derivation, mipmap planning, rotation/format handling, plus the round-1..4 field tests.
-- **Compile sweep:** the nightly `corpus` workflow (`.github/workflows/corpus.yml`, 2026-10-18) loads and compiles every preset headlessly (lavapipe, `noLutImages` mode) and uploads the ledger artifact — the same ledger format the fork's campaign already produces. Policy: any preset that loaded in the previous release must not regress without an audit-documented reason. **Gate on since 2026-10-18 (miss list #5):** the no-regression baseline is pinned at `corpus/baseline-ledger.txt` (corpus revision recorded in its header; 2,658 presets full-depth, 826 clean / 1,832 pre-existing broken with corpus-verified causes). The nightly checks the corpus out at the pinned revision (fetch-by-SHA) so the gate measures library regressions deterministically, fails on any baseline-LOAD → now-FAIL transition, and refreshes of the baseline are a documented reviewed procedure (workflow header).
-- **Golden images:** selected presets (crt-royale, a Mega Bezel variant, xBR, ScaleFX, the interlacing/history suites) rendered offscreen and perceptual-hash-compared with bounded tolerance, catching the "renders but wrong" class the static audit proved is the dangerous one.
+- **Compile sweep:** the nightly `corpus` workflow (`.github/workflows/corpus.yml`, 2026-10-18) loads and compiles every preset headlessly (lavapipe, `noLutImages` mode) and uploads the ledger artifact — the same ledger format the fork's campaign already produces. Policy: any preset that loaded in the previous release must not regress without an audit-documented reason. **Gate on since 2026-10-18 (miss list #5):** the no-regression baseline is pinned at `corpus/baseline-ledger.txt` (corpus revision recorded in its header; 2,658 presets full-depth, 826 clean / 1,832 pre-existing broken with corpus-verified causes). The nightly checks the corpus out at the pinned revision (fetch-by-SHA) so the gate measures library regressions deterministically, fails on any baseline-LOAD → now-FAIL transition, and refreshes of the baseline are a documented reviewed procedure (workflow header). **Verdict after the M4.03 dead-code texture fix (2026-10-18): 2,637 LOAD / 21 FAIL**, the survivors verified per preset as upstream-broken or malformed and pinned as FAIL in the refreshed ledger.
+- **Golden images:** shipped 2026-10-18 (M4.04) as `conformance golden` (`examples/conformance.cpp` + `tests/golden/`): a 20-entry manifest covering every chain semantic (blit, multi-pass, feedback ping-pong, history ring, mipmap refill, FBO formats, push-fragment uniforms, parameters, size uniforms, LUT families, rotation, includes, the demo presets) is rendered from a deterministic procedural testcard at a fixed target and compared against committed PNGs — per-channel-delta + mismatched-fraction tolerances, `--update` regenerates and stamps the generating device, a different local device warns once. Byte-exact on lavapipe; the original "crt-royale / Mega Bezel / pHash" wording is recorded as a refined scope (CHECKLIST miss list #6): corpus-heavy goldens are backend-specific and pHash buys nothing at byte-exact stability.
+- **Perf budgets:** shipped 2026-10-18 (M4.04) as `conformance perf`: warmup + timed wall-clock around the synchronous fenced `Chain::render` per preset, TAB `--report` ledger, and a `--budgets` gate (`path<TAB>max-ms`, breach exits 1, unmeasured tolerated). Reference budgets for the sandbox renderer live in `tests/golden/budgets-lavapipe.txt` (format documentation); real-hardware budgets come from running `--report` on the target machine (CHECKLIST miss list #7).
 - **Sanitizers and validation:** ASan/UBSan on the unit suite; Vulkan validation layers enabled in every headless run, **with synchronization validation** (instance-level `VkValidationFeaturesEXT`, enabled 2026-10-18 whenever `VK_LAYER_KHRONOS_validation` is on — miss-list #2).
 - **Field loop:** the fork remains the hardware testbed — its crash-logger, heartbeat, and load-phase diagnostics carry over to the adapter, and preset failures found on real machines flow back as corpus cases.
 
@@ -246,9 +250,9 @@ this table:
 | M0 scaffolding | ✅ done | Ported core trio, MIT + provenance ledger, CI (`.github/workflows/ci.yml`: Linux tests on lavapipe + asan/ubsan build, Windows MinGW `libslangvk.dll/.a` artifacts), vendored deps |
 | M1 runner skeleton | ✅ done | Headless golden blit on lavapipe, zero validation errors |
 | M2 chain semantics | ✅ done | Field canaries pass on the Vulkan runner (`test_runner_m2`) |
-| M3 conformance + perf | 🔶 partial | LUT upload + `corpus_sweep` tool shipped (repo "M3"); full-corpus CI ledger, golden-image suite and perf budgets still open |
+| M3 conformance + perf | ✅ done (2026-10-18) | LUT upload + `corpus_sweep` tool (repo "M3"); full-corpus nightly ledger gate ON (miss #5 — pinned baseline, 2,637 LOAD / 21 FAIL after M4.03); golden-image suite + perf budgets shipped as the `conformance` tool (M4.04); §11's fixed reference-GPU fps numbers retired in favor of the per-host budget workflow |
 | M4 DevilutionX spike | 🔶 in progress | Presentation half done — plan §8 mode (a) shipped as repo "M4" (`SwapchainFrame`, letterbox, rotation); adapter spike underway on fork branch `libslang-vk`, hardware field sweep is the exit gate |
-| M5 1.0 release | ⬜ not started | API freeze, packaging, `docs/API.md` |
+| M5 1.0 release | ⬜ not started | API freeze, packaging; `docs/API.md` drafted early (2026-10-19) — M5 becomes review + freeze against it |
 
 Where a working milestone label and this table disagree on scope,
 PROVENANCE.md's per-milestone sections are authoritative.
@@ -262,7 +266,7 @@ PROVENANCE.md's per-milestone sections are authoritative.
 | 3 | glslang static size (~10–15 MB) bloats hosts | M | M | Levers implemented as build options (2026-10-18, miss-list #13): `SLANGVK_LTO` (IPO + `-Oz` release codegen) and `SLANGVK_SYSTEM_GLSLANG` (link the host's glslang instead of the pinned FetchContent copy); artifact sizes documented in ARTIFACTS.txt/README |
 | 4 | RetroArch semantic divergence discovered late (e.g., sRGB, rotation edge cases) | M | M | `SPEC.md` status matrix is normative; divergence items pinned by tests in M2, corpus sweep in M3 catches the rest |
 | 5 | Drift between fork's SDL_GPU runner and lib runner during dual-path period | M | M | Time-box the period; corpus ledger is shared; M4 A/B sweep is the convergence gate |
-| 6 | Cold-start cost of no-disk-cache choice on huge presets (crt-royale suites) | M | L | Measure in M3; in-`Preset` memoization covers repeated selections in one session; disk cache is the documented post-1.0 lever |
+| 6 | Cold-start cost of no-disk-cache choice on huge presets (crt-royale suites) | M | L | Measured (hardware worst 4.05 s, warm-cache collapse 196→73 ms); `conformance perf --report` (M4.04) is the standing measurement vehicle for per-host load/render numbers; in-`Preset` memoization covers repeated selections in one session; disk cache is the documented post-1.0 lever |
 | 7 | Maintainer bandwidth across two repos | M | M | The fork's audit-driven AI loop is the working model; conformance automation (M3) is what keeps the lib cheap to own |
 
 ## 13. Open Questions

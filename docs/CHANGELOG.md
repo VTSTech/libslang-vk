@@ -12,6 +12,20 @@ tags yet). Format adapted from
 
 ### Added
 
+- **`docs/API.md` (draft)** — the full public-surface reference pulled from
+  `include/slangvk/`: core + runner layers, `std::expected` error model,
+  descriptor-convention table, lifetimes/threading rules, headless
+  walkthrough, swapchain-mode contract, v1 limitation list and the M5
+  freeze-review checklist. Marked pre-freeze; the M5 deliverable becomes
+  "review + freeze against it".
+- **Docs sync (2026-10-19):** CHECKLIST updated for the M4.03/M4.04 waves
+  (25/25 evidence base, golden-image + perf-budget rows closed with the
+  refined-scope notes, miss list #6/#7 closed, M5 boundary reflects the
+  API.md draft); PLAN bumped to v0.3 (M3 fully ✅, §5.1 module map refreshed,
+  §6 gains the delivered-API deltas paragraph, §10 documents the shipped
+  conformance/budget tools); SPEC gained the M4.03 preprocessed-text
+  sampling oracle (§4.5 + matrix + divergence #22) and the parameters-are-
+  not-preprocessor-macros divergence (§4.2).
 - **Golden-image conformance suite + perf budgets** — the two M3 leftovers
   ship as one tool, `examples/conformance.cpp` (M4.04 scope). `conformance
   golden` renders every preset in `tests/golden/manifest.txt` (20 bundled

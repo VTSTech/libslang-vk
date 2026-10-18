@@ -463,6 +463,8 @@ header.
 
 - [docs/SPEC.md](docs/SPEC.md) — the preset-format contract (parsing,
   translation and execution semantics, section by section).
+- [docs/API.md](docs/API.md) — the public C++23 API reference (draft,
+  pre-freeze): core + runner layers, error model, lifetimes, walkthrough.
 - [docs/PLAN.md](docs/PLAN.md) — milestones, API sketch, risk register.
 - [docs/CHECKLIST.md](docs/CHECKLIST.md) — per-item M0–M4 implementation
   status, audited against the plan.
