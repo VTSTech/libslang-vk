@@ -684,3 +684,36 @@ skipped, clean shutdown. This is the event CHECKLIST miss #11 asked for:
 broken preset → `(Unavailable)` → stock renderer → recovery, observed —
 not asserted. In-repo standing regression for the library half shipped
 the same day (`conformance drill`, CHECKLIST #11).
+
+**Session 7 (2026-10-19, Windows, RX 560, `conformance.exe` from the CI
+shader-demo Windows artifact) — the golden suite, cross-backend then
+on-device.** First pixel-level comparison of the committed
+(llvmpipe-generated) golden set against a real GPU:
+`conformance golden --manifest tests-golden/manifest.txt --golden-dir
+tests-golden tests-data .` passed **19/20 within the manifest
+tolerances, every passing entry at worst delta ≤ 3** — feedback
+ping-pong `worst 2 / 0.000%`, mipmap refill `worst 3 / 0.104%`, history
+ring, FBO formats, the LUT family, rotation, push-fragment uniforms,
+parameters and size uniforms all pixel-verified across backends. One
+DIFF: `presets/demo-glow.slangp` (worst 156, 8.701% of pixels beyond
+delta 2, mean 2.6). Root-caused to the fixture's construction, not a
+library defect: pass 0 renders at exactly 0.5× source scale, so every
+pass-0 output pixel center maps to source-space `2·ox+1` — an exact
+texel boundary — and the ±1-texel box taps land on exact boundaries too;
+a linear tap exactly on a boundary is a coin-flip decided by fp32
+rounding of the interpolated UV + the 1/size offset, and the hard-edged
+testcard turns each flip into a large local delta. `--update` followed
+by an immediate re-compare on the RX 560: **20/20 byte-exact (worst 0)**
+— run-to-run determinism on real hardware, proving the DIFF is
+per-backend deterministic rounding, not a race or an uninitialized read.
+The manifest now carries this fixture as the suite's only non-default
+tolerance (`200 / 12.0`, ~28% headroom over the measured envelope;
+same-backend compares stay byte-exact; a real alias/scale/filter
+regression still lands far above it on any backend). Committed goldens
+stay llvmpipe-generated — CI keeps its byte-exact baseline; hardware
+runs pass through the documented tolerance. This session closes the
+hardware half of the F2 numeric (`PassFeedback0`) and F1
+(`mipmap_input`) checklist rows; still open on hardware: the named
+`<name>Feedback` reader form, interactive live-parameter changes,
+resize/fullscreen toggle, VRAM-teardown soak, dGPU Linux run,
+validation layers enabled on hardware.

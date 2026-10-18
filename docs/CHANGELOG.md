@@ -75,6 +75,21 @@ tags yet). Format adapted from
   (pass and fail directions both verified). ctest
   `example_conformance_drill` (suite 25→26); drill fixtures + a USAGE
   line ship in the CI shader-demo artifacts.
+- **Hardware golden conformance (RX 560, PROVENANCE Session 7) + the
+  demo-glow cross-backend tolerance** — first pixel-level comparison of
+  the committed (llvmpipe-generated) goldens against a real GPU: 19/20
+  within manifest tolerances, every passing entry at worst delta ≤ 3 —
+  feedback ping-pong (worst 2 / 0.000%), mipmap refill (worst 3 /
+  0.104%), history, FBO formats, LUTs, rotation, params and size
+  uniforms all pixel-verified cross-backend (CHECKLIST M2 hardware
+  halves closed). The one DIFF, `presets/demo-glow.slangp`, was
+  root-caused to boundary-exact box taps at the fixture's exactly-0.5×
+  downsample — deterministic per backend (byte-exact across repeated
+  runs on both llvmpipe and the RX 560), so rounding, not a race — and
+  now carries the manifest's only non-default tolerance (`200 / 12.0`,
+  ~28% headroom over the measured envelope). `--update` + re-compare on
+  the RX 560: 20/20 byte-exact. Committed goldens stay llvmpipe-
+  generated; CI keeps its byte-exact baseline.
 
 ### Planned
 

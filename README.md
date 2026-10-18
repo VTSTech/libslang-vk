@@ -359,7 +359,14 @@ cross-version LSB drift. The manifest's last header line,
 `# generated-by:`, records the backend that produced the goldens; a
 different local device prints a WARN once (cross-backend drift on real
 GPUs is expected — regenerate with `--update` when adopting a new
-reference backend).
+reference backend). The suite's one non-default tolerance belongs to
+`presets/demo-glow.slangp` (`200 / 12.0`): its exactly-0.5× downsample
+puts every box tap on a source texel boundary, where linear filtering
+rounds differently per backend (measured llvmpipe vs Radeon RX 560:
+worst 156 on 8.7% of pixels, byte-exact within each backend). First
+real-GPU validation, RX 560 2026-10-19: 19/20 against the llvmpipe
+goldens (feedback worst 2, mip worst 3, the rest ≤ 2) and 20/20
+byte-exact on-device after `--update` — see PROVENANCE Session 7.
 
 ```sh
 cmake --build build --target conformance

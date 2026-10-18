@@ -42,4 +42,18 @@ field-presets/test/history.slangp	history.png
 field-presets/test/format.slangp	format.png
 field-presets/test/r4-include.slangp	r4_include.png
 presets/demo-bright.slangp	demo_bright.png
-presets/demo-glow.slangp	demo_glow.png
+#
+# demo-glow carries the suite's only non-default tolerance. Pass 0 renders
+# at exactly 0.5x source scale, so every pass-0 output pixel center maps to
+# source-space 2*ox+1 - an exact texel boundary - and the +/-1-texel box
+# taps land on exact boundaries too. A linear tap exactly on a boundary is
+# a coin-flip decided by fp32 rounding of the interpolated UV + the 1/size
+# offset, so backends legitimately disagree per pixel; the hard-edged
+# testcard turns each flip into a large local delta (measured llvmpipe vs
+# Radeon RX 560, 2026-10-19: worst 156, 8.701% of pixels beyond delta 2,
+# mean 2.6 - and byte-exact across repeated runs on BOTH backends, i.e.
+# deterministic defined-but-different rounding, not a race or uninit read).
+# 200 / 12.0 is ~28% headroom over the measured envelope; a real semantic
+# regression (alias/scale/filter broken) still lands far above it on any
+# backend. Same-backend compares stay byte-exact under this slack.
+presets/demo-glow.slangp	demo_glow.png	200	12.0
