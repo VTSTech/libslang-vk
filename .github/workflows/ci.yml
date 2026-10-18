@@ -101,13 +101,15 @@ jobs:
           shader_demo    host demo binary (statically linked with
                          libslangvk + glslang; no install needed)
           presets/       self-contained demo presets (start here)
-          testcard.png   480x320 test card for --input
+          testcard.png   480x320 default input image (auto-found next
+                         to the exe; --input pattern for the animated one)
 
           Usage:
             ./shader_demo --list presets
             ./shader_demo --no-menu --frames 10 --out dump presets
             ./shader_demo presets                windowed + TUI menu
-            ./shader_demo --input testcard.png presets
+                                                 (starts on testcard.png)
+            ./shader_demo --input pattern presets
 
           Windowed mode needs a Vulkan ICD with swapchain support (X11 or
           Wayland); on a headless server it falls back to PNG dumps
@@ -244,13 +246,15 @@ jobs:
           libgcc_s_seh-1.dll
           libwinpthread-1.dll
           presets/            self-contained demo presets (start here)
-          testcard.png        480x320 test card for --input
+          testcard.png        480x320 default input image (auto-found next
+                              to the exe; --input pattern for the animated one)
 
           Usage (from a terminal in this folder):
             shader_demo.exe --list presets
             shader_demo.exe --no-menu --frames 10 --out dump presets
             shader_demo.exe presets              windowed + TUI menu
-            shader_demo.exe --input testcard.png presets
+                                                 (starts on testcard.png)
+            shader_demo.exe --input pattern presets
 
           Windowed mode needs a Vulkan ICD with swapchain support; falls
           back to PNG dumps when none is found, or force it with

@@ -1,8 +1,5 @@
 # libslang-vk
 
-<img width="1280" height="971" alt="image" src="https://github.com/user-attachments/assets/1442876b-4c29-40d3-9771-946f0619300e" />
-
-
 [![ci](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml/badge.svg)](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml)
 
 Parse, translate and compile **libretro slang shader presets** (`.slangp` /
@@ -109,7 +106,7 @@ Menu commands (terminal-driven, both modes):
 |----------------|----------------------------------------------------------------|
 | `<number>`     | load + switch to preset number N                               |
 | `n` / `p`      | next / previous preset                                         |
-| `i`            | toggle input: animated test pattern ↔ bundled `testcard.png`   |
+| `i`            | toggle input: `testcard.png` (default) ↔ animated pattern      |
 | `w`            | write PNG (headless: render + dump now; windowed: screenshot)  |
 | `l` / `list`   | list presets around the current one                            |
 | `params`       | show the current preset's shader parameters                    |
@@ -118,9 +115,12 @@ Menu commands (terminal-driven, both modes):
 
 Notes:
 
-- Both input sources are uploaded through `Image::update` — the M4 per-frame
-  host-upload path a game host uses for its converted frame. `--input image`
-  starts on the bundled static test card instead of the animated pattern.
+- The default input is the bundled `testcard.png` test card — your sprites
+  show up at startup. The card is found next to the executable first (so CI
+  artifact zips work anywhere), then via the build-time assets path and the
+  working directory. `--input pattern` / `i` switches to the animated test
+  pattern, whose frames go through `Image::update` every frame — the M4
+  per-frame host-upload path a game host uses for its converted frame.
 - Preset switching re-points the SEC-01 shader-root sandbox per source, so a
   single menu can mix the bundled demos, the test fixture trees and a full
   slang-shaders checkout.

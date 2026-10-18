@@ -199,11 +199,17 @@ if(SLANGVK_ENABLE_VK)
 
         # shader_demo smokes: --list needs no device (runs everywhere); the
         # headless dump path renders the bundled demo presets and skips
-        # cleanly (exit 0) when no ICD is present.
+        # cleanly (exit 0) when no ICD is present. The image run covers the
+        # default static-upload path (testcard.png via the portable asset
+        # lookup); the pattern run covers the per-frame Image::update path.
         add_test(NAME example_shader_demo_list
             COMMAND shader_demo --list)
         add_test(NAME example_shader_demo_headless
             COMMAND shader_demo --no-menu --frames 2
                 --out "${CMAKE_CURRENT_BINARY_DIR}/shader_demo_smoke"
+                "${SLANGVK_EXAMPLES_DATA_DIR}")
+        add_test(NAME example_shader_demo_headless_pattern
+            COMMAND shader_demo --no-menu --frames 2 --input pattern
+                --out "${CMAKE_CURRENT_BINARY_DIR}/shader_demo_smoke_pattern"
                 "${SLANGVK_EXAMPLES_DATA_DIR}")
 endif()

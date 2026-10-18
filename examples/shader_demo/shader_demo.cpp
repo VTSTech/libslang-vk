@@ -20,7 +20,8 @@
 //     --no-menu             load + render + dump every discovered preset, exit
 //     --frames N            frames per headless render (default 6)
 //     --out DIR             PNG output directory (default shader_demo_output)
-//     --input pattern|image initial input source (default pattern)
+//     --input pattern|image initial input source (default image; the demo
+//                           falls back to the pattern when testcard.png is missing)
 //     --headless            force the headless path even when a display exists
 //     --window              force the windowed path (fail instead of fallback)
 //     --validate            enable the Khronos validation layer when present
@@ -32,7 +33,7 @@
 // Commands (terminal menu, both modes):
 //   <number>  load + switch to preset number N
 //   n / p     next / previous preset
-//   i         toggle input source (animated pattern <-> bundled testcard.png)
+//   i         toggle input source (bundled testcard.png <-> animated pattern)
 //   w         write PNG (headless: render + dump now; windowed: screenshot
 //             after the next presented frame)
 //   l / list  list presets around the current one
@@ -75,6 +76,13 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #ifndef SLANGVK_EXAMPLES_DATA_DIR
 #define SLANGVK_EXAMPLES_DATA_DIR "presets"
 #endif
@@ -96,7 +104,7 @@ struct Options {
         bool validate = false;
         bool forceHeadless = false;
         bool forceWindow = false;
-        bool inputImage = false;
+        bool inputImage = true;
         uint32_t frames = 6;
         std::string outDir = "shader_demo_output";
 };
@@ -109,7 +117,7 @@ void PrintUsage()
                     "  --no-menu             render + dump every discovered preset, exit\n"
                     "  --frames N            frames per headless render (default 6)\n"
                     "  --out DIR             PNG output directory (default shader_demo_output)\n"
-                    "  --input pattern|image initial input source (default pattern)\n"
+                    "  --input pattern|image initial input source (default image)\n"
                     "  --headless            force headless PNG mode\n"
                     "  --window              force the windowed path\n"
                     "  --validate            enable VK_LAYER_KHRONOS_validation when present\n"
@@ -133,6 +141,52 @@ std::string SanitizeForFilename(const std::string &in)
                 out.push_back(safe ? c : '_');
         }
         return out.empty() ? "preset" : out;
+}
+
+/** @brief Directory containing the running executable (with trailing slash),
+ * empty when the platform lookup fails. This is the only portable anchor for
+ * the bundled assets: the compile-time SLANGVK_DEMO_ASSETS_DIR is a
+ * build-machine path (e.g. D:/a/libslang-vk/... on GitHub Actions) that does
+ * not exist on end-user machines, while the CI artifacts stage testcard.png
+ * right next to the binary. */
+std::string ExeDir()
+{
+#ifdef _WIN32
+        char buf[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(nullptr, buf, DWORD{sizeof(buf)});
+        if (n == 0 || n >= sizeof(buf))
+                return {};
+        const std::string exe(buf, size_t(n));
+#else
+        char buf[4096];
+        const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (n <= 0)
+                return {};
+        buf[n] = '\0';
+        const std::string exe(buf, size_t(n));
+#endif
+        const size_t slash = exe.find_last_of("/\\");
+        return slash == std::string::npos ? std::string() : exe.substr(0, slash + 1);
+}
+
+/** @brief Search order for bundled assets: compile-time dir (in-tree builds,
+ * ctest), next to the exe (CI artifacts), exe/assets, then the CWD. */
+std::vector<std::string> AssetCandidates(const char *name)
+{
+        std::vector<std::string> paths;
+        const auto add = [&paths](std::string p) {
+                if (!p.empty())
+                        paths.push_back(std::move(p));
+        };
+        add(std::string(SLANGVK_DEMO_ASSETS_DIR) + "/" + name);
+        const std::string exeDir = ExeDir();
+        if (!exeDir.empty()) {
+                add(exeDir + name);
+                add(exeDir + "assets/" + name);
+        }
+        add(std::string("assets/") + name);
+        add(std::string(name));
+        return paths;
 }
 
 class DemoApp {
@@ -457,19 +511,31 @@ private:
                                 return;
                         ResizeChain();
                 }
-                std::printf("input: %s (%ux%u)\n", inputIsImage_ ? "testcard.png (static)" : "animated pattern", w, h);
+                if (inputIsImage_) {
+                        const std::string where = imagePath_.empty() ? std::string() : ", " + imagePath_;
+                        std::printf("input: testcard.png (static%s) (%ux%u)\n", where.c_str(), w, h);
+                } else {
+                        std::printf("input: animated pattern (%ux%u)\n", w, h);
+                }
         }
 
         bool LoadImageInput()
         {
-                const std::string path = std::string(SLANGVK_DEMO_ASSETS_DIR) + "/testcard.png";
-                std::string err;
-                if (!image_.Load(path, err)) {
-                        std::printf("warning: %s — staying on the animated pattern\n", err.c_str());
-                        return false;
+                std::string tried;
+                for (const std::string &path : AssetCandidates("testcard.png")) {
+                        std::string err;
+                        if (image_.Load(path, err)) {
+                                imagePath_ = path;
+                                imageLoaded_ = true;
+                                return true;
+                        }
+                        if (!tried.empty())
+                                tried += ", ";
+                        tried += path;
                 }
-                imageLoaded_ = true;
-                return true;
+                std::printf("warning: testcard.png not found (tried %s) — staying on the animated pattern\n",
+                    tried.c_str());
+                return false;
         }
 
         slv::InputFrame MakeInputFrame() const
@@ -808,7 +874,7 @@ private:
                 std::printf("commands:\n"
                             "  <number>  load + switch to preset number N\n"
                             "  n / p     next / previous preset\n"
-                            "  i         toggle input (animated pattern <-> testcard.png)\n"
+                            "  i         toggle input (testcard.png <-> animated pattern)\n"
                             "  w         write PNG (headless: render + dump; windowed: screenshot)\n"
                             "  l / list  list presets around the current one\n"
                             "  params    show shader parameters\n"
@@ -917,6 +983,7 @@ private:
         demo::PatternSource pattern_;
         demo::ImageSource image_;
         bool imageLoaded_ = false;
+        std::string imagePath_;
 
         std::optional<slv::Image> offscreen_;
         uint64_t frameCount_ = 0;
