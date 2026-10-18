@@ -33,70 +33,78 @@ namespace {
 /** @brief Process-wide glslang lifecycle guard. */
 class GlslangRuntime {
 public:
-	static GlslangRuntime &Instance()
-	{
-		static GlslangRuntime runtime;
-		return runtime;
-	}
+        static GlslangRuntime &Instance()
+        {
+                static GlslangRuntime runtime;
+                return runtime;
+        }
 
-	GlslangRuntime()
-	{
-		glslang::InitializeProcess();
-	}
-	~GlslangRuntime()
-	{
-		glslang::FinalizeProcess();
-	}
-	GlslangRuntime(const GlslangRuntime &) = delete;
-	GlslangRuntime &operator=(const GlslangRuntime &) = delete;
+        GlslangRuntime()
+        {
+                glslang::InitializeProcess();
+        }
+        ~GlslangRuntime()
+        {
+                glslang::FinalizeProcess();
+        }
+        GlslangRuntime(const GlslangRuntime &) = delete;
+        GlslangRuntime &operator=(const GlslangRuntime &) = delete;
 };
 
 bool CompileStageToSpv(EShLanguage stage, const std::string &source, std::vector<uint8_t> &out, std::string &error)
 {
-	GlslangRuntime::Instance();
+        GlslangRuntime::Instance();
 
-	glslang::TShader shader(stage);
-	const char *sourcePtr = source.c_str();
-	shader.setStrings(&sourcePtr, 1);
-	shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
-	shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
-	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
-	const EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
-	if (!shader.parse(GetDefaultResources(), 450, false, messages)) {
-		error = StrCat("glslang parse failed (", stage == EShLangVertex ? "vertex" : "fragment", "): ",
-		    shader.getInfoLog());
-		return false;
-	}
-	glslang::TProgram program;
-	program.addShader(&shader);
-	if (!program.link(EShMsgDefault)) {
-		error = StrCat("glslang link failed: ", program.getInfoLog());
-		return false;
-	}
-	std::vector<unsigned int> spirv;
-	glslang::GlslangToSpv(*program.getIntermediate(stage), spirv);
-	out.resize(spirv.size() * sizeof(uint32_t));
-	std::memcpy(out.data(), spirv.data(), out.size());
-	return true;
+        glslang::TShader shader(stage);
+        const char *sourcePtr = source.c_str();
+        shader.setStrings(&sourcePtr, 1);
+        shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
+        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+        const EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+        if (!shader.parse(GetDefaultResources(), 450, false, messages)) {
+                error = StrCat("glslang parse failed (", stage == EShLangVertex ? "vertex" : "fragment", "): ",
+                    shader.getInfoLog());
+                return false;
+        }
+        glslang::TProgram program;
+        program.addShader(&shader);
+        if (!program.link(EShMsgDefault)) {
+                error = StrCat("glslang link failed: ", program.getInfoLog());
+                return false;
+        }
+        std::vector<unsigned int> spirv;
+        glslang::GlslangToSpv(*program.getIntermediate(stage), spirv);
+        out.resize(spirv.size() * sizeof(uint32_t));
+        std::memcpy(out.data(), spirv.data(), out.size());
+        return true;
 }
 
 } // namespace
 
+void EnsureGlslangRuntime()
+{
+	// Shared process-wide glslang init guard: CompileStageToSpv and the
+	// translate-time preprocessing oracle in slang_translate.cpp both run
+	// TShader frontends and hit this same singleton.
+	GlslangRuntime::Instance();
+}
+
 bool CompilePass(const SlangTranslation &translation, PassSpirv &out, std::string &error)
 {
-	out.vertex.clear();
-	out.fragment.clear();
+        out.vertex.clear();
+        out.fragment.clear();
 
-	if (!translation.vertex.present || !translation.fragment.present) {
-		error = "slang: pass is missing a required stage";
-		return false;
-	}
+        if (!translation.vertex.present || !translation.fragment.present) {
+                error = "slang: pass is missing a required stage";
+                return false;
+        }
 
-	if (!CompileStageToSpv(EShLangVertex, translation.vertex.glsl, out.vertex, error))
-		return false;
-	if (!CompileStageToSpv(EShLangFragment, translation.fragment.glsl, out.fragment, error))
-		return false;
-	return true;
+        if (!CompileStageToSpv(EShLangVertex, translation.vertex.glsl, out.vertex, error))
+                return false;
+        if (!CompileStageToSpv(EShLangFragment, translation.fragment.glsl, out.fragment, error))
+                return false;
+        return true;
 }
 
 } // namespace preset

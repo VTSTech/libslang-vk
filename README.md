@@ -29,14 +29,15 @@ the library (plan §8 output mode (a)). Per-item implementation status,
 audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md); notable
 changes per milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
-**Corpus verdict (M4.02):** the full libretro preset corpus — all 2,658
+**Corpus verdict (M4.03):** the full libretro preset corpus — all 2,658
 presets, pinned to the revision recorded in the ledger header — is swept
 through the real load path, and the resulting per-preset baseline
 ([corpus/baseline-ledger.txt](corpus/baseline-ledger.txt)) is committed and
-gated: **2,567 loaded / 91 failed, zero regressions** since the 2026-10-17
-baseline (826 / 1832). The remaining 91 are one known class —
-sampled-but-unbound textures behind preprocessor dead code — tracked in the
-changelog's Unreleased section.
+gated: **2,637 loaded / 21 failed, zero regressions** since the 2026-10-17
+baseline (826 / 1832). The remaining 21 are upstream-broken or malformed
+presets (parameter-only overlays, stray-quote keys, missing LUT
+declarations) plus one intentionally-invalid fixture — not library
+failures; each is enumerated in the changelog.
 
 **DevilutionX integration (plan §11 M4) is underway** on the fork's
 [`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)

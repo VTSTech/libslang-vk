@@ -22,8 +22,17 @@
 
 #include "compat.hpp"
 
+#include <glslang/Public/ResourceLimits.h>
+#include <glslang/Public/ShaderLang.h>
+
 namespace slv {
 namespace preset {
+
+// Defined in slang_compile.cpp: the process-wide glslang init guard shared
+// with the SPIR-V compile path. The translate-time dead-code oracle below
+// runs TShader::preprocess and needs the same singleton.
+void EnsureGlslangRuntime();
+
 namespace {
 
 std::string TrimAll(const std::string &s)
@@ -1081,6 +1090,52 @@ bool IsSamplerDeclared(const SamplerScanIndex &idx, const std::string &glsl, con
         return IsSamplerDeclared(glsl, name);
 }
 
+/** @brief Preprocesses stage text with the exact environment CompilePass uses,
+ * for the dead-conditional sampling oracle in RewriteSamplers.
+ *
+ * CompilePass feeds the rewritten GLSL to glslang with no host defines: the
+ * compile-time truth of a conditional block therefore comes from the
+ * shader's own #defines alone (undefined identifiers in #if evaluate to 0).
+ * Preprocessing the same text here and scanning THAT copy tells the sampler
+ * rewrite whether a sample site survives into the compile — without this, a
+ * name sampled only behind dead conditionals (Mega Bezel declares AND
+ * samples ReflectionPass inside "#ifdef IS_NO_REFLECT_PRESET" branches, so
+ * NO-REFLECT variants ship no live use at all) hard-fails the load although
+ * glslang discards every use.
+ *
+ * No host defines are injected BY DESIGN: injecting anything (e.g. #pragma
+ * parameter values) would diverge from CompilePass and could flip code live
+ * that the real compile keeps dead. Returns false when glslang rejects the
+ * text; the caller then falls back to the raw-text verdict, which is the
+ * pre-fix behavior — conservative on both sides.
+ *
+ * The input is include-resolved and comment-stripped, so the forbidding
+ * default includer is exactly right. */
+bool PreprocessStageGlsl(const std::string &glsl, bool isVertex, std::string &out)
+{
+        EnsureGlslangRuntime();
+        const EShLanguage lang = isVertex ? EShLangVertex : EShLangFragment;
+        glslang::TShader shader(lang);
+        const char *sourcePtr = glsl.c_str();
+        shader.setStrings(&sourcePtr, 1);
+        shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientVulkan, 100);
+        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+        const EShMessages messages = static_cast<EShMessages>(
+            EShMsgOnlyPreprocessor | EShMsgSpvRules | EShMsgVulkanRules);
+        glslang::TShader::ForbidIncluder forbidIncluder;
+        std::string preprocessed;
+        // glslang 16.x signature: output via pointer, includer last. The
+        // "not fully supported" caveat in ShaderLang.h is fine here: false
+        // just means the oracle is unavailable and the caller keeps the
+        // conservative raw-text verdict.
+        if (!shader.preprocess(GetDefaultResources(), 450, ENoProfile, false,
+                /*forwardCompatible=*/false, messages, &preprocessed, forbidIncluder))
+                return false;
+        out = std::move(preprocessed);
+        return true;
+}
+
 /** @brief Rewrites sampler2D declarations to the fragment texture set (set 2) with dense bindings. */
 bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
     const std::unordered_set<std::string> &knownTextureNames, int passIndex, int passCount,
@@ -1097,6 +1152,20 @@ bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
         // packs with many orphan declarations). The text is not mutated inside the
         // rewrite loop, so the index stays valid.
         const SamplerScanIndex scanIndex = BuildSamplerScanIndex(glsl);
+        // Dead-conditional sampling oracle (PreprocessStageGlsl), computed
+        // lazily: at most one preprocess per stage, and only when an unknown
+        // name is raw-sampled — healthy presets pay zero preprocessing cost.
+        std::string preprocessedStage;
+        bool preprocessedTried = false;
+        auto PreprocessedStageCopy = [&]() -> const std::string * {
+                if (!preprocessedTried) {
+                        preprocessedTried = true;
+                        std::string preprocessed;
+                        if (PreprocessStageGlsl(glsl, isVertex, preprocessed) && !preprocessed.empty())
+                                preprocessedStage = std::move(preprocessed);
+                }
+                return preprocessedStage.empty() ? nullptr : &preprocessedStage;
+        };
         const uint32_t texSet = isVertex ? 0U : 2U;
         uint32_t binding = 0;
         while (std::getline(lines, line)) {
@@ -1149,9 +1218,24 @@ bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
                                         // that is a real missing dependency.
                                         const bool definedAway = IsDefineTarget(scanIndex, glsl, name);
                                         if (!definedAway && IsTextureSampled(scanIndex, glsl, name)) {
-                                                error = StrCat("slang: unknown texture reference '", name,
-                                                    "' (not a builtin, alias or lookup texture)");
-                                                return false;
+                                                // Dead-code rescue: the raw text samples the name, but
+                                                // every sample site may sit behind conditional code the
+                                                // GLSL preprocessor discards. CompilePass runs glslang
+                                                // over this exact text with no host defines, so sample
+                                                // activity on the preprocessed copy is the compile-time
+                                                // truth; a name still sampled after preprocessing is a
+                                                // real missing dependency and keeps hard-failing.
+                                                // Oracle unavailable -> keep the raw verdict (pre-fix
+                                                // behavior; conservative).
+                                                const std::string *pre = PreprocessedStageCopy();
+                                                if (pre == nullptr || IsTextureSampled(*pre, name)) {
+                                                        error = StrCat("slang: unknown texture reference '", name,
+                                                            "' (not a builtin, alias or lookup texture)");
+                                                        return false;
+                                                }
+                                                warnings.push_back(StrCat("sampler '", declaredName,
+                                                    "' is only sampled behind dead conditional code; dropping declaration"));
+                                                continue;
                                         }
                                         // Field round 3: an object-like macro can alias the DECLARATION
                                         // itself. nnedi3-combine-v-pass0.slang does "#define

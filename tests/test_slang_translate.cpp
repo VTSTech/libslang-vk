@@ -102,6 +102,75 @@ constexpr const char *kFeedbackTapSlang =
     "    fragColor = texture(PhosphorPassFeedback, vTexCoord);\n"
     "}\n";
 
+// Field regression (Mega Bezel NO-REFLECT variants): samplers declared and/or
+// sampled ONLY inside conditional blocks the GLSL preprocessor discards for
+// this variant ("#ifdef IS_NO_REFLECT_PRESET" wraps the ReflectionPass
+// declaration in combine-passes.inc, "#ifndef IS_NO_REFLECT_PRESET" wraps its
+// sampling). The raw text contains sampling calls, but the compile-time truth
+// — glslang preprocessing the exact text with no host defines — has no live
+// use, so the declarations must drop with a warning instead of hard-failing
+// the load. Covers three shapes: dead declaration + dead sampling, live
+// declaration + dead sampling, and a dead #if-arithmetic gate.
+constexpr const char *kDeadCodeSamplerSlang =
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "#define FEATURE_OFF 0\n"
+    "#ifdef FEATURE_UNDEFINED\n"
+    "uniform sampler2D DeadPass;\n"
+    "#endif\n"
+    "#if FEATURE_OFF\n"
+    "uniform sampler2D OffPass;\n"
+    "#endif\n"
+    "uniform sampler2D AlsoDeadPass;\n"
+    "in vec2 vTexCoord;\n"
+    "layout(location = 0) out vec4 fragColor;\n"
+    "void main(void)\n"
+    "{\n"
+    "    fragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "#ifdef FEATURE_UNDEFINED\n"
+    "    fragColor = texture(DeadPass, vTexCoord);\n"
+    "    fragColor = texture(AlsoDeadPass, vTexCoord);\n"
+    "#endif\n"
+    "#if FEATURE_OFF\n"
+    "    fragColor = texture(OffPass, vTexCoord);\n"
+    "#endif\n"
+    "}\n";
+
+// Companion to kDeadCodeSamplerSlang: the same conditional shape with a LIVE
+// gate. The sample survives preprocessing, so the missing chain dependency is
+// real and the load must keep hard-failing.
+constexpr const char *kDeadGateLiveSamplerSlang =
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "#define FEATURE_ON 1\n"
+    "#if FEATURE_ON\n"
+    "uniform sampler2D LiveGatePass;\n"
+    "#endif\n"
+    "in vec2 vTexCoord;\n"
+    "layout(location = 0) out vec4 fragColor;\n"
+    "void main(void)\n"
+    "{\n"
+    "#if FEATURE_ON\n"
+    "    fragColor = texture(LiveGatePass, vTexCoord);\n"
+    "#else\n"
+    "    fragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "#endif\n"
+    "}\n";
+
 } // namespace
 
 int main()
@@ -200,6 +269,56 @@ int main()
                 Check(unknownFails
                         && unknownTap.error.find("unknown texture reference") != std::string::npos,
                     "pragma tap: unsupplied pragma name still hard-fails");
+        }
+
+        // Dead-conditional sampling (Mega Bezel NO-REFLECT): samplers declared
+        // and/or sampled only inside conditional blocks the GLSL preprocessor
+        // discards for this variant. The raw text contains sampling calls, but
+        // the compile-time truth (glslang preprocesses the exact text with no
+        // host defines) has no live use — the declarations must drop with a
+        // warning instead of hard-failing the load.
+        {
+                const std::filesystem::path deadShader = root / "dead_code_sampler.slang";
+                {
+                        std::ofstream stream(deadShader, std::ios::binary | std::ios::trunc);
+                        stream << kDeadCodeSamplerSlang;
+                }
+                SlangTranslation dead;
+                const bool deadOk = TranslateSlang(deadShader.string(), /*knownTextureNames=*/{}, 1, 2, dead);
+                Check(deadOk, "dead code: shader with only dead-sampled unknown samplers translates");
+                if (!deadOk) {
+                        std::printf("  error: %s\n", dead.error.c_str());
+                } else {
+                        Check(dead.fragment.textures.empty(),
+                            "dead code: no bindings emitted for discarded samplers");
+                        // The dropped DECLARATIONS must be gone. Dead sampling
+                        // calls may remain in the output (they still sit in
+                        // the raw text's dead conditional regions; the real
+                        // compile preprocesses them away).
+                        Check(dead.fragment.glsl.find("sampler2D DeadPass") == std::string::npos
+                                && dead.fragment.glsl.find("sampler2D AlsoDeadPass") == std::string::npos
+                                && dead.fragment.glsl.find("sampler2D OffPass") == std::string::npos,
+                            "dead code: discarded sampler declarations absent from the GLSL");
+                        size_t deadDrops = 0;
+                        for (const std::string &warning : dead.warnings)
+                                if (warning.find("dead conditional code") != std::string::npos)
+                                        ++deadDrops;
+                        Check(deadDrops >= 3, "dead code: all three drops reported with warnings");
+                }
+
+                // The same conditional shape with a LIVE gate stays a hard
+                // failure: the sample survives preprocessing, so the missing
+                // chain dependency is real.
+                const std::filesystem::path gateShader = root / "dead_gate_live_sampler.slang";
+                {
+                        std::ofstream stream(gateShader, std::ios::binary | std::ios::trunc);
+                        stream << kDeadGateLiveSamplerSlang;
+                }
+                SlangTranslation gated;
+                const bool gateFails = !TranslateSlang(gateShader.string(), /*knownTextureNames=*/{}, 1, 2, gated);
+                Check(gateFails
+                        && gated.error.find("unknown texture reference 'LiveGatePass'") != std::string::npos,
+                    "dead code: live-conditional unknown sampler still hard-fails");
         }
 
         for (const std::string &warning : translation.warnings)

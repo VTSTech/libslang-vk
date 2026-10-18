@@ -401,7 +401,12 @@ private:
                                 //    ../../../include/compat_macros.inc, which
                                 //    lives at the corpus root).
                                 const bool rootTooNarrow = err1.find("cannot open shader file") != std::string::npos
-                                    || err1.find("include target outside the shaders root") != std::string::npos;
+                                    || err1.find("include target outside the shaders root") != std::string::npos
+                                    // #reference wrappers (Mega Bezel): the
+                                    // referenced preset sits outside the
+                                    // file-rooted sandbox, the resolver
+                                    // refuses it and reports the empty path.
+                                    || err1.find("cannot open preset file") != std::string::npos;
                                 if (rootTooNarrow) {
                                         fs::path dir(rec.root);
                                         for (int level = 0; level < 6 && !loaded; ++level) {

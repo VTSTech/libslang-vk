@@ -12,13 +12,56 @@ tags yet). Format adapted from
 
 ### Planned
 
-- Remaining 91 corpus failures (out of 2658 presets at the pinned corpus rev),
-  all one class: sampled-but-unbound textures behind preprocessor dead code —
-  `ReflectionPass` in MBZ NO-REFLECT variants (~60), `ambi_temporal_pass`
-  uborder (~15), `play` nedi (~9). Next fix: run the texture-reference check
-  against preprocessed text instead of raw source.
 - M3 leftovers: golden-image conformance suite, perf budgets.
 - M5 (1.0): API freeze, packaging, `docs/API.md`.
+- The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
+  no library action planned; they stay pinned as FAIL in the baseline.
+
+## [M4.03] — 2026-10-18
+
+Dead-code texture-reference fix: the corpus verdict moved from **2,567 LOAD /
+91 FAIL** to **2,637 LOAD / 21 FAIL — zero regressions** at the pinned corpus
+revision.
+
+### Fixed
+
+- **Sampled-but-unbound textures behind preprocessor dead code** (70 presets:
+  Mega Bezel NO-REFLECT variants' `ReflectionPass`, uborder
+  `ambi_temporal_pass` wrappers, ...): the sampler rewrite ran its
+  sample-site check on the raw include-resolved text, so a name sampled only
+  inside conditional blocks the GLSL preprocessor discards
+  (`#ifdef IS_NO_REFLECT_PRESET` wraps both the ReflectionPass declaration
+  and its sampling in NO-REFLECT variants) hard-failed the load although
+  glslang discards every use. `RewriteSamplers` now answers the "is it
+  sampled?" question on a glslang-preprocessed copy of the stage text — the
+  exact text and environment `CompilePass` feeds glslang, with no host
+  defines injected (injecting anything would diverge from the real compile
+  and could flip dead code live). A name still sampled after preprocessing
+  remains a hard failure; a dead-sampled orphan declaration drops with a
+  warning, matching RetroArch. The oracle is computed lazily (at most one
+  preprocess per stage, only on the old failure path — healthy presets pay
+  nothing), and a preprocess failure falls back to the raw verdict, which is
+  the pre-fix behavior.
+
+### Tests
+
+- `test_slang_translate` dead-code cases: dead `#ifdef` and dead `#if`
+  shapes (dead declaration + dead sampling; live declaration + dead
+  sampling) translate with no bindings emitted and drop warnings reported;
+  the same conditional shape with a live gate still hard-fails with
+  `unknown texture reference`.
+
+### Changed
+
+- `corpus/baseline-ledger.txt` refreshed: 2,658 presets → **2,637 loaded /
+  21 failed**. The remaining 21 are not library failures: 6 koko-aio
+  `refs/` parameter-only overlays (no passes), 4 Adamant tilde variants
+  (malformed shader indices), 6 nedi bilateral-variants (vhs.slang samples a
+  `play` LUT the preset never declares), 1 crt-super-xbr (`InfoCachePass`
+  absent from the mini-chain), 1 append-uborder-koko-ambi (template missing
+  its appended chain), 1 technicolor + 1 gbc-frontlit (stray-quote malformed
+  keys), and the corpus's own intentionally-invalid
+  `test/feedback-noncausal`.
 
 ## [M4.02] — 2026-10-18
 
