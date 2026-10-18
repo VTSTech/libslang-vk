@@ -194,13 +194,21 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
         static constexpr float kQuadToNdc[16] = {2.F, 0.F, 0.F, 0.F, 0.F, 2.F, 0.F, 0.F, 0.F, 0.F, 1.F, 0.F, -1.F, -1.F, 0.F, 1.F};
 
         const auto writeVec4 = [&](const UniformMember &member, float x, float y, float z, float w) {
-                WriteFloat(out, member.offset, x);
-                WriteFloat(out, member.offset + 4, y);
-                if (member.type == UniformType::Vec4 || member.type == UniformType::IVec4
-                    || member.type == UniformType::UVec4) {
+                // Clamp to the member's declared std140 size. "...Size"-suffixed
+                // names are not always vec4s: crt-beans' push block ends with
+                // plain float parameters (MaxSpotSize/MinSpotSize) and the old
+                // unconditional x/y pair ran 4 bytes past the staging buffer
+                // (ASAN heap-buffer-overflow, field round 5). Scalars get the
+                // semantic's x, vec2s x/y, vec3s x/y/z, vec4s all four.
+                const uint32_t maxFloats = std::min<uint32_t>(4, member.size / 4);
+                if (maxFloats > 0)
+                        WriteFloat(out, member.offset + 0, x);
+                if (maxFloats > 1)
+                        WriteFloat(out, member.offset + 4, y);
+                if (maxFloats > 2)
                         WriteFloat(out, member.offset + 8, z);
+                if (maxFloats > 3)
                         WriteFloat(out, member.offset + 12, w);
-                }
         };
 
         const auto sizeVec = [](uint32_t w, uint32_t h) {
@@ -266,41 +274,58 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                         continue;
                 }
 
-                // <TextureName>Size members (ported resolution order).
+                // <TextureName>Size members (ported resolution order). The suffix
+                // only claims the name when texName resolves to an actual
+                // texture-ish object — builtin, pass output/feedback, alias or
+                // LUT. Parameter names that merely END in "Size" (crt-beans
+                // calculate_widths: MaxSpotSize/MinSpotSize) must fall through to
+                // the parameter path below; they used to be hijacked here, zeroed
+                // and — as block-final floats — written past the staging buffer
+                // (field round 5, the crt-beans-s-video shutdown crash).
                 if (name.size() > 4 && name.compare(name.size() - 4, 4, "Size") == 0) {
                         std::string texName = name.substr(0, name.size() - 4);
                         if (texName.size() > 8 && texName.compare(texName.size() - 8, 8, "Feedback") == 0)
                                 texName = texName.substr(0, texName.size() - 8); // Feedback shares pass output size.
                         uint32_t w = 0;
                         uint32_t h = 0;
+                        bool knownTexture = false;
                         if (texName == "Source") {
+                                knownTexture = true;
                                 w = ctx.inputWidth;
                                 h = ctx.inputHeight;
                         } else if (texName == "Original" || texName.rfind("OriginalHistory", 0) == 0) {
+                                knownTexture = true;
                                 w = ctx.gameWidth;
                                 h = ctx.gameHeight;
                         } else if (texName.rfind("PassOutput", 0) == 0 || texName.rfind("PassFeedback", 0) == 0) {
-                                // Parse the trailing index after the 10-char prefix.
-                                if (texName.size() > 10) {
-                                        const int idx = std::atoi(texName.c_str() + 10);
+                                knownTexture = true;
+                                // Parse the trailing index after the prefix. "PassOutput"
+                                // is 10 chars, "PassFeedback" 12 — the old substr(10) read
+                                // the 'c' of Feedback and atoi'd 0 for every PassFeedback#.
+                                const size_t prefixLen = texName.rfind("PassOutput", 0) == 0 ? 10 : 12;
+                                if (texName.size() > prefixLen) {
+                                        const int idx = std::atoi(texName.c_str() + prefixLen);
                                         if (idx >= 0 && idx < static_cast<int>(ctx.passCount) && ctx.passOutputSizes != nullptr
                                             && static_cast<size_t>(idx) < ctx.passOutputSizes->size()) {
                                                 w = (*ctx.passOutputSizes)[static_cast<size_t>(idx)].first;
                                                 h = (*ctx.passOutputSizes)[static_cast<size_t>(idx)].second;
                                         }
                                 }
-                        } else if (ctx.aliasSizes != nullptr) {
+                        } else {
                                 // Alias / #pragma name sizes come from the OWNING pass's
                                 // output (M2 fix: the reading pass's own size was used
                                 // before, which only went unnoticed when every pass
                                 // rendered at the same resolution).
-                                for (const BlockFillContext::AliasSize &entry : *ctx.aliasSizes)
-                                        if (CaseInsensitiveEqual(entry.name, texName)) {
-                                                w = entry.width;
-                                                h = entry.height;
-                                                break;
-                                        }
-                                if (w == 0 && h == 0 && ctx.lutSizes != nullptr) {
+                                if (ctx.aliasSizes != nullptr) {
+                                        for (const BlockFillContext::AliasSize &entry : *ctx.aliasSizes)
+                                                if (CaseInsensitiveEqual(entry.name, texName)) {
+                                                        w = entry.width;
+                                                        h = entry.height;
+                                                        knownTexture = true;
+                                                        break;
+                                                }
+                                }
+                                if (!knownTexture && ctx.lutSizes != nullptr) {
                                         // LUT textures (M3): uploaded size; User# aliases
                                         // resolve to their positional LUT (extension over
                                         // the reference host, which left User#Size at 0).
@@ -308,13 +333,17 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                                                 if (CaseInsensitiveEqual(entry.name, texName)) {
                                                         w = entry.width;
                                                         h = entry.height;
+                                                        knownTexture = true;
                                                         break;
                                                 }
                                 }
                         }
-                        const auto [x, y, z, ww] = sizeVec(w, h);
-                        writeVec4(member, x, y, z, ww);
-                        continue;
+                        if (knownTexture) {
+                                const auto [x, y, z, ww] = sizeVec(w, h);
+                                writeVec4(member, x, y, z, ww);
+                                continue;
+                        }
+                        // Unknown "...Size" name: fall through to the parameter path.
                 }
 
                 // Shader parameters: preset override, then pragma default, then zero.

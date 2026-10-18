@@ -322,6 +322,31 @@ private:
                 if (!cached) {
                         auto loaded = slv::Preset::load(*device_, rec.AbsolutePath());
                         if (!loaded) {
+                                // Pack layouts reference sibling trees via ../..
+                                // (slang-shaders: presets/crt-plus-signal/*.slangp
+                                // -> ../../crt/shaders/...). A direct-file record
+                                // roots the SEC-01 sandbox at the preset's own
+                                // folder, so those references resolve but then sit
+                                // outside the root and load with an empty path.
+                                // Retry with ancestor roots, mirroring the resolver's
+                                // own ancestor walk; each attempt re-runs the whole
+                                // load so the retry is the real path, not a patch.
+                                namespace fs = std::filesystem;
+                                const std::string &err1 = loaded.error().message;
+                                if (err1.find("cannot open shader file") != std::string::npos) {
+                                        fs::path dir(rec.root);
+                                        for (int level = 0; level < 6 && !loaded; ++level) {
+                                                const fs::path parent = dir.parent_path();
+                                                if (parent.empty() || parent == dir)
+                                                        break;
+                                                dir = parent;
+                                                slv::preset::SetShaderRootDir(dir.generic_string());
+                                                loaded = slv::Preset::load(*device_, rec.AbsolutePath());
+                                        }
+                                }
+                        }
+                        if (!loaded) {
+                                slv::preset::SetShaderRootDir(rec.root); // restore the record's own root
                                 std::printf("load FAILED [%s]: %s\n", rec.AbsolutePath().c_str(),
                                     loaded.error().message.c_str());
                                 return false;

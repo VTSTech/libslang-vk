@@ -134,6 +134,73 @@ int main()
                 }
         }
 
+        // --- Field round 5 canary: push block ending with "...Size"-suffixed
+        // float parameters (crt-beans calculate_widths shape). The uniform
+        // fill's "<TextureName>Size" suffix branch must NOT claim them: they
+        // are parameters, not textures. Old behavior: names hijacked and
+        // zeroed, and the unconditional x/y write ran 4 bytes past the
+        // staging buffer (ASAN heap-buffer-overflow / native heap corruption
+        // at teardown). The golden pins the pragma defaults: R = 1.5*64-1 =
+        // 95, G = 0.75*64-1 = 47, byte-exact through the UNORM store.
+        {
+                auto preset = slv::Preset::load(*device, dataDir + "/runner/sizeparam.slangp");
+                Check(preset.has_value(), "sizeparam preset loads");
+                if (preset) {
+                        slv::ChainOptions chainOptions;
+                        chainOptions.outputWidth = kWidth;
+                        chainOptions.outputHeight = kHeight;
+                        auto chain = slv::Chain::create(*device, *preset, chainOptions);
+                        Check(chain.has_value(), "sizeparam chain creates");
+                        if (chain) {
+                                slv::InputFrame frame;
+                                frame.view = input->view();
+                                frame.format = VK_FORMAT_R8G8B8A8_UNORM;
+                                frame.width = kWidth;
+                                frame.height = kHeight;
+                                slv::Offscreen target;
+                                target.view = output->view();
+                                target.format = VK_FORMAT_R8G8B8A8_UNORM;
+                                target.width = kWidth;
+                                target.height = kHeight;
+                                const auto rendered = chain->render(frame, target, slv::FrameInfo{});
+                                Check(rendered.has_value(), "sizeparam renders (Size-suffixed params reach the shader)");
+                                if (rendered) {
+                                        auto pixels = device->readPixels(output->image(), VK_FORMAT_R8G8B8A8_UNORM, kWidth,
+                                            kHeight, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                        Check(pixels.has_value(), "sizeparam readback");
+                                        if (pixels && pixels->size() >= pattern.size()) {
+                                                // R = 95 (SpotScaleMax default 1.5), G = 47 (SpotScaleMin 0.75).
+                                                size_t bad = 0;
+                                                size_t firstBad = 0;
+                                                for (size_t i = 0; i < pattern.size(); ++i) {
+                                                        const uint8_t want = (i % 4 == 0) ? 95 : (i % 4 == 1) ? 47
+                                                            : (i % 4 == 2) ? 0
+                                                                           : 0xFF;
+                                                        const int got = static_cast<int>((*pixels)[i]);
+                                                        if (std::abs(got - static_cast<int>(want)) > 1) {
+                                                                if (bad == 0)
+                                                                        firstBad = i;
+                                                                ++bad;
+                                                        }
+                                                }
+                                                if (bad != 0) {
+                                                        std::printf(
+                                                            "FAIL sizeparam golden (%zu diffs, first byte %zu: got %d want %d)\n",
+                                                            bad, firstBad, static_cast<int>((*pixels)[firstBad]),
+                                                            static_cast<int>((firstBad % 4 == 0) ? 95
+                                                                : (firstBad % 4 == 1)             ? 47
+                                                                  : (firstBad % 4 == 2)           ? 0
+                                                                                                  : 0xFF));
+                                                        ++failures;
+                                                } else {
+                                                        std::printf("PASS sizeparam golden = params encoded (95,47,0,255)\n");
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+
         const std::vector<std::string> validationErrors = device->validationErrors();
         if (!validationErrors.empty()) {
                 std::printf("FAIL validation reported %zu error(s):\n", validationErrors.size());
