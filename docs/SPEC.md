@@ -162,20 +162,25 @@ Fixed (audit F6, `f87f89d18`): `viewport` now resolves against the aspect-correc
 | `#pragma name <id>` | Supported | Display/identifier metadata; also makes the pass's output samplable by that identifier from other passes (§4.5). Pre-scanned by `preset_runner.cpp` before translation |
 | `#pragma stage ...` | Supported | See 4.1 |
 | `#pragma parameter ...` | Supported | See 3.6 |
-| `#pragma format <token>` | Supported (subset) | Per-pass output format override read from the pass's `.slang`; takes precedence over `srgb_framebufferN`/`float_framebufferN`. Supported token set in 4.2.1; the single unmapped token (`A2B10G10R10_UINT_PACK32`) warns and falls back to `R8G8B8A8_UNORM` instead of failing the preset. **Field round 3:** the token was only ever captured into the translation result and never propagated to `PassDef::pragmaFormat`, so the override silently did nothing since the mapping table landed — wired through now (`664d0f740`). If the device refuses the requested color format (SDL builds a transient VkRenderPass with it; single-channel float/int targets are not mandatory attachment formats), the pipeline creation retries with `R8G8B8A8_UNORM` and logs a `color target format unavailable` warning instead of failing the preset |
+| `#pragma format <token>` | Supported (subset) | Per-pass output format override read from the pass's `.slang` translation; takes precedence over `srgb_framebufferN`/`float_framebufferN`. Supported token set in 4.2.1; any token outside the table falls back to `R8G8B8A8_UNORM` instead of failing the preset (documented divergence). **Field round 3:** the token was only ever captured into the translation result and never propagated to the pass format — wired through (`664d0f740`). **Field round 4 (2026-10-18, crt-beans-s-video):** the table was case-sensitive and carried only the libretro short tokens, while the modern slang-shaders corpus uses Vulkan spellings exclusively (113x `R16G16B16A16_SFLOAT`, lower-case `a2b10g10r10_unorm_pack32`) — 11 float passes of the s-video preset silently rendered as RGBA8; the table now matches case-insensitively and carries both spellings (`MapTargetFormat` in `src/vk/chain.cpp`) |
 | `#pragma alias <id>` | Unimplemented | Not extracted; the line passes through to glslang, which ignores unknown pragmas. Preset-level `aliasN` works; the in-shader declaration does nothing. Rare in the corpus |
 | `#pragma include_optional "path"` | Unimplemented | Not resolved (treated as an unknown pragma); if the shader actually needs the file's symbols it then fails at compile. Not observed in the corpus |
 | `#error` / `#warning` | Divergent | RetroArch treats `#error` as a "skip this shader" feature gate. Here they are left in the source and glslang fails the compile on `#error` — the preset falls back per the failure contract. Net effect for gated shaders is the same (not loaded), but the failure is a compile error, not a clean skip |
 
 #### 4.2.1 `#pragma format` tokens
 
+Matched case-insensitively; mapping table: `MapTargetFormat` in `src/vk/chain.cpp` (the
+Vulkan runner; the SDL-era `preset_runner.cpp` table this section once described is gone).
+2026-10-18 corpus sweep: the modern slang-shaders set ships Vulkan token spellings
+exclusively (113x `R16G16B16A16_SFLOAT`, zero `RGBA16F`-style short tokens), so the table
+carries both spellings for every mapped format.
+
 | Spec token group | Status |
 |---|---|
-| `R8_UNORM`, `R8G8_UNORM`, `R8G8B8A8_UNORM`, `R8G8B8A8_SRGB`, `R16_SFLOAT`, `R16G16_SFLOAT`, `R16G16B16A16_SFLOAT`, `R32_SFLOAT`, `R32G32_SFLOAT`, `R32G32B32A32_SFLOAT` | Supported |
-| `*_UINT` / `*_SINT` 8/16/32-bit: `R8`, `R8G8B8A8`, `R16`, `R16G16B16A16`, `R32`, `R32G32B32A32` | Supported |
-| `R8G8_UINT`, `R8G8_SINT`, `R16G16_UINT`, `R16G16_SINT`, `R32G32_UINT`, `R32G32_SINT` | Supported (2026-10-14, gap-#6 round; mapping table in `preset_runner.cpp`). 0 corpus hits — mapped for spec conformance |
-| `A2B10G10R10_UNORM_PACK32` (HDR10 outputs) | Supported (2026-10-14, gap-#6 round): SDL GPU names the same layout `R10G10B10A2_UNORM` and its Vulkan backend maps it back to `VK_FORMAT_A2B10G10R10_UNORM_PACK32`. 18 corpus shaders request it (crt-effects curvature, bezel packs) |
-| `A2B10G10R10_UINT_PACK32` | Unimplemented → warn + RGBA8 fallback. SDL GPU has no UINT form of the packed 10-bit layout; 0 corpus hits |
+| `RGBA8` = `R8G8B8A8_UNORM`, `R8` = `R8_UNORM`, `R16F` = `R16_SFLOAT`, `R32F` = `R32_SFLOAT`, `RGBA16F` = `R16G16B16A16_SFLOAT`, `RGBA32F` = `R32G32B32A32_SFLOAT`, `RGBA16` = `R16G16B16A16_UNORM`, `sRGB8` / `SRGB8_ALPHA8` = `R8G8B8A8_SRGB`, `A2B10G10R10_UNORM_PACK32`, `R16G16_SFLOAT`, `R32_UINT` | Supported (short + Vulkan spellings) |
+| `R8G8_UINT`, `R8G8_SINT`, `R16G16_UINT`, `R16G16_SINT`, `R32G32_UINT`, `R32G32_SINT`, `R32G32B32A32_SINT` | Supported (gap-#6 round parity; 0 corpus hits) |
+| `A2B10G10R10_UINT_PACK32` | Unimplemented → RGBA8 fallback (documented divergence; 0 corpus hits; no UINT form of the packed 10-bit layout) |
+| Legacy tokens not listed (`RGBA4`, `R8G8_UNORM`, `R32G32_SFLOAT`, wide `*_UINT`/`*_SINT` variants) | Unmapped → RGBA8 fallback; 0 corpus hits (2026-10-18 sweep) |
 
 ### 4.3 Includes
 

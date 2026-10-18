@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -59,28 +60,55 @@ auto MapTargetFormat(const std::string &pragmaFormat, bool srgbFramebuffer, bool
 {
         // Preset flags first (RetroArch order), then #pragma format tokens;
         // unknown tokens fall back to RGBA8 (documented divergence, SPEC).
+        // Field crash (crt-beans-s-video, 2026-10): the slang-shaders corpus
+        // ships VULKAN token spellings exclusively (113x R16G16B16A16_SFLOAT,
+        // zero short tokens) and a lower-case A2B10G10R10_UNORM_PACK32, so the
+        // table matches case-insensitively and carries both spellings.
         if (floatFramebuffer)
                 return VK_FORMAT_R16G16B16A16_SFLOAT;
         if (srgbFramebuffer && pragmaFormat.empty())
                 return VK_FORMAT_R8G8B8A8_SRGB;
-        if (pragmaFormat.empty() || pragmaFormat == "RGBA8")
+        std::string token;
+        token.reserve(pragmaFormat.size());
+        for (const char c : pragmaFormat)
+                token += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (token.empty() || token == "rgba8" || token == "r8g8b8a8_unorm")
                 return VK_FORMAT_R8G8B8A8_UNORM;
-        if (pragmaFormat == "R8")
+        if (token == "r8" || token == "r8_unorm")
                 return VK_FORMAT_R8_UNORM;
-        if (pragmaFormat == "R16F")
+        if (token == "r16f" || token == "r16_sfloat")
                 return VK_FORMAT_R16_SFLOAT;
-        if (pragmaFormat == "R32F")
+        if (token == "r32f" || token == "r32_sfloat")
                 return VK_FORMAT_R32_SFLOAT;
-        if (pragmaFormat == "RGBA16F")
+        if (token == "rgba16f" || token == "r16g16b16a16_sfloat")
                 return VK_FORMAT_R16G16B16A16_SFLOAT;
-        if (pragmaFormat == "RGBA32F")
+        if (token == "rgba32f" || token == "r32g32b32a32_sfloat")
                 return VK_FORMAT_R32G32B32A32_SFLOAT;
-        if (pragmaFormat == "RGBA16")
+        if (token == "rgba16" || token == "r16g16b16a16_unorm")
                 return VK_FORMAT_R16G16B16A16_UNORM;
-        if (pragmaFormat == "sRGB8" || pragmaFormat == "SRGB8_ALPHA8")
+        if (token == "srgb8" || token == "srgb8_alpha8" || token == "r8g8b8a8_srgb")
                 return VK_FORMAT_R8G8B8A8_SRGB;
-        if (pragmaFormat == "A2B10G10R10_UNORM_PACK32")
+        if (token == "a2b10g10r10_unorm_pack32")
                 return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        if (token == "r16g16_sfloat")
+                return VK_FORMAT_R16G16_SFLOAT;
+        if (token == "r32_uint")
+                return VK_FORMAT_R32_UINT;
+        // Two-channel integer tokens (SPEC #6 round; reference-runner parity).
+        if (token == "r8g8_uint")
+                return VK_FORMAT_R8G8_UINT;
+        if (token == "r8g8_sint")
+                return VK_FORMAT_R8G8_SINT;
+        if (token == "r16g16_uint")
+                return VK_FORMAT_R16G16_UINT;
+        if (token == "r16g16_sint")
+                return VK_FORMAT_R16G16_SINT;
+        if (token == "r32g32_uint")
+                return VK_FORMAT_R32G32_UINT;
+        if (token == "r32g32_sint")
+                return VK_FORMAT_R32G32_SINT;
+        if (token == "r32g32b32a32_sint")
+                return VK_FORMAT_R32G32B32A32_SINT;
         return VK_FORMAT_R8G8B8A8_UNORM;
 }
 
@@ -90,10 +118,16 @@ auto FormatTexelSize(VkFormat format) -> uint32_t
                 case VK_FORMAT_R8_UNORM:
                 case VK_FORMAT_R8_SRGB:
                         return 1;
+                case VK_FORMAT_R8G8_UINT:
+                case VK_FORMAT_R8G8_SINT:
                 case VK_FORMAT_R16_SFLOAT:
                 case VK_FORMAT_R16_UNORM:
                         return 2;
+                case VK_FORMAT_R16G16_SFLOAT:
+                case VK_FORMAT_R16G16_UINT:
+                case VK_FORMAT_R16G16_SINT:
                 case VK_FORMAT_R32_SFLOAT:
+                case VK_FORMAT_R32_UINT:
                 case VK_FORMAT_R8G8B8A8_UNORM:
                 case VK_FORMAT_R8G8B8A8_SRGB:
                 case VK_FORMAT_B8G8R8A8_UNORM:
@@ -102,8 +136,11 @@ auto FormatTexelSize(VkFormat format) -> uint32_t
                         return 4;
                 case VK_FORMAT_R16G16B16A16_SFLOAT:
                 case VK_FORMAT_R16G16B16A16_UNORM:
+                case VK_FORMAT_R32G32_UINT:
+                case VK_FORMAT_R32G32_SINT:
                         return 8;
                 case VK_FORMAT_R32G32B32A32_SFLOAT:
+                case VK_FORMAT_R32G32B32A32_SINT:
                         return 16;
                 default:
                         return 0;

@@ -100,7 +100,9 @@ struct SlangTranslation {
  *
  * @param shaderPath Absolute path of the .slang file (include base + diagnostics).
  * @param knownTextureNames Names the shaders may reference besides the builtins:
- *   preset lookup texture names and pass aliases.
+ *   preset lookup texture names and pass aliases. Matched case-insensitively:
+ *   entries may be spelled in any case and mixed-case preset aliases (e.g.
+ *   "alias1 = Filtered") resolve without callers pre-lowering them.
  * @param passIndex Index of this pass in the chain (for PassOutput# causality).
  * @param passCount Number of passes in the chain.
  */

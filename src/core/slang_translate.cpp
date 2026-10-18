@@ -1442,6 +1442,23 @@ bool TranslateSlangImpl(const std::string &shaderPath, const std::unordered_set<
 {
         out = SlangTranslation {};
 
+        // Normalize the caller's name set: the sampler rewrite looks names up
+        // lower-cased while block validation matches the raw spelling, and
+        // callers ship only one of the two spellings (the runtime host inserts
+        // both; preset_info passes preset spellings like "Filtered" — field
+        // crash: crt-beans-s-video pass 3 resolving alias1). Accept any case
+        // on the API boundary: index every entry plus its lower-cased twin.
+        std::unordered_set<std::string> textureNames;
+        textureNames.reserve(knownTextureNames.size() * 2 + 1);
+        for (const std::string &name : knownTextureNames) {
+                textureNames.insert(name);
+                std::string lower;
+                lower.reserve(name.size());
+                for (const char c : name)
+                        lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                textureNames.insert(std::move(lower));
+        }
+
         std::string error;
         std::string merged;
         int includeStage = 0; // Mirrors SplitStages: 0 shared, 1 vertex, 2 fragment.
@@ -1498,11 +1515,11 @@ bool TranslateSlangImpl(const std::string &shaderPath, const std::unordered_set<
         }
 
         std::vector<std::string> warnings;
-        if (!ProcessStage(split.shared + split.vertex, /*isVertex=*/true, passIndex, passCount, knownTextureNames,
+        if (!ProcessStage(split.shared + split.vertex, /*isVertex=*/true, passIndex, passCount, textureNames,
                 out.parameters, warnings, out.vertex, out.error)) {
                 return false;
         }
-        if (!ProcessStage(split.shared + split.fragment, /*isVertex=*/false, passIndex, passCount, knownTextureNames,
+        if (!ProcessStage(split.shared + split.fragment, /*isVertex=*/false, passIndex, passCount, textureNames,
                 out.parameters, warnings, out.fragment, out.error)) {
                 return false;
         }
