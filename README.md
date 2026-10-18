@@ -1,5 +1,8 @@
 # libslang-vk
 
+<img width="1280" height="971" alt="image" src="https://github.com/user-attachments/assets/1442876b-4c29-40d3-9771-946f0619300e" />
+
+
 [![ci](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml/badge.svg)](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml)
 
 Parse, translate and compile **libretro slang shader presets** (`.slangp` /
