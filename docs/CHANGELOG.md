@@ -97,15 +97,51 @@ tags yet). Format adapted from
   (`misc/print-resolution`, visually confirmed) — with Session 7's
   numeric/mipmap results, every F2 feedback form is now
   hardware-covered. One real finding: `test/format.slangp` fails to
-  load on the fork present path (`pass pipeline: VK_ERROR_UNKNOWN`) —
-  the swapchain path builds the final pass's pipeline against its own
-  `R8G8B8A8_SRGB` FBO format, which offscreen never exercises; the
-  fallback contract held (second failure class). Isolation kit shipped
-  to the maintainer; diagnosis pending. Library-side: pass/present
-  pipeline and render-pass errors now name the pass index, shader path
-  and target format (`pass 2 'shaders/fmt_srgb.slang': pass pipeline
+  load on the fork (`pass pipeline: VK_ERROR_UNKNOWN`) —
+  **[attribution corrected in Session 9: the failing preset was the
+  upstream corpus file (2-pass R32_UINT round-trip), not the 3-pass
+  field fixture the golden suite covers; the root cause is the
+  integer-sampler rewrite gap under Fixed below — not the present
+  path, sRGB, or final-FBO formats]**. The fallback contract held
+  (second failure class). Isolation kit shipped to the maintainer;
+  diagnosis closed in Session 9. Library-side: pass/present pipeline
+  and render-pass errors now name the pass index, shader path and
+  target format (`pass 2 'shaders/fmt_srgb.slang': pass pipeline
   (format R8G8B8A8_SRGB): VkResult …`) via a new `FormatShortName`
   helper, so hardware logs identify the failing pipeline directly.
+- **Integer FBO round-trip golden (`format-uint`, suite entry 21).**
+  Verbatim port of the upstream corpus `test/format.slangp` pair at
+  the pinned revision (`e1d75632`): pass 0 packs the testcard into an
+  R32_UINT FBO (`uint` fragment output), pass 1 decodes through
+  `usampler2D` + `texelFetch` + `unpackUnorm4x8` — the exact shape the
+  fork field log exposed and the fix below targets. Byte-exact on
+  llvmpipe; the RX 560's first golden run predates this entry and
+  covers the original 20. 12 new `test_slang_translate` assertions pin
+  the rewrite behavior (re-home + type preservation + orphan-drop
+  parity for `usampler2D`/`isampler2D`).
+
+### Fixed
+
+- **Integer samplers never joined the canonical descriptor layout**
+  (PROVENANCE Session 9). `RewriteSamplers` re-homed only float
+  `sampler2D` declarations — the regex could not match
+  `usampler2D`/`isampler2D`, and the scan index deliberately skipped
+  them — so an explicit source-level `layout(set = 0, binding = 1)` on
+  an integer sampler reached SPIR-V unmodified while the chain's
+  canonical pipeline layout provides an empty set 0 and hosts textures
+  at set 2. Observed symptoms: llvmpipe segfaults the host at draw;
+  the AMD Windows driver (RX 560, fork field log Session 8) returns
+  `VK_ERROR_UNKNOWN` from `vkCreateGraphicsPipelines` when it validates
+  the shader-layout interface. The entire 2,658-preset corpus contains
+  exactly one integer-sampler file — upstream `test/decode-format.slang`
+  — which is also the only file the corpus-wide no-regression gate
+  needed to prove safe (gate PASSED at the pinned revision; MBZ
+  MEGATRON + crt-royale spot-checked). Fix: the rewrite regex matches
+  `(?:u|i)?sampler2D` and re-emits the matched type at the canonical
+  set/binding; the declaration scans and directive classifier treat
+  integer samplers on par with float ones; `stage.textures` records
+  them identically (combined-image-sampler descriptors are
+  type-agnostic).
 
 ### Planned
 

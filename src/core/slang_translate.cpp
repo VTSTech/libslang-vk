@@ -789,11 +789,19 @@ bool IsSamplerDeclared(const std::string &glsl, const std::string &name)
 {
         size_t pos = 0;
         while ((pos = glsl.find("sampler2D", pos)) != std::string::npos) {
-                // Skip isampler2D/usampler2D (identifier character right before).
-                if (pos > 0
-                    && (std::isalnum(static_cast<unsigned char>(glsl[pos - 1])) || glsl[pos - 1] == '_')) {
-                        pos += 9;
-                        continue;
+                // usampler2D/isampler2D count as declarations too; skip only
+                // non-type identifier characters right before the keyword
+                // (parity with BuildSamplerScanIndex and the rewrite regex).
+                if (pos > 0) {
+                        const bool wordBefore = std::isalnum(static_cast<unsigned char>(glsl[pos - 1])) != 0
+                            || glsl[pos - 1] == '_';
+                        const bool intPrefix = (glsl[pos - 1] == 'u' || glsl[pos - 1] == 'i')
+                            && (pos < 2
+                                || (!std::isalnum(static_cast<unsigned char>(glsl[pos - 2])) && glsl[pos - 2] != '_'));
+                        if (wordBefore && !intPrefix) {
+                                pos += 9;
+                                continue;
+                        }
                 }
                 size_t after = pos + 9;
                 // A plain sampler2D declaration requires whitespace between the
@@ -838,7 +846,7 @@ bool IsSamplerNameUsed(const std::string &glsl, const std::string &name)
                         while (probe > 0 && (glsl[probe - 1] == ' ' || glsl[probe - 1] == '\t'))
                                 --probe;
                         bool directive = false;
-                        for (const char *kw : { "sampler2D", "#define" }) {
+                        for (const char *kw : { "sampler2D", "usampler2D", "isampler2D", "#define" }) {
                                 const size_t len = std::strlen(kw);
                                 if (probe >= len && glsl.compare(probe - len, len, kw) == 0
                                     && (probe - len == 0
@@ -965,11 +973,23 @@ SamplerScanIndex BuildSamplerScanIndex(const std::string &glsl)
         {
                 size_t pos = 0;
                 while ((pos = glsl.find("sampler2D", pos)) != std::string::npos) {
-                        // Skip isampler2D/usampler2D (identifier character right before).
-                        if (pos > 0
-                            && (std::isalnum(static_cast<unsigned char>(glsl[pos - 1])) != 0 || glsl[pos - 1] == '_')) {
-                                pos += 9;
-                                continue;
+                        // usampler2D/isampler2D count as declarations too (upstream
+                        // test/format.slangp binds its R32_UINT round-trip through
+                        // usampler2D); skip only when a NON-type word char precedes
+                        // (sampler2DArray's "r", other identifiers embedding the
+                        // keyword). The name shape after the keyword is shared, so
+                        // the walk below is unchanged.
+                        if (pos > 0) {
+                                const bool wordBefore = std::isalnum(static_cast<unsigned char>(glsl[pos - 1])) != 0
+                                    || glsl[pos - 1] == '_';
+                                const bool intPrefix = (glsl[pos - 1] == 'u' || glsl[pos - 1] == 'i')
+                                    && (pos < 2
+                                        || (!std::isalnum(static_cast<unsigned char>(glsl[pos - 2]))
+                                               && glsl[pos - 2] != '_'));
+                                if (wordBefore && !intPrefix) {
+                                        pos += 9;
+                                        continue;
+                                }
                         }
                         size_t after = pos + 9;
                         // A plain sampler2D declaration requires whitespace between the
@@ -1014,7 +1034,7 @@ SamplerScanIndex BuildSamplerScanIndex(const std::string &glsl)
                 while (probe > 0 && (glsl[probe - 1] == ' ' || glsl[probe - 1] == '\t'))
                         --probe;
                 bool directive = false;
-                for (const char *kw : { "sampler2D", "#define" }) {
+                for (const char *kw : { "sampler2D", "usampler2D", "isampler2D", "#define" }) {
                         const size_t len = std::strlen(kw);
                         if (probe >= len && glsl.compare(probe - len, len, kw) == 0
                             && (probe - len == 0
@@ -1142,7 +1162,7 @@ bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
     std::vector<std::string> &warnings, std::string &error)
 {
         static const std::regex samplerRe(
-            R"(^(\s*)(layout\s*\([^)]*\)\s*)?uniform\s+((?:lowp\s+|mediump\s+|highp\s+)?)sampler2D\s+(.+?)\s*;\s*$)");
+            R"(^(\s*)(layout\s*\([^)]*\)\s*)?uniform\s+((?:lowp\s+|mediump\s+|highp\s+)?)((?:u|i)?sampler2D)\s+(.+?)\s*;\s*$)");
         std::istringstream lines(glsl);
         std::string line;
         std::string out;
@@ -1176,7 +1196,8 @@ bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
                         continue;
                 }
                 const std::string precision = match[3].str();
-                std::string namesText = match[4].str();
+                const std::string samplerType = match[4].str();
+                std::string namesText = match[5].str();
                 // Split on commas: "A, B" (arrays are not supported).
                 std::vector<std::string> names;
                 std::istringstream nameStream(namesText);
@@ -1331,7 +1352,7 @@ bool RewriteSamplers(std::string &glsl, bool isVertex, StageTranslation &stage,
                                     "' is declared more than once in the stage (a stage-guarded header was re-included); keeping the first binding"));
                                 continue;
                         }
-                        out += StrCat("layout(set = ", texSet, ", binding = ", binding, ") uniform ", precision, "sampler2D ", name, ";\n");
+                        out += StrCat("layout(set = ", texSet, ", binding = ", binding, ") uniform ", precision, samplerType, " ", name, ";\n");
                         stage.textures.push_back({ name, binding });
                         ++binding;
                 }

@@ -40,6 +40,7 @@ runner4/rot.slangp	rot.png
 field-presets/test/feedback.slangp	feedback.png
 field-presets/test/history.slangp	history.png
 field-presets/test/format.slangp	format.png
+field-presets/test/format-uint.slangp	format-uint.png
 field-presets/test/r4-include.slangp	r4_include.png
 presets/demo-bright.slangp	demo_bright.png
 #

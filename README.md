@@ -344,9 +344,10 @@ performance regressions. Both modes skip cleanly (exit 0) when no Vulkan
 device is available, like `corpus_sweep`.
 
 **Golden images** render every preset listed in
-[`tests/golden/manifest.txt`](tests/golden/manifest.txt) — 20 bundled
+[`tests/golden/manifest.txt`](tests/golden/manifest.txt) — 21 bundled
 fixtures covering every chain semantic (blit, multi-pass, feedback
-ping-pong, history ring, mipmap refill, FBO formats, push-fragment
+ping-pong, history ring, mipmap refill, FBO formats including the
+upstream R32_UINT integer pack/unpack round-trip, push-fragment
 uniforms, parameters, size uniforms, smoothness qualifiers, named / `User#`
 LUTs, LUT mipmaps, LUT size, rotation, include composition, the two demo
 presets) — from a deterministic procedural testcard (320×240) at a fixed

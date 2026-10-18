@@ -1,0 +1,18 @@
+// tests/data/field-presets/test/format-uint.slangp — Session 9 field
+// regression (verbatim port of upstream corpus test/format.slangp at the
+// pinned revision, e1d75632): an R32_UINT pack/unpack round-trip. Pass 0
+// writes a packed uint into an R32_UINT FBO; pass 1 reads it back through
+// usampler2D + texelFetch + unpackUnorm4x8. Before the Session 9 sampler
+// rewrite fix, the usampler2D declaration kept its source-level set/binding,
+// desyncing the SPIR-V from the chain's canonical layout (empty set 0) —
+// llvmpipe segfaulted at draw, the AMD Windows driver returned
+// VK_ERROR_UNKNOWN at pipeline creation (fork field log Session 8).
+// Integer-FBO formats must render byte-stably; the golden compares the
+// decoded 0.3-scaled testcard.
+shaders = 2
+shader0 = shaders/format_uint.slang
+shader1 = shaders/decode_format_uint.slang
+scale_type0 = source
+scale0 = 1.0
+filter_linear0 = false
+filter_linear1 = false

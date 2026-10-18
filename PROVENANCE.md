@@ -739,31 +739,134 @@ present-path format bug found.** Two host runs through the fork:
   frames — fork-side confirmation of Session 7's golden result),
   `test/frame_count.slangp` (227), `test/history.slangp` (281),
   `misc/pixel-weave-sync.slangp` (276, clean shutdown).
-- **New failure — `test/format.slangp` fails to LOAD on the present
-  path** (`preset load failed (format): pass pipeline: VkResult
-  VK_ERROR_UNKNOWN`, 49 ms). The same preset on the same GPU passed the
-  golden compare and the perf runs earlier the same day (Sessions 7 +
-  perf-rx560) — but those are **offscreen**, where the final pass
-  renders into the host target (RGBA8) and the `#pragma format` on the
-  final pass is bypassed. The fork's swapchain path renders the final
-  pass into its OWN FBO (`R8G8B8A8_SRGB` here), and pipeline creation
-  against that render-pass format fails on this driver at chain load
-  (the create-time loop builds one pipeline per pass; the final pass's
-  default format is `pass.targetFormat` when the host passes
-  `outputFormat = UNDEFINED`, the swapchain-mode contract). Session 2
-  evidence (`crt-maximus-royale`, `srgb_framebuffer1`, build
-  `338827ff4`) shows an sRGB intermediate pipeline loading on an older
-  build, so the failing variable is not simply "sRGB exists in the
-  chain". Isolation kit shipped to the maintainer (`diag/*.slangp`, 6
-  presets sharing one trivial shader; matrix separates final-vs-
-  intermediate position, sRGB-vs-float families, and pragma-vs-key
-  forms — README documents the decision tree). The fallback contract
-  held for the second time and for a second failure class (Vulkan
-  pipeline error this time, not slang parse): clean session disable,
-  window recreate, error on the OSD, full recovery next session.
+- **New failure — `test/format.slangp` fails to LOAD on the fork**
+  (`preset load failed (format): pass pipeline: VkResult
+  VK_ERROR_UNKNOWN`, 49 ms). The fallback contract held for the second
+  time and for a second failure class (Vulkan pipeline error this
+  time, not slang parse): clean session disable, window recreate,
+  error on the OSD, full recovery next session. **[Root-cause
+  attribution CORRECTED in Session 9.]** The Session 8 analysis below
+  read the failure as the present-path final-pass own-FBO format
+  problem and leaned on a golden-parity claim ("the same preset
+  passed the golden compare and the perf runs earlier the same day").
+  That parity was an illusion: the golden entry is
+  `tests/data/field-presets/test/format.slangp` — our own 3-pass
+  R16F/RGBA16F/sRGB fixture — while the fork ran the **upstream corpus
+  `test/format.slangp`** (2 passes: R32_UINT pack → `usampler2D`
+  decode), a different file with the same name. The maintainer's
+  `test/` folder is the corpus `test/` folder (every Session 8 `test/`
+  preset matches a corpus `test/` ledger row), so the golden suite
+  never covered the file that failed. The original analysis, kept for
+  the audit trail: the fork's swapchain path was thought to build the
+  final pass pipeline against its own `R8G8B8A8_SRGB` FBO (the
+  create-time loop's `pass.targetFormat` when the host passes
+  `outputFormat = UNDEFINED`), with Session 2 evidence
+  (`crt-maximus-royale`, `srgb_framebuffer1`, build `338827ff4`)
+  ruling out "sRGB exists". An isolation kit (`diag/*.slangp`, 6
+  presets sharing one trivial blit) shipped against that hypothesis.
 - **Library follow-up shipped the same day:** pass/present-pipeline and
   render-pass errors now carry the pass index, shader path and target
   format — e.g. `pass 2 'shaders/fmt_srgb.slang': pass pipeline (format
   R8G8B8A8_SRGB): VkResult VK_ERROR_UNKNOWN` — so the next hardware log
   names the exact failing pipeline without a kit (`FormatShortName`
   helper in `chain.cpp`; 26/26 + golden 20/20 re-verified).
+
+**Session 9 (2026-10-19, Windows, RX 560, fork exe `6dc2a8713` — the
+first build carrying the Session 8 sharper errors; root cause found
+locally on lavapipe the same day) — the diag kit reads "all load", the
+maintainer's challenge re-opens the attribution, and the real cause is
+a library bug with a local segfault repro: integer samplers never
+joined the canonical descriptor layout.**
+
+- **Diag kit round 1 on the fork: all 6 load and render.** One
+  session, six hot-swaps on a single device (device created once,
+  492 ms): `diag/control`, `final-r16f`, `final-rgba16f`,
+  `final-srgb-key`, `final-srgb`, `mid-srgb`, plus `misc/relief` and
+  `misc/accessibility_mods` — each load answered by the OSD
+  (`Shader: <name> (Vulkan)`), 1,734 frames total, 0 skipped,
+  ~57–60 fps steady, clean shutdown at 33.6 s. Per the kit README's
+  decision tree this is the "All load" branch, and it eliminates,
+  individually and on the fork present path: shader content (the kit
+  blits are layout/body-identical to the fmt shaders), the sRGB final
+  own-FBO pipeline (1-pass), R16F and RGBA16F final own-FBO pipelines
+  (1-pass), the `srgb_framebuffer0 = true` key form, and the sRGB
+  intermediate in a 2-pass chain (no regression since Session 2).
+  New hardware datapoint on top: six consecutive preset hot-swaps at
+  22–44 ms per load with zero device re-creates — the swap-path
+  Reinit cycle is robust on this driver.
+- **Maintainer challenge, in-session: "test/format is not supposed to
+  load — one of the known non-library errors in the 21 failed set?"**
+  Direct answer: no — the pinned ledger marks `test/format.slangp`
+  LOAD, and the only `test/` entry among the 21 pinned failures is
+  `test/feedback-noncausal.slangp` (the intentional causality negative
+  the fallback drill reuses). But the challenge surfaced the real
+  provenance error: there are TWO `format.slangp` files. The fork's
+  `test/` folder is the corpus `test/` folder (Session 8's
+  `pragma-name`/`frame_count`/`history`/`feedback` presets all match
+  corpus `test/` rows), so the failing preset was the **upstream**
+  file — our 3-pass field fixture only shares its name. Session 8's
+  golden-parity claim and the present-path framing are retracted
+  (correction applied in the Session 8 block above).
+- **What upstream `test/format.slangp` actually is** (fetched at the
+  pinned revision `e1d75632`): pass 0 `format.slang` — `#pragma format
+  R32_UINT`, fragment outputs `uint FragColor` via `packUnorm4x8`;
+  pass 1 `decode-format.slang` — reads the intermediate through an
+  explicit-layout `usampler2D` (`layout(set = 0, binding = 1)`) +
+  `texelFetch` + `unpackUnorm4x8`. An integer-FBO pack/unpack
+  round-trip feature test. Nothing in this repo had ever EXECUTED it:
+  the ledger verdict is compile-only, and no golden/perf entry covers
+  the upstream file — the fork was the first runner to try.
+- **Local repro on lavapipe: host segfault.** `corpus_sweep --render`
+  over a verbatim reconstruction of the upstream preset crashes the
+  host with SIGSEGV at draw (compile-only passes; binary sanity proven
+  by re-rendering the 6-preset diag kit 6/6 in the same session).
+  Isolation variants render fine — the R32_UINT write path with no
+  downstream read, and even a float `sampler2D` reading the R32_UINT
+  view — the crash requires the `usampler2D` pass.
+- **Root cause (library bug, fixed this session).**
+  `RewriteSamplers` re-homes only float `sampler2D` declarations: the
+  rewrite regex requires `uniform\s+…sampler2D` and cannot match
+  `usampler2D`/`isampler2D`, and the scan index deliberately skipped
+  integer samplers. The upstream pass's explicit `layout(set = 0,
+  binding = 1)` therefore reached glslang unmodified — SPIR-V expecting
+  the combined image sampler at set 0/binding 1 — while the chain's
+  canonical pipeline layout provides an **empty set 0** and hosts the
+  texture at set 2. llvmpipe dereferences the unmapped descriptor at
+  draw (host segfault); the AMD Windows driver validates the
+  shader-layout interface at pipeline creation and returns
+  `VK_ERROR_UNKNOWN` — the fork's Session 8 error, matching in class
+  and trigger. Neither the present path, nor sRGB, nor final-FBO
+  formats were involved; offscreen would have failed identically.
+- **Fix (`src/core/slang_translate.cpp`):** the rewrite regex now
+  matches `(?:u|i)?sampler2D` and re-emits the matched type at the
+  canonical set/binding (precision qualifiers preserved);
+  `IsSamplerDeclared` and `BuildSamplerScanIndex` treat integer
+  samplers as declarations (u/i-prefix accepted only with a word
+  boundary before it — `sampler2DArray` still excluded); the directive
+  classifier keyword lists gain `usampler2D`/`isampler2D` so a
+  declaration no longer counts as a "use" of its own name;
+  `stage.textures` records integer samplers exactly like float ones
+  (combined-image-sampler descriptors are type-agnostic — the image
+  view format carries the integer-ness).
+- **Evidence chain:** the verbatim upstream preset and the pinned
+  corpus tree itself both render on lavapipe post-fix (corpus `test/`
+  root: 5 loaded / 5 rendered, `feedback-noncausal` rejected exactly
+  as pinned); 12 new unit-test assertions in `test_slang_translate`
+  (usampler round-trip re-home, isampler tap, orphan-drop parity, type
+  preservation, source-level layout removal); the golden suite gains
+  the round-trip as entry 21 (`field-presets/test/format-uint.slangp`
+  + verbatim ported shaders, byte-exact on llvmpipe, 21/21 PASS);
+  ctest 26/26; drill 7/7; diag kit 6/6 re-rendered; corpus
+  no-regression gate PASSED at the pinned revision (re-fetched by SHA)
+  with a decisive blast-radius argument: the entire 2,658-preset
+  corpus contains exactly ONE integer-sampler file — the exposing
+  preset — gated directly alongside MBZ MEGATRON (43 passes) and
+  crt-royale spot checks (3 loaded, 0 regressions).
+- What survives from Session 8 independent of the wrong hypothesis:
+  the diag kit's six present-path format results (sRGB/R16F/RGBA16F
+  final own-FBO pipelines and the sRGB intermediate are all
+  hardware-proven loadable) and the hot-swap robustness datapoint.
+  The `diag/` kit stays with the maintainer as a useful
+  format-isolation set; the round-2 shape matrix it was building
+  toward is unnecessary — the failure is fully explained and fixed
+  library-side.

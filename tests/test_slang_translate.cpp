@@ -171,6 +171,73 @@ constexpr const char *kDeadGateLiveSamplerSlang =
     "#endif\n"
     "}\n";
 
+// Session 9 field regression (upstream corpus test/format.slangp): integer
+// samplers. The upstream preset round-trips through an R32_UINT FBO — pass 0
+// packs RGBA into a uint (uint FragColor), pass 1 reads it back via
+// usampler2D + texelFetch + unpackUnorm4x8, with the sampler carrying an
+// EXPLICIT source-level layout. RewriteSamplers used to skip integer samplers
+// entirely, so that explicit set/binding reached glslang while the chain's
+// canonical pipeline layout provides an empty set 0: llvmpipe segfaulted at
+// draw and the AMD Windows driver returned VK_ERROR_UNKNOWN at pipeline
+// creation (the fork field log's "test/format fails to load"). The rewrite
+// must re-home integer samplers into the texture set and preserve their type.
+constexpr const char *kUintSamplerSlang =
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "layout(location = 0) in vec2 vTexCoord;\n"
+    "layout(location = 0) out uint fragColor;\n"
+    "layout(set = 0, binding = 1) uniform usampler2D Source;\n"
+    "void main(void)\n"
+    "{\n"
+    "    fragColor = packUnorm4x8(texture(Source, vTexCoord));\n"
+    "}\n";
+
+constexpr const char *kIsamplerSlang =
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "layout(location = 0) in vec2 vTexCoord;\n"
+    "layout(location = 0) out vec4 fragColor;\n"
+    "layout(set = 0, binding = 3) uniform isampler2D Tint;\n"
+    "void main(void)\n"
+    "{\n"
+    "    fragColor = vec4(float(texelFetch(Tint, ivec2(vTexCoord * vec2(64.0)), 0).r));\n"
+    "}\n";
+
+// Integer-sampler orphan parity: a never-sampled usampler2D with an unknown
+// name must drop with a warning exactly like the float path (the scan index
+// feeds the same dead/orphan resolution).
+constexpr const char *kDeadUintSamplerSlang =
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "uniform usampler2D DeadUintPass;\n"
+    "layout(location = 0) in vec2 vTexCoord;\n"
+    "layout(location = 0) out vec4 fragColor;\n"
+    "void main(void)\n"
+    "{\n"
+    "    fragColor = vec4(0.25, 0.5, 0.75, 1.0);\n"
+    "}\n";
+
 } // namespace
 
 int main()
@@ -319,6 +386,81 @@ int main()
                 Check(gateFails
                         && gated.error.find("unknown texture reference 'LiveGatePass'") != std::string::npos,
                     "dead code: live-conditional unknown sampler still hard-fails");
+        }
+
+        // Integer samplers (Session 9 field regression): the rewrite must
+        // re-home usampler2D/isampler2D declarations into the texture set
+        // (set 2) with the integer type preserved, removing any source-level
+        // set/binding so the SPIR-V matches the chain's canonical layout.
+        {
+                const std::filesystem::path uintShader = root / "uint_roundtrip.slang";
+                {
+                        std::ofstream stream(uintShader, std::ios::binary | std::ios::trunc);
+                        stream << kUintSamplerSlang;
+                }
+                SlangTranslation uintPass;
+                const bool uintOk = TranslateSlang(uintShader.string(), /*knownTextureNames=*/{}, 1, 2, uintPass);
+                Check(uintOk, "uint sampler: usampler2D round-trip pass translates");
+                if (!uintOk) {
+                        std::printf("  error: %s\n", uintPass.error.c_str());
+                } else {
+                        bool bound = false;
+                        for (const TextureRef &ref : uintPass.fragment.textures)
+                                if (ref.name == "Source" && ref.binding == 0)
+                                        bound = true;
+                        Check(bound, "uint sampler: Source bound at texture-set binding 0");
+                        Check(uintPass.fragment.glsl.find(
+                                  "layout(set = 2, binding = 0) uniform usampler2D Source;")
+                                  != std::string::npos,
+                            "uint sampler: usampler2D re-homed with type preserved");
+                        Check(uintPass.fragment.glsl.find("set = 0, binding = 1") == std::string::npos,
+                            "uint sampler: source-level set/binding removed");
+                }
+
+                const std::filesystem::path intShader = root / "isampler_tap.slang";
+                {
+                        std::ofstream stream(intShader, std::ios::binary | std::ios::trunc);
+                        stream << kIsamplerSlang;
+                }
+                SlangTranslation intPass;
+                const bool intOk = TranslateSlang(intShader.string(), /*knownTextureNames=*/{"tint"}, 1, 2, intPass);
+                Check(intOk, "int sampler: isampler2D tap translates against the supplied name");
+                if (!intOk) {
+                        std::printf("  error: %s\n", intPass.error.c_str());
+                } else {
+                        bool bound = false;
+                        for (const TextureRef &ref : intPass.fragment.textures)
+                                if (ref.name == "Tint" && ref.binding == 0)
+                                        bound = true;
+                        Check(bound, "int sampler: Tint bound at texture-set binding 0");
+                        Check(intPass.fragment.glsl.find(
+                                  "layout(set = 2, binding = 0) uniform isampler2D Tint;")
+                                  != std::string::npos,
+                            "int sampler: isampler2D re-homed with type preserved");
+                }
+
+                const std::filesystem::path deadUintShader = root / "dead_uint_sampler.slang";
+                {
+                        std::ofstream stream(deadUintShader, std::ios::binary | std::ios::trunc);
+                        stream << kDeadUintSamplerSlang;
+                }
+                SlangTranslation deadUint;
+                const bool deadUintOk = TranslateSlang(deadUintShader.string(), /*knownTextureNames=*/{}, 1, 2, deadUint);
+                Check(deadUintOk, "uint sampler: never-sampled unknown usampler2D orphan translates");
+                if (!deadUintOk) {
+                        std::printf("  error: %s\n", deadUint.error.c_str());
+                } else {
+                        Check(deadUint.fragment.textures.empty(),
+                            "uint sampler: orphan usampler2D emits no binding");
+                        bool orphanDrop = false;
+                        for (const std::string &warning : deadUint.warnings)
+                                if (warning.find("DeadUintPass") != std::string::npos
+                                        && warning.find("never sampled") != std::string::npos)
+                                        orphanDrop = true;
+                        Check(orphanDrop, "uint sampler: orphan usampler2D dropped with a warning");
+                        Check(deadUint.fragment.glsl.find("usampler2D DeadUintPass") == std::string::npos,
+                            "uint sampler: orphan usampler2D declaration absent from the GLSL");
+                }
         }
 
         for (const std::string &warning : translation.warnings)
