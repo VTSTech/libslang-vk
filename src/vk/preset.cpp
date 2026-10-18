@@ -106,6 +106,21 @@ auto Preset::load(Device &device, const std::filesystem::path &slangp, const Pre
         for (size_t i = 0; i < impl.parsed.textures.size(); ++i)
                 knownTextureNames.insert("User" + std::to_string(i));
 
+        // #pragma name (SPEC 5.3): the pass's other name. Later passes may tap
+        // its output through it — plain (this frame) or with a "Feedback" suffix
+        // (the pass's previous-frame output; crt-yah's phosphor pass taps its
+        // own PhosphorPassFeedback for persistence) — and <name>Size UBO members
+        // follow the same lookup. The chain resolves pragma-name bindings and
+        // double-buffers feedback owners at render time; seeding the universe
+        // here lets the translator admit the declarations instead of failing
+        // with "unknown texture reference". Scan failures stay silent: the
+        // per-pass translation reports the real error (missing file, include
+        // escape, ...) for that pass.
+        for (const core::PassDef &pass : impl.parsed.passes) {
+                const std::string shaderPath = core::ResolvePresetFilePath(impl.parsed.dir, pass.shaderPath);
+                core::CollectSlangPragmaNames(shaderPath, knownTextureNames);
+        }
+
         // 2. Per pass: translate to stage GLSL, compile to SPIR-V.
         const int passCount = static_cast<int>(impl.parsed.passes.size());
         impl.passDefs = impl.parsed.passes;

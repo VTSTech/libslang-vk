@@ -1569,5 +1569,38 @@ bool TranslateSlang(const std::string &shaderPath, const std::unordered_set<std:
         }
 }
 
+bool CollectSlangPragmaNames(const std::string &shaderPath, std::unordered_set<std::string> &out)
+{
+        // Same exception contract as TranslateSlang: any escape becomes a soft
+        // false, never a terminating process. Callers ignore scan failures and
+        // let the real translation surface the load error for the pass.
+        try {
+                // Resolve includes for parity with TranslateSlang: the scan must
+                // see exactly the text translation sees (same include-once per
+                // stage bucket), so a `#pragma name` shipped through an include
+                // is not missed either.
+                int stage = 0; // Mirrors SplitStages: 0 shared, 1 vertex, 2 fragment.
+                std::set<std::string> visited[3];
+                std::vector<std::string> active;
+                std::string merged;
+                std::string error;
+                if (!ResolveIncludes(shaderPath, 0, stage, visited, active, merged, error))
+                        return false;
+                // Identical shape to ExtractPragmas' nameRe: one identifier,
+                // sscanf-style strict line match.
+                static const std::regex nameRe(R"(^\s*#pragma\s+name\s+(\w+)\s*$)");
+                std::istringstream lines(merged);
+                std::string line;
+                while (std::getline(lines, line)) {
+                        std::smatch match;
+                        if (std::regex_match(line, match, nameRe) && !match[1].str().empty())
+                                out.insert(match[1].str());
+                }
+                return true;
+        } catch (...) {
+                return false;
+        }
+}
+
 } // namespace preset
 } // namespace slv

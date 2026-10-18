@@ -110,5 +110,29 @@ SLANGVK_API bool TranslateSlang(const std::string &shaderPath, const std::unorde
     int passIndex, int passCount, SlangTranslation &out,
     const std::vector<ParamInfo> &presetParameters = {});
 
+/**
+ * @brief Collects every `#pragma name` reachable from one pass shader
+ * (top-level file plus its #include graph, with the same include-once
+ * semantics TranslateSlang applies).
+ *
+ * Hosts feed the result into the knownTextureNames set they pass to
+ * TranslateSlang: besides preset aliases, a pass is also named by its
+ * shader's `#pragma name`, and later passes may tap that pass's output
+ * through the name — plain (this frame) or with a "Feedback" suffix (the
+ * pass's previous-frame output; SPEC 5.3, e.g. crt-yah's phosphor pass
+ * taps its own "PhosphorPassFeedback" for persistence). The Vulkan chain
+ * resolves such bindings at render time; this scan is what lets the
+ * translator admit the declarations instead of failing with "unknown
+ * texture reference".
+ *
+ * @param shaderPath Absolute path of the pass's .slang file.
+ * @param out Set to insert collected names into (raw declared spellings;
+ *   TranslateSlang accepts any case).
+ * @return false when the source cannot be read or its include graph fails
+ *   the include policy. Soft-fail: callers should ignore it and let the
+ *   real translation surface the load error for that pass.
+ */
+SLANGVK_API bool CollectSlangPragmaNames(const std::string &shaderPath, std::unordered_set<std::string> &out);
+
 } // namespace preset
 } // namespace slv

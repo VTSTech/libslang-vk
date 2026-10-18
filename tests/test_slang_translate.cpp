@@ -72,6 +72,32 @@ constexpr const char *kAliasTapSlang =
     "    fragColor = texture(Filtered, vTexCoord);\n"
     "}\n";
 
+// Field regression (crt-yah phosphor persistence): a pass names itself via
+// `#pragma name` (the preset carries no aliasN) and taps its own
+// previous-frame output through the Feedback-suffixed form. The pragma name
+// must resolve like an alias: CollectSlangPragmaNames feeds the universe,
+// the rewrite strips the suffix for the membership check while keeping the
+// full name on the emitted binding, and the chain binds the previous-frame
+// texture at render time.
+constexpr const char *kFeedbackTapSlang =
+    "#pragma name PhosphorPass\n"
+    "#pragma stage vertex\n"
+    "layout(location = 0) in vec2 VertexCoord;\n"
+    "layout(location = 0) out vec2 vTexCoord;\n"
+    "void main(void)\n"
+    "{\n"
+    "    gl_Position = vec4(VertexCoord, 0.0, 1.0);\n"
+    "    vTexCoord = VertexCoord;\n"
+    "}\n"
+    "#pragma stage fragment\n"
+    "uniform sampler2D PhosphorPassFeedback;\n"
+    "in vec2 vTexCoord;\n"
+    "layout(location = 0) out vec4 fragColor;\n"
+    "void main(void)\n"
+    "{\n"
+    "    fragColor = texture(PhosphorPassFeedback, vTexCoord);\n"
+    "}\n";
+
 } // namespace
 
 int main()
@@ -89,6 +115,11 @@ int main()
         {
                 std::ofstream stream(aliasShader, std::ios::binary | std::ios::trunc);
                 stream << kAliasTapSlang;
+        }
+        const std::filesystem::path feedbackShader = root / "feedback_tap.slang";
+        {
+                std::ofstream stream(feedbackShader, std::ios::binary | std::ios::trunc);
+                stream << kFeedbackTapSlang;
         }
 
         SlangTranslation translation;
@@ -135,6 +166,36 @@ int main()
                 Check(unknownFails
                         && unknownTap.error.find("unknown texture reference") != std::string::npos,
                     "alias tap: unsupplied sampled name still hard-fails");
+        }
+
+        // Pragma-name universe + Feedback-suffix tap (crt-yah): the host seeds
+        // the name set from CollectSlangPragmaNames exactly like Preset::load;
+        // the rewrite must admit "PhosphorPassFeedback" against a universe
+        // that only holds the pragma spelling, in any case.
+        {
+                std::unordered_set<std::string> collected;
+                const bool scanned = CollectSlangPragmaNames(feedbackShader.string(), collected);
+                Check(scanned && collected.count("PhosphorPass") == 1,
+                    "pragma tap: CollectSlangPragmaNames finds the pass name");
+
+                SlangTranslation feedbackTap;
+                const bool seeded = TranslateSlang(feedbackShader.string(), collected, 1, 2, feedbackTap);
+                bool bound = false;
+                for (const TextureRef &ref : feedbackTap.fragment.textures)
+                        if (ref.name == "PhosphorPassFeedback")
+                                bound = true;
+                Check(seeded && bound && feedbackTap.fragment.glsl.find("set = 2") != std::string::npos,
+                    "pragma tap: PhosphorPassFeedback bound in the texture set");
+
+                SlangTranslation lowerTap;
+                const bool lowerCase = TranslateSlang(feedbackShader.string(), {"phosphorpass"}, 1, 2, lowerTap);
+                Check(lowerCase, "pragma tap: lower-cased pragma spelling resolves the Feedback tap");
+
+                SlangTranslation unknownTap;
+                const bool unknownFails = !TranslateSlang(feedbackShader.string(), {}, 1, 2, unknownTap);
+                Check(unknownFails
+                        && unknownTap.error.find("unknown texture reference") != std::string::npos,
+                    "pragma tap: unsupplied pragma name still hard-fails");
         }
 
         for (const std::string &warning : translation.warnings)
