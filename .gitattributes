@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Golden-kit text files are regenerated across OSes (--report writes CRLF on
+# Windows); pin LF so re-committed reports/budgets don't churn line endings
+tests/golden/*.txt text eol=lf

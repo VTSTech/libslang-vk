@@ -381,10 +381,19 @@ was not measured are tolerated (the corpus-ledger gate philosophy).
 is the format reference (5× measured + 5 ms floor, sandbox-informational);
 for your own GPU run `--report` there and set budgets from the measured
 means — 16.6 ms is the 60 fps ceiling, mean × 1.5 a pure regression guard.
+A committed real-GPU reference ships too:
+[`tests/golden/perf-rx560.txt`](tests/golden/perf-rx560.txt) (Radeon RX 560
+Series, Windows — every fixture 0.29–1.20 ms mean, 835–3,457 fps at
+640×480) with the derived regression-guard budgets
+[`tests/golden/budgets-rx560.txt`](tests/golden/budgets-rx560.txt)
+(`max(1.5 × mean, 1.0 ms)` — the floor absorbs cross-run jitter on the
+sub-0.5 ms fixtures; regenerate from a fresh `--report` after driver
+changes).
 
 ```sh
 ./build/examples/conformance perf tests/data examples --report my-gpu.txt
 ./build/examples/conformance perf tests/data examples --budgets tests/golden/budgets-lavapipe.txt
+./build/examples/conformance perf tests/data examples --budgets tests/golden/budgets-rx560.txt
 ```
 
 The golden compare and a light perf smoke (no budgets — sandbox timing

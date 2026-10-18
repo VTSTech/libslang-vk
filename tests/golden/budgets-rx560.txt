@@ -1,0 +1,38 @@
+# libslang-vk perf budget (conformance perf --budgets)
+# <preset-path> 	 <max-ms-per-frame>  (mean-of-timed-frames gate)
+#
+# Hardware regression-guard budgets derived from the committed reference
+# report perf-rx560.txt (Radeon RX 560 Series, Windows, 640x480 from
+# 320x240, warmup 3 / timed 20, generated 2026-10-18):
+#   budget = max(1.5 x measured-mean, 1.0 ms)
+# The 1.0 ms floor absorbs run-to-run jitter on the sub-0.5 ms fixtures
+# (the committed report measured each fixture twice via two roots; the
+# worst duplicate spread was ~49% on runner3/lut_user). Gate on the
+# mean of 20 timed frames: single-frame spikes up to 4x mean observed
+# (presets/demo-bright max 2.66 ms) and are NOT budget breaches.
+#
+# Regenerate on your GPU with:
+#   conformance perf <roots...> --report my-gpu.txt
+# then rebuild this file with budget = max(1.5 x mean, 1.0 ms), or
+# loosen per-line if a driver update shifts pacing. Not used by ctest:
+# CI/lavapipe keeps its own budgets-lavapipe.txt (5x/5 ms floor).
+field-presets/test/feedback.slangp	1.000
+field-presets/test/format.slangp	1.000
+field-presets/test/history.slangp	1.013
+field-presets/test/r4-include.slangp	1.000
+presets/demo-bright.slangp	1.000
+presets/demo-glow.slangp	1.000
+runner/blit.slangp	1.000
+runner/maxfbo.slangp	1.000
+runner/mip.slangp	1.795
+runner/param.slangp	1.000
+runner/pushfrag.slangp	1.000
+runner/sizeparam.slangp	1.000
+runner/smoothqual.slangp	1.000
+runner/twopass.slangp	1.000
+runner3/lut.slangp	1.000
+runner3/lut_mip.slangp	1.000
+runner3/lut_size.slangp	1.000
+runner3/lut_user.slangp	1.000
+runner4/blit.slangp	1.000
+runner4/rot.slangp	1.000

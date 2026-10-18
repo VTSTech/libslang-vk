@@ -48,6 +48,16 @@ tags yet). Format adapted from
   `example_conformance_perf` (suite now 25/25); the CI shader-demo
   artifacts bundle `conformance(.exe)` with the golden kit and fixture
   presets so the suite runs from the artifact.
+- **Hardware perf baseline (RX 560) + regression-guard budgets** — first
+  real-GPU numbers committed alongside the sandbox references:
+  `tests/golden/perf-rx560.txt` (Radeon RX 560 Series, Windows, 640×480
+  from 320×240, warmup 3 / timed 20; all 20 fixtures measured twice via two
+  roots — means 0.29–1.20 ms, 835–3,457 fps, every fixture ≥ 14× the 60 fps
+  bar) and `tests/golden/budgets-rx560.txt` derived from it
+  (`max(1.5 × mean, 1.0 ms)`; the duplicate-root runs put the tightest
+  cross-run headroom at 38%, and observed single-frame spikes up to 4.3×
+  mean stay invisible to the mean-of-20 gate). Opt-in on hardware —
+  ctest/CI keep `budgets-lavapipe.txt`.
 
 ### Planned
 
