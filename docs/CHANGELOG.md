@@ -90,6 +90,22 @@ tags yet). Format adapted from
   ~28% headroom over the measured envelope). `--update` + re-compare on
   the RX 560: 20/20 byte-exact. Committed goldens stay llvmpipe-
   generated; CI keeps its byte-exact baseline.
+- **Hardware sweep, first shortlist batch (RX 560, PROVENANCE Session 8)
+  + sharper pipeline errors.** Fork sessions verified the named
+  `MainPassFeedback` reader form (`test/pragma-name`, ~1,166 frames) and
+  the `TextGeneratePassFeedback` generate-and-cache feedback pattern
+  (`misc/print-resolution`, visually confirmed) — with Session 7's
+  numeric/mipmap results, every F2 feedback form is now
+  hardware-covered. One real finding: `test/format.slangp` fails to
+  load on the fork present path (`pass pipeline: VK_ERROR_UNKNOWN`) —
+  the swapchain path builds the final pass's pipeline against its own
+  `R8G8B8A8_SRGB` FBO format, which offscreen never exercises; the
+  fallback contract held (second failure class). Isolation kit shipped
+  to the maintainer; diagnosis pending. Library-side: pass/present
+  pipeline and render-pass errors now name the pass index, shader path
+  and target format (`pass 2 'shaders/fmt_srgb.slang': pass pipeline
+  (format R8G8B8A8_SRGB): VkResult …`) via a new `FormatShortName`
+  helper, so hardware logs identify the failing pipeline directly.
 
 ### Planned
 

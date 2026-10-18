@@ -717,3 +717,53 @@ hardware half of the F2 numeric (`PassFeedback0`) and F1
 `<name>Feedback` reader form, interactive live-parameter changes,
 resize/fullscreen toggle, VRAM-teardown soak, dGPU Linux run,
 validation layers enabled on hardware.
+
+**Session 8 (2026-10-19, Windows, RX 560, fork exe `996e5afcc`) — the
+sweep shortlist, first batch: named feedback verified, a real
+present-path format bug found.** Two host runs through the fork:
+
+- **Named feedback form verified.** `test/pragma-name.slangp` (the
+  `MainPassFeedback` reader — the corpus canary pair) loaded in 38 ms
+  and rendered ~1,166 frames across four heartbeats, 0 skipped. The
+  named `<Name>PassFeedback` form is now hardware-covered on both
+  halves (lib goldens + this run), closing the last open feedback item
+  from Session 7's still-open list.
+- **Generate-and-cache feedback pattern verified visually.**
+  `misc/print-resolution.slangp` (2 passes; `TextGeneratePassFeedback`
+  — a feedback texture that persists across frames to cache generated
+  text) loaded (2 passes, 260 frames); the maintainer confirmed the
+  expected output ("showed the current resolution in big yellow
+  letters"), which exercises feedback persistence + the aliased
+  generate pass end to end.
+- Also clean: `test/feedback.slangp` (numeric `PassFeedback0`, 280
+  frames — fork-side confirmation of Session 7's golden result),
+  `test/frame_count.slangp` (227), `test/history.slangp` (281),
+  `misc/pixel-weave-sync.slangp` (276, clean shutdown).
+- **New failure — `test/format.slangp` fails to LOAD on the present
+  path** (`preset load failed (format): pass pipeline: VkResult
+  VK_ERROR_UNKNOWN`, 49 ms). The same preset on the same GPU passed the
+  golden compare and the perf runs earlier the same day (Sessions 7 +
+  perf-rx560) — but those are **offscreen**, where the final pass
+  renders into the host target (RGBA8) and the `#pragma format` on the
+  final pass is bypassed. The fork's swapchain path renders the final
+  pass into its OWN FBO (`R8G8B8A8_SRGB` here), and pipeline creation
+  against that render-pass format fails on this driver at chain load
+  (the create-time loop builds one pipeline per pass; the final pass's
+  default format is `pass.targetFormat` when the host passes
+  `outputFormat = UNDEFINED`, the swapchain-mode contract). Session 2
+  evidence (`crt-maximus-royale`, `srgb_framebuffer1`, build
+  `338827ff4`) shows an sRGB intermediate pipeline loading on an older
+  build, so the failing variable is not simply "sRGB exists in the
+  chain". Isolation kit shipped to the maintainer (`diag/*.slangp`, 6
+  presets sharing one trivial shader; matrix separates final-vs-
+  intermediate position, sRGB-vs-float families, and pragma-vs-key
+  forms — README documents the decision tree). The fallback contract
+  held for the second time and for a second failure class (Vulkan
+  pipeline error this time, not slang parse): clean session disable,
+  window recreate, error on the OSD, full recovery next session.
+- **Library follow-up shipped the same day:** pass/present-pipeline and
+  render-pass errors now carry the pass index, shader path and target
+  format — e.g. `pass 2 'shaders/fmt_srgb.slang': pass pipeline (format
+  R8G8B8A8_SRGB): VkResult VK_ERROR_UNKNOWN` — so the next hardware log
+  names the exact failing pipeline without a kit (`FormatShortName`
+  helper in `chain.cpp`; 26/26 + golden 20/20 re-verified).

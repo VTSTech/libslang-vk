@@ -116,6 +116,38 @@ auto MapTargetFormat(const std::string &pragmaFormat, bool srgbFramebuffer, bool
         return VK_FORMAT_R8G8B8A8_UNORM;
 }
 
+/** @brief Short format name for diagnostics (error messages, logs). */
+auto FormatShortName(VkFormat format) -> std::string
+{
+        switch (format) {
+                case VK_FORMAT_R8_UNORM: return "R8_UNORM";
+                case VK_FORMAT_R8_SRGB: return "R8_SRGB";
+                case VK_FORMAT_R8G8_UINT: return "R8G8_UINT";
+                case VK_FORMAT_R8G8_SINT: return "R8G8_SINT";
+                case VK_FORMAT_R16_UNORM: return "R16_UNORM";
+                case VK_FORMAT_R16_SFLOAT: return "R16_SFLOAT";
+                case VK_FORMAT_R16G16_SFLOAT: return "R16G16_SFLOAT";
+                case VK_FORMAT_R16G16_UINT: return "R16G16_UINT";
+                case VK_FORMAT_R16G16_SINT: return "R16G16_SINT";
+                case VK_FORMAT_R32_SFLOAT: return "R32_SFLOAT";
+                case VK_FORMAT_R32_UINT: return "R32_UINT";
+                case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+                case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+                case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+                case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+                case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+                case VK_FORMAT_R16G16B16A16_UNORM: return "R16G16B16A16_UNORM";
+                case VK_FORMAT_R16G16B16A16_SFLOAT: return "R16G16B16A16_SFLOAT";
+                case VK_FORMAT_R32G32_UINT: return "R32G32_UINT";
+                case VK_FORMAT_R32G32_SINT: return "R32G32_SINT";
+                case VK_FORMAT_R32G32B32A32_SFLOAT: return "R32G32B32A32_SFLOAT";
+                case VK_FORMAT_R32G32B32A32_SINT: return "R32G32B32A32_SINT";
+                case VK_FORMAT_UNDEFINED: return "UNDEFINED";
+                default: break;
+        }
+        return "VkFormat(" + std::to_string(static_cast<int>(format)) + ")";
+}
+
 auto FormatTexelSize(VkFormat format) -> uint32_t
 {
         switch (format) {
@@ -1070,7 +1102,8 @@ struct Chain::Impl {
                 const VkResult created = vkCreateGraphicsPipelines(device->device(), VK_NULL_HANDLE, 1,
                     &pipelineInfo, nullptr, &pipeline);
                 if (created != VK_SUCCESS)
-                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile, "present pipeline"));
+                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile,
+                            std::string("present pipeline (format ") + vk::FormatShortName(format) + ")"));
                 presentPipelines.emplace(format, pipeline);
                 return pipeline;
         }
@@ -1078,7 +1111,7 @@ struct Chain::Impl {
         // One pass pipeline per render-pass format (lazy, cached). The final
         // pass can be bound against the host target format (direct offscreen
         // path) or its own FBO format (present path) — these can differ.
-        auto MakePassPipeline(PassRuntime &pass, VkFormat renderFormat) -> std::expected<VkPipeline, Error>
+        auto MakePassPipeline(PassRuntime &pass, VkFormat renderFormat, size_t passIndex) -> std::expected<VkPipeline, Error>
         {
                 std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
                 stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1137,7 +1170,9 @@ struct Chain::Impl {
 
                 const VkRenderPass renderPass = GetRenderPass(renderFormat);
                 if (renderPass == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "render pass creation failed"));
+                        return std::unexpected(SLV_ERROR(Errc::vk_error,
+                            "pass " + std::to_string(passIndex) + " '" + pass.def.shaderPath
+                                + "': render pass creation failed (format " + vk::FormatShortName(renderFormat) + ")"));
 
                 VkGraphicsPipelineCreateInfo pipelineInfo{};
                 pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1157,17 +1192,19 @@ struct Chain::Impl {
                 const VkResult created = vkCreateGraphicsPipelines(device->device(), VK_NULL_HANDLE, 1,
                     &pipelineInfo, nullptr, &pipeline);
                 if (created != VK_SUCCESS)
-                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile, "pass pipeline"));
+                        return std::unexpected(SLV_VKERR(created, Errc::shader_compile,
+                            "pass " + std::to_string(passIndex) + " '" + pass.def.shaderPath
+                                + "': pass pipeline (format " + vk::FormatShortName(renderFormat) + ")"));
                 pass.pipelines.emplace(renderFormat, pipeline);
                 return pipeline;
         }
 
-        auto GetPassPipeline(PassRuntime &pass, VkFormat renderFormat) -> std::expected<VkPipeline, Error>
+        auto GetPassPipeline(PassRuntime &pass, VkFormat renderFormat, size_t passIndex) -> std::expected<VkPipeline, Error>
         {
                 const auto it = pass.pipelines.find(renderFormat);
                 if (it != pass.pipelines.end())
                         return it->second;
-                return MakePassPipeline(pass, renderFormat);
+                return MakePassPipeline(pass, renderFormat, passIndex);
         }
 
         auto GetSampler(FilterMode filter, WrapMode wrap, bool mipmap) -> VkSampler
@@ -1627,7 +1664,7 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
                 const VkFormat defaultFormat = rendersToHostAtCreate && impl.targetFormat != VK_FORMAT_UNDEFINED
                     ? impl.targetFormat
                     : pass.targetFormat;
-                auto madePipeline = impl.MakePassPipeline(pass, defaultFormat);
+                auto madePipeline = impl.MakePassPipeline(pass, defaultFormat, i);
                 if (!madePipeline)
                         return std::unexpected(madePipeline.error());
 
@@ -2245,7 +2282,7 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
                 const bool isLast = i + 1 == impl.passes.size();
                 const bool rendersToHost = isLast && !pass.feedbackRead && !presentNeeded;
-                auto pipeline = impl.GetPassPipeline(pass, rendersToHost ? impl.targetFormat : pass.targetFormat);
+                auto pipeline = impl.GetPassPipeline(pass, rendersToHost ? impl.targetFormat : pass.targetFormat, i);
                 if (!pipeline)
                         return std::unexpected(pipeline.error());
                 framePipelines[i] = *pipeline;
