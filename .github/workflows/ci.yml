@@ -19,12 +19,17 @@
 #   linux           Release+Debug matrix, full ctest on lavapipe + Khronos
 #                   validation layer (incl. synchronization validation, plan
 #                   §10); Release also uploads libslangvk.a/.so + headers
-#                   (commit-pinned ARTIFACTS.txt)
+#                   (commit-pinned ARTIFACTS.txt) and the shader_demo host
+#                   binary (windowed GLFW build + bundled presets,
+#                   artifact shader-demo-linux-x64)
 #   linux-asan      address+undefined sanitized test build (examples off)
 #   windows-mingw   MSYS2 MinGW-w64; uploads libslangvk.dll, libslangvk.dll.a
 #                   (import) and libslangvk.a (static) + headers. The Vulkan
 #                   runner tests skip cleanly with no ICD (documented in
-#                   tests/CMakeLists.txt); every other test runs.
+#                   tests/CMakeLists.txt); every other test runs. Also
+#                   uploads shader_demo.exe (windowed Win32 build + MinGW
+#                   runtime DLLs + bundled presets,
+#                   artifact shader-demo-windows-x64).
 #   provenance      tools/scan_codefindings.py — the plan §4 clean-room gate
 #                   (RetroArch fingerprint scan before every release; cheap
 #                   enough to run on every push)
@@ -64,6 +69,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
+          # GLFW dev stack for the shader_demo windowed backend (auto-detected
+          # in examples/CMakeLists.txt). Without these the demo silently
+          # builds headless-only — fine for the test suite, but the Release
+          # artifact should ship the real windowed binary. The Wayland
+          # packages are best-effort; X11 alone satisfies the detection.
+          sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxext-dev libxcursor-dev libxi-dev libxkbcommon-dev libwayland-dev
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
@@ -73,6 +84,47 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Stage shader_demo artifact
+        if: matrix.build_type == 'Release'
+        run: |
+          mkdir -p stage/shader-demo/presets
+          cp build/examples/shader_demo stage/shader-demo/
+          cp -r examples/presets/. stage/shader-demo/presets/
+          cp examples/shader_demo/assets/testcard.png stage/shader-demo/
+          cat > stage/shader-demo/USAGE.txt <<EOF
+          shader_demo — CI artifact (linux-x64, windowed GLFW build)
+          commit:    ${GITHUB_SHA}
+          ref:       ${GITHUB_REF_NAME}
+          toolchain: runner GCC, CMake + Ninja (Release)
+
+          shader_demo    host demo binary (statically linked with
+                         libslangvk + glslang; no install needed)
+          presets/       self-contained demo presets (start here)
+          testcard.png   480x320 test card for --input
+
+          Usage:
+            ./shader_demo --list presets
+            ./shader_demo --no-menu --frames 10 --out dump presets
+            ./shader_demo presets                windowed + TUI menu
+            ./shader_demo --input testcard.png presets
+
+          Windowed mode needs a Vulkan ICD with swapchain support (X11 or
+          Wayland); on a headless server it falls back to PNG dumps
+          automatically, or force it with --headless. Point the positional
+          argument at any preset directory (e.g. a slang-shaders checkout).
+          Controls: 1-9 switch preset, n/p next/prev, i input source,
+          l list, params / set NAME VALUE, q quit.
+          EOF
+          (cd stage && zip -qr ../shader-demo-linux-x64.zip shader-demo)
+
+      - name: Upload shader_demo artifact
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-demo-linux-x64
+          path: shader-demo-linux-x64.zip
+          if-no-files-found: error
 
       - name: Stage artifacts
         if: matrix.build_type == 'Release'
@@ -170,6 +222,54 @@ jobs:
         # No ICD on the runner, so the headless Vulkan tests skip themselves;
         # core suite + examples still gate.
         run: ctest --test-dir build --output-on-failure
+
+      - name: Stage shader_demo artifact
+        run: |
+          mkdir -p stage/shader-demo/presets
+          cp build/examples/shader_demo.exe stage/shader-demo/
+          # MinGW runtime DLLs the exe needs on machines without MSYS2.
+          cp /mingw64/bin/libstdc++-6.dll /mingw64/bin/libgcc_s_seh-1.dll \
+             /mingw64/bin/libwinpthread-1.dll stage/shader-demo/
+          cp -r examples/presets/. stage/shader-demo/presets/
+          cp examples/shader_demo/assets/testcard.png stage/shader-demo/
+          cat > stage/shader-demo/USAGE.txt <<EOF
+          shader_demo — CI artifact (windows-x64, MinGW-w64, windowed Win32)
+          commit:    ${GITHUB_SHA}
+          ref:       ${GITHUB_REF_NAME}
+          toolchain: MSYS2 mingw-w64 GCC (CMake + Ninja, Release)
+
+          shader_demo.exe     host demo binary (statically linked with
+                              libslangvk + glslang)
+          libstdc++-6.dll     MinGW runtime — keep next to the exe
+          libgcc_s_seh-1.dll
+          libwinpthread-1.dll
+          presets/            self-contained demo presets (start here)
+          testcard.png        480x320 test card for --input
+
+          Usage (from a terminal in this folder):
+            shader_demo.exe --list presets
+            shader_demo.exe --no-menu --frames 10 --out dump presets
+            shader_demo.exe presets              windowed + TUI menu
+            shader_demo.exe --input testcard.png presets
+
+          Windowed mode needs a Vulkan ICD with swapchain support; falls
+          back to PNG dumps when none is found, or force it with
+          --headless. Point the positional argument at any preset
+          directory (e.g. a slang-shaders checkout).
+          Controls: 1-9 switch preset, n/p next/prev, i input source,
+          l list, params / set NAME VALUE, q quit.
+          EOF
+
+      - name: Zip shader_demo
+        shell: pwsh
+        run: 7z a -tzip shader-demo-win64-mingw.zip ./stage/shader-demo
+
+      - name: Upload shader_demo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-demo-windows-x64
+          path: shader-demo-win64-mingw.zip
+          if-no-files-found: error
 
       - name: Stage artifacts
         run: |
