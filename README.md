@@ -17,7 +17,7 @@ is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
 **Status: M4 (presentation) — library milestones complete.** All library-side
-M0–M4 gates are green: 19/19 ctest, byte-exact goldens, zero validation-layer
+M0–M4 gates are green: 23/23 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
 M2 execution contract (history rings `OriginalHistory#`, feedback
@@ -26,7 +26,17 @@ double-buffering `PassFeedback#` / `<name>Feedback`, per-pass FBO formats,
 uploads, and — since M4 — swapchain presentation: the final pass draws into an
 acquired swapchain image with the letterbox rect and orientation handled by
 the library (plan §8 output mode (a)). Per-item implementation status,
-audited against the plan: [CHECKLIST.md](CHECKLIST.md).
+audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md); notable
+changes per milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
+
+**Corpus verdict (M4.02):** the full libretro preset corpus — all 2,658
+presets, pinned to the revision recorded in the ledger header — is swept
+through the real load path, and the resulting per-preset baseline
+([corpus/baseline-ledger.txt](corpus/baseline-ledger.txt)) is committed and
+gated: **2,567 loaded / 91 failed, zero regressions** since the 2026-10-17
+baseline (826 / 1832). The remaining 91 are one known class —
+sampled-but-unbound textures behind preprocessor dead code — tracked in the
+changelog's Unreleased section.
 
 **DevilutionX integration (plan §11 M4) is underway** on the fork's
 [`libslang-vk`](https://github.com/VTSTech/DevilutionX/tree/libslang-vk)
@@ -180,6 +190,14 @@ The descriptor conventions the translated GLSL targets (vertex UBOs set 1,
 fragment textures set 2, fragment UBOs set 3) are exactly what the Vulkan
 runner consumes; a host rolling its own pipeline can use them too.
 
+Hosts rolling their own translate loop should also seed the translation's
+texture universe with `#pragma name` pass names before translating: presets
+that tap a pass's output as `<name>` (this frame) or `<name>Feedback` (the
+previous frame) fail with `unknown texture reference` otherwise.
+`slv::preset::CollectSlangPragmaNames(shaderPath, names)` collects them with
+the same include semantics as `TranslateSlang`; `Preset::load` does this
+automatically.
+
 ## Vulkan runner (M1 + M2 + M3 + M4)
 
 The runner executes compiled presets on a Vulkan device. The host either
@@ -269,23 +287,35 @@ so the example path is covered by CI. Exit code is 0 only when every pass
 parses, translates and compiles — convenient for checking foreign presets.
 
 [`examples/corpus_sweep.cpp`](examples/corpus_sweep.cpp) is the M3
-conformance harness: it walks preset directories through the real load
-path and reports a per-preset ledger (parse/translate/compile/LUT upload),
-optionally executing chains on the Vulkan device:
+conformance harness — and since M4.02 the baseline-ledger generator: it
+walks preset directories through the real load path and reports a per-preset
+ledger (parse/translate/compile/LUT upload), optionally executing chains on
+the Vulkan device:
 
 ```sh
 cmake --build build --target corpus_sweep
 ./build/examples/corpus_sweep path/to/shader-pack          # compile-only sweep
 ./build/examples/corpus_sweep pack --render --lut          # + render 2 frames per chain
 ./build/examples/corpus_sweep pack --fail-on-broken        # nonzero exit on failures
+./build/examples/corpus_sweep pack --ledger new.txt --baseline corpus/baseline-ledger.txt
+./build/examples/corpus_sweep pack --only-from list.txt    # rescan only the listed presets
 ```
+
+`--baseline` diffs the fresh ledger against a pinned one and fails the run on
+LOAD→FAIL regressions (improvements are reported as review material);
+`--corpus-rev` stamps the shader-pack revision into the ledger header;
+`--only-from` restricts the sweep to the newline-separated preset paths in
+FILE while keeping corpus-root semantics — the chunked-rescan escape hatch
+for slow machines. This is the tool behind
+[`corpus/baseline-ledger.txt`](corpus/baseline-ledger.txt) (2,658 presets:
+2,567 loaded / 91 failed at the pinned revision) and the nightly gate.
 
 `--render` executes every chain through the real render path — presets
 whose final pass does not resolve to the output size go through the M4
 letterbox present draw instead of failing — and fails the run on
 any validation-layer error. The bundled-fixture smoke runs as a ctest
-(`example_corpus_sweep_smoke`); the full shader-pack corpus sweep runs
-out of CI against a slang-shaders checkout.
+(`example_corpus_sweep_smoke`); the full sweep runs in CI nightly — see
+[CI artifacts](#ci-artifacts).
 
 Sample output (`demo-glow`, trimmed):
 
@@ -340,6 +370,11 @@ same-toolchain-ABI API (`include/slangvk/export.h`):
 - **`libslangvk-linux-x64`** — `libslangvk.a`, `libslangvk.so`, headers;
   GCC Release + Debug builds gating the full ctest suite on lavapipe with
   the Khronos validation layer installed.
+- **`shader-demo-linux-x64` / `shader-demo-windows-x64`** — the runnable
+  demo (windowed GLFW build on Linux; headless-capable on Windows) bundled
+  with `corpus_sweep` / `corpus_sweep.exe`, the demo presets, `testcard.png`
+  and a USAGE.txt covering both tools. Assets resolve relative to the
+  executable, so the zip runs from anywhere.
 
 A sanitized (address + undefined) Linux test build runs alongside the
 Release jobs — with synchronization validation enabled whenever the
@@ -351,18 +386,27 @@ cleanly when no ICD is present and everything else still runs.
 
 The full-corpus compile-sweep ledger runs separately:
 [`.github/workflows/corpus.yml`](.github/workflows/corpus.yml) shallow-
-clones `libretro/slang-shaders` nightly (or via workflow_dispatch), loads
-and compiles every preset headlessly on lavapipe, and uploads the ledger
-artifact — bootstrap mode until the first baseline ledger is pinned,
-then the documented no-regression gate (plan §10) flips on.
+clones `libretro/slang-shaders` at the revision pinned in the committed
+baseline header (nightly, or via workflow_dispatch), sweeps every preset
+headlessly on lavapipe, and diffs the fresh ledger against
+[`corpus/baseline-ledger.txt`](corpus/baseline-ledger.txt) — with the
+**no-regression gate ON since 2026-10-18**: a preset that loads in the
+baseline but fails the fresh sweep fails the run, while FAIL→LOAD fixes are
+tolerated and reported as review material. Refreshing the pinned baseline
+itself is a deliberate, reviewed procedure documented in the workflow
+header.
 
 ## Documentation
 
 - [docs/SPEC.md](docs/SPEC.md) — the preset-format contract (parsing,
   translation and execution semantics, section by section).
 - [docs/PLAN.md](docs/PLAN.md) — milestones, API sketch, risk register.
-- [CHECKLIST.md](CHECKLIST.md) — per-item M0–M4 implementation status,
-  audited against the plan.
+- [docs/CHECKLIST.md](docs/CHECKLIST.md) — per-item M0–M4 implementation
+  status, audited against the plan.
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — notable changes per milestone
+  (M0 → current) plus the unreleased roadmap.
+- [corpus/baseline-ledger.txt](corpus/baseline-ledger.txt) — the pinned
+  per-preset corpus baseline (revision, totals, LOAD/FAIL per preset).
 - [PROVENANCE.md](PROVENANCE.md) — upstream provenance, documented
   divergences, pinned dependency hashes and the corpus ledger.
 
