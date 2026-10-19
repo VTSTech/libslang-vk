@@ -360,8 +360,13 @@ public:
         SLANGVK_API auto operator=(Chain &&) noexcept -> Chain &;
         SLANGVK_API ~Chain();
 
-        /** @brief Recreates pass FBOs for new input/output sizes (next render picks it up). */
-        SLANGVK_API auto resize(uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight)
+        /**
+         * @brief Stores a new output target size (next render picks it up). Pass
+         * FBOs, the history ring and the mip copy are NOT touched here: render
+         * re-derives them lazily from the per-frame input size plus this target.
+         * A swapchain extent change must be followed by resize() with the new
+         * extent before the next render (render rejects a drifted extent). */
+        SLANGVK_API auto resize(uint32_t outputWidth, uint32_t outputHeight)
             -> std::expected<void, Error>;
 
         /** @brief Overrides a parameter value (merged into the params UBO on the next render). */

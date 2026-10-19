@@ -20,6 +20,50 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
   leaves the previous preset + chain fully intact. Runtime parameter
   overrides are cleared by a reload (the chain is rebuilt from file
   values). First entry of the M4.04-post follow-up wave.
+- **Process-global glslang frontend mutex** (freeze-review F-1, decision
+  D-3a): `docs/API.md` §5.3/§6 claimed "glslang is process-globally
+  guarded", but `GlslangRuntime` guarded lifecycle only —
+  `InitializeProcess()` once, `FinalizeProcess()` at exit, no lock ever
+  taken (the `<mutex>` include was dead weight). Two frontend sites ran
+  unserialized — `CompileStageToSpv`'s `TShader::parse`/`link`/
+  `GlslangToSpv` and the translate-time dead-code oracle's
+  `TShader::preprocess` — so two concurrent `Preset::load`s could race
+  inside glslang, with nothing in CI exercising concurrency. One
+  process-global `std::mutex` (`GlslangFrontendMutex`, defined in
+  `slang_compile.cpp`, forward-declared in `slang_translate.cpp` per the
+  `EnsureGlslangRuntime` pattern) now serializes both entry points;
+  seconds-scale loads make contention irrelevant and the written threading
+  claim is true as published. API.md §4.4/§5.3 state the contract.
+
+### Changed
+
+- **`Chain::resize` drops its two dead input-size parameters**
+  (freeze-review F-2, decision D-1a; pre-freeze signature break):
+  `resize(inputW, inputH, outputW, outputH)` is now
+  `resize(outputWidth, outputHeight)`. The review proved all three
+  documented input-size clauses wrong — pass FBOs derive from the
+  per-frame `InputFrame` size plus the stored target at render, and pass
+  targets, the history ring and the mip copy are (re)created lazily on
+  size drift; the impl only validated the output size and stored it (the
+  input params were even commented out of the definition). Call sites were
+  ours (`test_runner_m2.cpp`, `shader_demo.cpp`). API.md §5.4 rewritten to
+  the lazy-rederive semantics; §8 gains the host duty that a swapchain
+  extent change (window resize / `VK_SUBOPTIMAL_KHR`) must be followed by
+  `resize()` with the new extent before the next render (F-3 — render
+  rejects a drifted extent with `invalid_argument`).
+- **`docs/API.md` folds the eight freeze-review findings** (Task 29):
+  §3 names the library's only two stderr writers as documented exceptions
+  and documents `SLANGVK_FILL_DEBUG` (F-8, decision D-4a); §5.4 states
+  `setParameter` is write-only by design — no getter in v1, UI-facing
+  hosts track the merged view from `parameterInfo()` + their own calls
+  (F-2's getter gap, decision D-2b); §4.2 documents `ResolvePresetFilePath`
+  refusing out-of-root hits as the deliberate SEC-01 sandbox behavior
+  (F-5); §4.3 enumerates the 14 `UniformType` values (F-7); §5.5 carries
+  the header default of `SwapchainFrame::format` (F-6) and the three
+  undocumented render-time validations — offscreen target needs a concrete
+  `ChainOptions::outputFormat`, `SwapchainFrame::format` `UNDEFINED`/
+  zero-texel rejection, null `InputFrame::image` when history/mip is
+  required (F-4); §9 cross-references the stderr exceptions.
 
 ### Fixed
 

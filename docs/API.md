@@ -41,7 +41,7 @@ The load-bearing boundary: the core layer never touches Vulkan. It consumes shad
 
 ## 3. Error handling: `std::expected` + the failure contract
 
-Every fallible operation returns `std::expected<T, slv::Error>`. The library never throws across the API boundary, never terminates, never writes to stdout/stderr uninvited (logging is absent by design in v1; diagnostics live in `Error::message`, translator `warnings`, and `Device::validationErrors`).
+Every fallible operation returns `std::expected<T, slv::Error>`. The library never throws across the API boundary, never terminates, and never writes to stdout/stderr uninvited (logging is absent by design in v1; diagnostics live in `Error::message`, translator `warnings`, and `Device::validationErrors`). Two stderr writers are documented exceptions by design: (1) a **warn-once** render-time notice when a texture tap is not causal this frame and the current source is bound instead (SPEC §4.5 runtime tolerance; one line per texture name per chain — `libslang-vk: texture '…' is not causal in pass N; binding the current source instead`), a pack-author debugging aid with no receiving API surface; (2) when the environment variable `SLANGVK_FILL_DEBUG` is set, every per-pass UBO member fill is traced to `stderr` (block, member, offset/size, resolved value, preset-override hit). Both go to `stderr` only — never stdout — and they are the only two writers the library contains.
 
 ```cpp
 enum class Errc {
@@ -96,7 +96,7 @@ Note: `feedbackPass` is parsed but unused by the runner — double-buffering is 
 | `ListPresetDir` | `PresetDirListing (const std::string& rootDir, const std::string& relativeDir)` | One directory level (`""` = root). Cache folder + hidden dirs excluded |
 | `ShaderRootDir` / `SetShaderRootDir` | `std::string ()` / `void (const std::string&)` | Runtime shader root; defaults to a relative `shaders` folder. Call the setter once at startup before any parsing/scanning/translation. Not thread-safe against concurrent preset access |
 | `ResolvePresetPath` | `std::string (const std::string& relativePath)` | Root-relative preset path → absolute; empty string when missing |
-| `ResolvePresetFilePath` | `std::string (const std::string& presetDir, const std::string& referencedPath)` | Resolves any preset-referenced file (pass shader, LUT, `#reference`): absolute passes through; relative tries the preset's own folder, then up to 6 ancestor folders, then the shader root — first existing wins; on total miss the conventional preset-relative join is returned (for error messages). This is what makes redistributed pack layouts load (SPEC §3.7) |
+| `ResolvePresetFilePath` | `std::string (const std::string& presetDir, const std::string& referencedPath)` | Resolves any preset-referenced file (pass shader, LUT, `#reference`): absolute passes through; relative tries the preset's own folder, then up to 6 ancestor folders, then the shader root — first existing wins; a hit outside the shader root is **refused** (empty string returned, never read — the SEC-01 sandbox behaving deliberately: `../../`-style ancestor walks stop at the root boundary); on total miss the conventional preset-relative join is returned (for error messages). This is what makes redistributed pack layouts load (SPEC §3.7) |
 | `IsPathInsideShaderRoot` | `bool (const std::filesystem::path&)` | SEC-01 sandbox predicate: references from untrusted preset files may only reach files inside the shader root (symlinks resolved) |
 
 ### 4.3 Translation — `slangvk/core/slang_translate.hpp`
@@ -122,7 +122,7 @@ It walks the pass's top-level file + `#include` graph with the same include-once
 
 Results (`SlangTranslation`):
 
-- `vertex` / `fragment` — `StageTranslation { present, glsl, uniformBlocks, textures, usesMvp, usesFrameCount, usesFrameDirection, usesFrameTime, usesPassIndex, texelFetchCount, textureGatherCount }`. `uniformBlocks` carries the std140-reflected `UniformBlock { instanceName, binding, members }` layout (`UniformMember { name, type, arraySize, offset, size }`); `textures` lists `TextureRef { name, binding }` in dense fragment-set order.
+- `vertex` / `fragment` — `StageTranslation { present, glsl, uniformBlocks, textures, usesMvp, usesFrameCount, usesFrameDirection, usesFrameTime, usesPassIndex, texelFetchCount, textureGatherCount }`. `uniformBlocks` carries the std140-reflected `UniformBlock { instanceName, binding, members }` layout (`UniformMember { name, type, arraySize, offset, size }`, with `type` one of the 14 `UniformType` values `Float, Vec2, Vec3, Vec4, Int, IVec2, IVec3, IVec4, Uint, UVec2, UVec3, UVec4, Bool, Mat4`); `textures` lists `TextureRef { name, binding }` in dense fragment-set order.
 - `parameters` — `#pragma parameter` metadata (`ParamInfo { name, description, defaultValue, minimum, maximum, step }`).
 - `pragmaName` / `pragmaFormat` — the `#pragma name` / `#pragma format` values.
 - `sourceSize/sourceHash`, `mergedSize/mergedHash` — field diagnostics (raw file vs include-resolved merge).
@@ -135,7 +135,7 @@ Results (`SlangTranslation`):
 bool CompilePass(const SlangTranslation& translation, PassSpirv& out, std::string& error);
 ```
 
-In-process glslang, Vulkan 1.0 client / SPIR-V 1.0, GLSL 450. `PassSpirv { vertex, fragment }` receives the bytecode. Nothing here touches the filesystem — v1 deliberately has no sidecar/disk cache (PLAN §2 non-goal); compilation happens at every `Preset::load`. Compile errors fail the preset load with the glslang info log in `error`.
+In-process glslang, Vulkan 1.0 client / SPIR-V 1.0, GLSL 450. `PassSpirv { vertex, fragment }` receives the bytecode. Nothing here touches the filesystem — v1 deliberately has no sidecar/disk cache (PLAN §2 non-goal); compilation happens at every `Preset::load`. Compile errors fail the preset load with the glslang info log in `error`. glslang's frontend is not thread-safe, so every frontend entry point (this compile path and the translator's preprocessing oracle) is serialized by one process-global mutex — concurrent `Preset::load`s are safe (§6).
 
 ### 4.5 Descriptor conventions (the core ↔ runner contract)
 
@@ -230,7 +230,7 @@ public:
 };
 ```
 
-One call runs parse → translate (per pass, with `#pragma name` seeding done for you) → glslang compile of every stage. **Synchronous** — the accepted trade-off of the no-disk-cache decision; glslang invocations are thread-safe across *distinct* loads, so a host may warm several `Preset` objects on worker threads (PLAN §5.3). Immutable after load; shareable across `Chain`s on the same device. `strict = true` is the conformance/lint mode (warnings become errors); `noLutImages = true` is what the corpus sweep uses to skip decoding LUT image files it never samples.
+One call runs parse → translate (per pass, with `#pragma name` seeding done for you) → glslang compile of every stage. **Synchronous** — the accepted trade-off of the no-disk-cache decision; glslang frontend calls are serialized by a process-global mutex, so a host may warm several `Preset` objects on worker threads (§4.4, PLAN §5.3). Immutable after load; shareable across `Chain`s on the same device. `strict = true` is the conformance/lint mode (warnings become errors); `noLutImages = true` is what the corpus sweep uses to skip decoding LUT image files it never samples.
 
 `ParameterInfo { name, description, defaultValue, minimum, maximum, step }` is the UI-facing merged view: `#pragma parameter` metadata with preset-file overrides applied to the default.
 
@@ -247,9 +247,8 @@ public:
     static auto create(Device&, const Preset&, const ChainOptions&)
         -> std::expected<Chain, Error>;
 
-    auto resize(uint32_t inputWidth, uint32_t inputHeight,
-                uint32_t outputWidth, uint32_t outputHeight)
-        -> std::expected<void, Error>;               // recreates FBOs; next render picks it up
+    auto resize(uint32_t outputWidth, uint32_t outputHeight)
+        -> std::expected<void, Error>;               // stores the output target; render re-derives lazily
     auto setParameter(std::string_view id, float value)
         -> std::expected<void, Error>;               // applied to the params UBO on the next render
     auto render(const InputFrame&, const OutputTarget&, const FrameInfo&)
@@ -261,8 +260,8 @@ public:
 
 - Owns pipelines (cached per format), FBOs, sampler cache (2 filters × 3 wraps × 2 mip modes, lazily created), history rings, feedback double-buffers, descriptor sets and per-pass UBOs.
 - **`render` is synchronous:** records + submits one command buffer and waits on a fence. Simple to integrate, no frame-in-flight management for the host; async execution is a recorded post-1.0 lever. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
-- `setParameter` matches case-insensitively; an empty id is an `invalid_argument` error. A value whose id matches no `#pragma parameter` is stored but **inert** (mirrors RetroArch's tolerance of unknown overlay keys) — the runner applies only ids that exist in the preset's parameter universe; values are written as given (no clamping).
-- `resize` takes **both** input and output sizes (the chain derives every pass FBO from the scale rules against these; history ring is re-seeded; feedback buffers are recreated).
+- `setParameter` matches case-insensitively; an empty id is an `invalid_argument` error. A value whose id matches no `#pragma parameter` is stored but **inert** (mirrors RetroArch's tolerance of unknown overlay keys) — the runner applies only ids that exist in the preset's parameter universe; values are written as given (no clamping). There is no getter in v1 — `setParameter` is write-only by design; UI-facing hosts track the merged view themselves (start from `Preset::parameterInfo()`, then mirror their own `setParameter` calls).
+- `resize` stores a new output target size (zero width/height is an `invalid_argument`) and touches no GPU resources. Render reacts to size drift lazily: pass FBO sizes derive from the per-frame `InputFrame` size plus the stored target, and pass targets, the history ring and the mip copy are (re)created at render when the allocated sizes no longer match. A swapchain extent change must be followed by `resize()` with the new extent before the next render (§8).
 - `passOutputSize` exposes the currently-allocated FBO geometry of a pass (host OSD/debugging; also what `Offscreen` target sizing should match for a byte-exact final blit).
 
 ### 5.5 Frame types
@@ -277,7 +276,9 @@ struct FrameInfo {
 struct InputFrame {                // the chain's input texture (host-owned)
     VkImageView view;              // must be SHADER_READ_ONLY_OPTIMAL
     VkImage     image;             // required for history / mipmap_input presets (runner blits it
-                                   //   into the ring / mip copy; content untouched). Null otherwise.
+                                   //   into the ring / mip copy; content untouched). Null otherwise;
+                                   //   null when needed = invalid_argument render error (message names
+                                   //   the requirement)
     VkFormat    format = VK_FORMAT_R8G8B8A8_UNORM;
     uint32_t    width, height;
     Rotation    rotation = Rotation::None;  // fills the Rotation uniform (0..3 = 0/90/180/270°)
@@ -288,12 +289,15 @@ struct Offscreen {                 // output variant: host composites (headless/
     VkImage     image;             // required only when the final pass is feedback-read
                                    //   (runner blits its double-buffered output into it)
     VkFormat    format = VK_FORMAT_R8G8B8A8_UNORM;
-    uint32_t    width, height;     // mismatched params = invalid_argument error
+    uint32_t    width, height;     // mismatched params = invalid_argument error; an Offscreen target
+                                   //   also requires ChainOptions::outputFormat to be a concrete
+                                   //   format (not VK_FORMAT_UNDEFINED) and to match this format
 };
 
 struct SwapchainFrame {            // output variant: render into an acquired swapchain image
     VkImageView swapchainImageView;
-    VkFormat    format;            // the swapchain's current format
+    VkFormat    format = VK_FORMAT_UNDEFINED;  // the swapchain's current format;
+                                               //   UNDEFINED or zero-texel format = unsupported_feature
     uint32_t    width, height;
     Rect        outputRect{};      // content rect; zero rect = fit + center (letterbox)
     VkSemaphore acquireSemaphore = VK_NULL_HANDLE;  // host acquire signal, waited before drawing
@@ -371,6 +375,8 @@ Per frame, with the host owning acquire/present:
 3. Host calls `chain->render(in, SwapchainFrame{...}, frameInfo)` — the final pass draws into the acquired image's view (letterbox `outputRect`; zero rect = fit and center), leaving it in `PRESENT_SRC_KHR`.
 4. Host presents — no wait semaphore needed (`render` is synchronous/fenced).
 
+**Extent changes (window resize / `VK_SUBOPTIMAL_KHR`):** the host must call `chain->resize(newWidth, newHeight)` with the new extent before the next render — rendering with a `SwapchainFrame` whose size differs from the stored target is a hard `invalid_argument` (`render: swapchain size changed; call resize() with the new extent`). `resize()` stores the target only; FBO re-derivation happens lazily at the next render (§5.4).
+
 The chain's internal FBOs keep rendering at their preset-derived sizes; only the presentation draw touches the swapchain image. Mismatched game/swapchain sizes are the tested letterbox path (fit-and-center or explicit `outputRect`; integer scaling stays host-side via an explicit rect — documented divergence). `Rotation` rotates the final presentation draw clockwise and sizes the fit rect from the rotated aspect.
 
 ## 9. v1 limitations and API-relevant divergences
@@ -384,7 +390,7 @@ The full format-level list is SPEC §6/§7; these affect API consumers directly:
 - **`OriginalHistory` depth cap 8** (spec unbounded; corpus max 7). `FrameDirection` is constant `+1` (no rewind state).
 - **`clamp_to_border` wrap maps to clamp-to-edge** (SPEC §7.7); `A2B10G10R10_UINT_PACK32` format token falls back to RGBA8 with a warning.
 - **Same-toolchain ABI only** for shared builds (§2); the static lib is the portable artifact.
-- **No logging surface.** Load warnings are visible via `Preset::load` under `strict` (as errors) or through the core-layer `SlangTranslation::warnings` for custom loops; validation errors via `Device::validationErrors()`.
+- **No logging surface.** Load warnings are visible via `Preset::load` under `strict` (as errors) or through the core-layer `SlangTranslation::warnings` for custom loops; validation errors via `Device::validationErrors()`. The library's only two stderr writers (the warn-once non-causal-tap notice and the `SLANGVK_FILL_DEBUG` trace) are named in §3.
 
 ## 10. Versioning and the M5 freeze
 

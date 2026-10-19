@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Review only — NOT the freeze.** Findings fold into `API.md` (and two header comments) before the freeze stamp; the four decisions in §4 need a maintainer call. Baseline: every statement checked against `550dfbd` on `main` (2026-10-19); `include/slangvk/` is the header of record per API.md's preamble. |
+| **Status** | **Review only — NOT the freeze.** Findings folded into `API.md` (and the header comment) in the 2026-10-19 decision wave; all four §4 decisions **resolved by the maintainer** (D-1 a, D-2 b, D-3 a, D-4 a) and applied — see the RESOLVED notes in §4. Baseline: every statement checked against `550dfbd` on `main` (2026-10-19); `include/slangvk/` is the header of record per API.md's preamble. **The freeze stamp itself is still pending** — this record + the applied decisions make the surface freeze-ready. |
 | **Method** | Line-by-line cross-read of the seven public headers vs `docs/API.md`; semantic spot-checks against `src/` (each finding carries file:line evidence); the five §10 freeze-review checklist items executed — including compiling and running the §7 walkthrough against the built library on lavapipe; ctest 26/26 at the baseline. |
 | **Companion docs** | [API.md](API.md) (§10 checklist is what this record runs) · [CHECKLIST.md](CHECKLIST.md) (M5 boundary) · [PLAN.md](PLAN.md) (§11 M5 gate) |
 
@@ -65,11 +65,19 @@ Resolution rides decision D-4.
 
 **D-1 — `resize` signature.** The two input-size parameters are dead (F-2). Options: (a) **drop them** → `resize(uint32_t outputWidth, uint32_t outputHeight)`; call sites are ours (runner tests, demo, walkthrough). (b) Keep the 4-arg form and document the input sizes as accepted-but-unused (reserved for a future async path). Recommendation: (a) — freeze time is the one cheap moment to remove dead parameters; semantics become "store the output target; render reacts lazily to both".
 
+**RESOLVED (2026-10-19): (a).** Signature dropped in `runner.hpp`/`chain.cpp`; call sites updated (`test_runner_m2.cpp`, `shader_demo.cpp`); §5.4 code block + bullet rewritten to the lazy-rederive semantics; §8 gained the extent-change host duty (F-3); stale `runner.hpp` doc comment replaced.
+
 **D-2 — parameter value query.** `Chain` has `setParameter` but no way to *read* the current merged value; hosts must track overrides themselves (shader_demo did exactly that, and Task 27's "`params` shows 1.250 after `set 3.0`" display bug was this gap biting). Options: (a) add `auto parameter(std::string_view id) const -> std::expected<float, Error>` (case-insensitive like `setParameter`; merged view: preset override → runtime override) or a `parameterValues()` span; (b) document the host-side duty as intended. Recommendation: (a) — it is the only known host-side workaround the current surface forces, and a UI-facing getter is cheap pre-freeze.
+
+**RESOLVED (2026-10-19): (b).** No getter; §5.4 `setParameter` bullet now states write-only-by-design and points UI-facing hosts at `parameterInfo()` + mirroring their own `setParameter` calls.
 
 **D-3 — glslang guard (F-1).** (a) add the process-global mutex (recommended — makes the written claim true for ~3 lines); or (b) rewrite §5.3/§6 to "serialize `Preset::load` in v1".
 
+**RESOLVED (2026-10-19): (a).** `GlslangFrontendMutex()` defined in `slang_compile.cpp` (external linkage, forward-declared in `slang_translate.cpp` — the `EnsureGlslangRuntime` pattern); `std::scoped_lock` taken in `CompileStageToSpv` and `PreprocessStageGlsl`; the dead `<mutex>` include is now live. §4.4/§5.3 state the serialization contract explicitly; §5.3/§6's original claim is now true as written. ctest 26/26 post-change.
+
 **D-4 — stderr writers (F-8).** (a) amend §3 with the two named exceptions (warn-once non-causal fallback notice; `SLANGVK_FILL_DEBUG` trace) and document the env var; (b) route the fallback notice through a real surface (new API — weigh against freeze scope); (c) silence them. Recommendation: (a) — both messages have earned their keep in field debugging, and §3 stays honest with the exceptions named.
+
+**RESOLVED (2026-10-19): (a).** §3 names both exceptions verbatim (fallback message text, `SLANGVK_FILL_DEBUG` UBO-fill trace semantics); §9's "No logging surface" bullet cross-references them.
 
 ## 5. Walkthrough verification record (§10 item 5)
 

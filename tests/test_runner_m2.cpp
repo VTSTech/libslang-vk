@@ -455,7 +455,7 @@ int main()
                                         std::printf("FAIL resize 32px fixture\n");
                                         ++failures;
                                 } else {
-                                        auto r2 = chain->resize(32, 32, 32, 32);
+                                        auto r2 = chain->resize(32, 32);
                                         Check(r2.has_value(), "resize: chain.resize accepts new output size");
                                         auto r3 = chain->render(fx32.Frame(), fx32.Target(), slv::FrameInfo{});
                                         Check(r3.has_value(), "resize: 32px frame renders (FBO + ring recreated)");

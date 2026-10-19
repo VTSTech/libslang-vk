@@ -122,9 +122,9 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 | §5.1 module map (`src/interop/`, `corpus/`, `tools/`) | ✅ | Map corrected 2026-10-18 (miss list #13): interop types → `runner.hpp`, corpus fixtures → `tests/data/`, `tools/` now real (scanner) |
 | Risk 3 levers: `SLANGVK_SYSTEM_GLSLANG`, LTO/`-Oz` | ✅ | Implemented as opt-in CMake options 2026-10-18 (miss list #13): `SLANGVK_SYSTEM_GLSLANG` (find_package CONFIG vs pinned FetchContent), `SLANGVK_LTO` (IPO + `-Oz` release codegen, configure-time capability check); default build unchanged |
 
-## M5 boundary (listed for completeness — not started)
+## M5 boundary (freeze review executed 2026-10-19 — packaging/release items remain)
 
-⬜ API freeze · ⬜ CMake package config + pkg-config · ✅ `docs/API.md` **drafted 2026-10-19** (full public-surface reference, marked pre-freeze; the M5 deliverable becomes "review + freeze against it") · ⬜ provenance gate wired into the release/tag pipeline (gate already in CI since 2026-10-18) · ⬜ tagged release + example app.
+🔶 API freeze — **freeze review executed + decisions applied 2026-10-19** ([API-freeze-review.md](API-freeze-review.md): 8 findings folded into API.md, maintainer calls D-1a/D-2b/D-3a/D-4a applied — resize 2-arg, glslang mutex, §3 stderr exceptions, write-only params; surface is freeze-ready, the stamp itself is still pending) · ⬜ CMake package config + pkg-config · ✅ `docs/API.md` **drafted 2026-10-19** (full public-surface reference, marked pre-freeze; the M5 deliverable becomes "review + freeze against it") · ⬜ provenance gate wired into the release/tag pipeline (gate already in CI since 2026-10-18) · ⬜ tagged release + example app.
 
 ---
 

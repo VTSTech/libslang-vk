@@ -900,3 +900,31 @@ bugs.**
   protocol from the runbook (stepped sweep over the full range,
   hot-swap reset check, glow sweep) remains available as optional
   hardening.
+
+**Session 11 (2026-10-19, sandbox/lavapipe) — M5 freeze-review decision
+wave: the maintainer's four calls (D-1 a, D-2 b, D-3 a, D-4 a) applied on
+top of the Task 29 review; the public surface is freeze-ready, the freeze
+stamp itself remains the maintainer's separate call.**
+
+- **Code (both repo-original):** (a) `Chain::resize` lost its two dead
+  input-size parameters — `resize(outputWidth, outputHeight)`; the
+  review had proven the documented input-size semantics wrong on all
+  three clauses (FBOs derive from the per-frame `InputFrame` size plus
+  the stored target at render; targets/ring/mip copy re-derive lazily on
+  drift); call sites updated in `test_runner_m2.cpp` and
+  `shader_demo.cpp`. (b) A process-global glslang frontend mutex
+  (`GlslangFrontendMutex`) now serializes `CompileStageToSpv` and the
+  translate-time `TShader::preprocess` oracle — the "process-globally
+  guarded" claim in API.md §5.3/§6 is true as written; no
+  upstream/third-party code involved.
+- **Docs:** all eight findings folded into `API.md` (§3 stderr
+  exceptions + `SLANGVK_FILL_DEBUG`, §4.2 out-of-root refusal, §4.3
+  `UniformType` enumeration, §4.4/§5.3 serialization contract, §5.4
+  resize rewrite + write-only-params note, §5.5 header default + three
+  render-time validations, §8 extent-change host duty, §9 cross-ref);
+  `runner.hpp`'s stale resize doc comment replaced.
+- **Bookkeeping:** `API-freeze-review.md` decisions carry RESOLVED notes;
+  CHANGELOG `[Unreleased]` gains Added (mutex) + Changed (resize break,
+  docs fold); CHECKLIST M5 boundary 🔶 (freeze-ready, stamp pending);
+  PLAN milestone table M5 🔶. ctest 26/26 on lavapipe post-change;
+  docs_qa ALL CLEAN.

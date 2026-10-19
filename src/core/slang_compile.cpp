@@ -28,6 +28,18 @@
 
 namespace slv {
 namespace preset {
+
+/** @brief Serializes glslang frontend entry points across translation units
+ * (decision D-3, freeze review F-1): TShader parse/preprocess/link are not
+ * thread-safe — the lifecycle singleton below guards Initialize/FinalizeProcess
+ * only. Defined here with external linkage; slang_translate.cpp forward-declares
+ * it for its preprocessing oracle (same pattern as EnsureGlslangRuntime). */
+std::mutex &GlslangFrontendMutex()
+{
+        static std::mutex mutex;
+        return mutex;
+}
+
 namespace {
 
 /** @brief Process-wide glslang lifecycle guard. */
@@ -54,6 +66,7 @@ public:
 bool CompileStageToSpv(EShLanguage stage, const std::string &source, std::vector<uint8_t> &out, std::string &error)
 {
         GlslangRuntime::Instance();
+        std::scoped_lock glslangLock(GlslangFrontendMutex());
 
         glslang::TShader shader(stage);
         const char *sourcePtr = source.c_str();
@@ -84,10 +97,10 @@ bool CompileStageToSpv(EShLanguage stage, const std::string &source, std::vector
 
 void EnsureGlslangRuntime()
 {
-	// Shared process-wide glslang init guard: CompileStageToSpv and the
-	// translate-time preprocessing oracle in slang_translate.cpp both run
-	// TShader frontends and hit this same singleton.
-	GlslangRuntime::Instance();
+        // Shared process-wide glslang init guard: CompileStageToSpv and the
+        // translate-time preprocessing oracle in slang_translate.cpp both run
+        // TShader frontends and hit this same singleton.
+        GlslangRuntime::Instance();
 }
 
 bool CompilePass(const SlangTranslation &translation, PassSpirv &out, std::string &error)

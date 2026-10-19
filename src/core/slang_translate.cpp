@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -32,6 +33,12 @@ namespace preset {
 // with the SPIR-V compile path. The translate-time dead-code oracle below
 // runs TShader::preprocess and needs the same singleton.
 void EnsureGlslangRuntime();
+
+// Defined in slang_compile.cpp (decision D-3, freeze review F-1): serializes
+// both glslang frontend entry points — TShader::preprocess below and
+// TShader::parse/link in CompileStageToSpv are not thread-safe against each
+// other.
+std::mutex &GlslangFrontendMutex();
 
 namespace {
 
@@ -1134,6 +1141,7 @@ bool IsSamplerDeclared(const SamplerScanIndex &idx, const std::string &glsl, con
 bool PreprocessStageGlsl(const std::string &glsl, bool isVertex, std::string &out)
 {
         EnsureGlslangRuntime();
+        std::scoped_lock glslangLock(GlslangFrontendMutex());
         const EShLanguage lang = isVertex ? EShLangVertex : EShLangFragment;
         glslang::TShader shader(lang);
         const char *sourcePtr = glsl.c_str();

@@ -1837,7 +1837,7 @@ Chain::~Chain() = default;
 Chain::Chain(Chain &&) noexcept = default;
 auto Chain::operator=(Chain &&) noexcept -> Chain & = default;
 
-auto Chain::resize(uint32_t /*inputWidth*/, uint32_t /*inputHeight*/, uint32_t outputWidth, uint32_t outputHeight)
+auto Chain::resize(uint32_t outputWidth, uint32_t outputHeight)
     -> std::expected<void, Error>
 {
         if (outputWidth == 0 || outputHeight == 0)

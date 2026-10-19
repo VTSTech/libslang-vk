@@ -633,7 +633,7 @@ private:
                 }
 #endif
                 if (chain_) {
-                        if (auto r = chain_->resize(inputWidth_, inputHeight_, outWidth, outHeight); !r)
+                        if (auto r = chain_->resize(outWidth, outHeight); !r)
                                 std::printf("chain resize FAILED: %s\n", r.error().message.c_str());
                 }
         }
