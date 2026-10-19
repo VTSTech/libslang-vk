@@ -125,8 +125,10 @@ jobs:
           Wayland); on a headless server it falls back to PNG dumps
           automatically, or force it with --headless. Point the positional
           argument at any preset directory (e.g. a slang-shaders checkout).
-          Controls: 1-9 switch preset, n/p next/prev, i input source,
-          l list, params / set NAME VALUE, q quit.
+          Controls: 1-9 switch preset, n/p next/prev, r reload preset from
+          disk, i input source, l list, params (live values) /
+          set NAME VALUE, q quit. Preset/shader file edits need reload
+          (or a restart) - presets are cached per session.
 
           corpus_sweep         full-corpus load sweep + ledger tool (see
                                corpus/baseline-ledger.txt and the corpus
@@ -294,8 +296,10 @@ jobs:
           back to PNG dumps when none is found, or force it with
           --headless. Point the positional argument at any preset
           directory (e.g. a slang-shaders checkout).
-          Controls: 1-9 switch preset, n/p next/prev, i input source,
-          l list, params / set NAME VALUE, q quit.
+          Controls: 1-9 switch preset, n/p next/prev, r reload preset from
+          disk, i input source, l list, params (live values) /
+          set NAME VALUE, q quit. Preset/shader file edits need reload
+          (or a restart) - presets are cached per session.
 
           corpus_sweep.exe     full-corpus load sweep + ledger tool (see
                                corpus/baseline-ledger.txt and the corpus

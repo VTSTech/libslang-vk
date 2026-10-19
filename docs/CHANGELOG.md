@@ -10,6 +10,29 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 
 ## [Unreleased]
 
+### Added
+
+- **shader_demo `r` / `reload`** — re-reads the current preset from disk and
+  rebuilds its chain: the edit-slangp → reload → see-result loop without
+  restarting the demo. The fresh parse goes into a side slot and the cache
+  entry swaps only after the rebuilt chain replaced the old one, so the
+  cache-outlives-chain invariant holds at every step and a failed re-parse
+  leaves the previous preset + chain fully intact. Runtime parameter
+  overrides are cleared by a reload (the chain is rebuilt from file
+  values). First entry of the M4.04-post follow-up wave.
+
+### Fixed
+
+- **shader_demo `params` now shows live values.** It printed the preset
+  default as the *current* value, so after `set BRIGHTNESS 3.0` the display
+  still read `1.250` — indistinguishable from "the set didn't take" (the
+  exact confusion behind the maintainer's live-parameter field report).
+  Runtime overrides are now tracked per session and reported with a
+  `[runtime override]` tag; the lib path itself was never broken —
+  verified by byte-different PNG dumps before/after `set` on llvmpipe.
+  Help text and both CI artifact USAGE blocks document `reload` and the
+  file-edits-need-reload rule.
+
 ### Planned
 
 - M5 (1.0): API freeze, packaging, `docs/API.md`.

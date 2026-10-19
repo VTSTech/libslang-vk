@@ -137,6 +137,13 @@ std::string Trim(const std::string &s)
         return s.substr(b, e - b + 1);
 }
 
+std::string UpperCopy(std::string s)
+{
+        for (char &c : s)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return s;
+}
+
 std::string SanitizeForFilename(const std::string &in)
 {
         std::string out;
@@ -361,7 +368,66 @@ private:
 
         // ---- rendering -------------------------------------------------------
 
-        bool SelectPreset(int index)
+        /** @brief Parses a preset from disk with the SEC-01 shader-root walk.
+ * Shared by first-load (cache miss) and explicit `reload`. */
+        std::unique_ptr<slv::Preset> LoadPresetFromRecord(const demo::PresetRecord &rec)
+        {
+                // SEC-01 sandbox: preset-internal references resolve against the
+                // record's shader root. Re-point it per preset so one menu can mix
+                // the bundled demos, test fixtures and a slang-shaders checkout.
+                slv::preset::SetShaderRootDir(rec.root);
+
+                auto loaded = slv::Preset::load(*device_, rec.AbsolutePath());
+                if (!loaded) {
+                        // Pack layouts reference sibling trees via ../..
+                        // (slang-shaders: presets/crt-plus-signal/*.slangp
+                        // -> ../../crt/shaders/...). A direct-file record
+                        // roots the SEC-01 sandbox at the preset's own
+                        // folder, so those references resolve but then sit
+                        // outside the root and load with an empty path.
+                        // Retry with ancestor roots, mirroring the resolver's
+                        // own ancestor walk; each attempt re-runs the whole
+                        // load so the retry is the real path, not a patch.
+                        namespace fs = std::filesystem;
+                        const std::string &err1 = loaded.error().message;
+                        // Both failure shapes mean "the SEC-01 root was
+                        // set too narrow for this preset's layout":
+                        //  - "cannot open shader file" — pack presets
+                        //    referencing sibling trees via ../..
+                        //  - "include target outside the shaders root" —
+                        //    slang-shaders presets reached from a subtree
+                        //    (crt/crt-effects/*.slangp include
+                        //    ../../../include/compat_macros.inc, which
+                        //    lives at the corpus root).
+                        const bool rootTooNarrow = err1.find("cannot open shader file") != std::string::npos
+                            || err1.find("include target outside the shaders root") != std::string::npos
+                            // #reference wrappers (Mega Bezel): the
+                            // referenced preset sits outside the
+                            // file-rooted sandbox, the resolver
+                            // refuses it and reports the empty path.
+                            || err1.find("cannot open preset file") != std::string::npos;
+                        if (rootTooNarrow) {
+                                fs::path dir(rec.root);
+                                for (int level = 0; level < 6 && !loaded; ++level) {
+                                        const fs::path parent = dir.parent_path();
+                                        if (parent.empty() || parent == dir)
+                                                break;
+                                        dir = parent;
+                                        slv::preset::SetShaderRootDir(dir.generic_string());
+                                        loaded = slv::Preset::load(*device_, rec.AbsolutePath());
+                                }
+                        }
+                }
+                if (!loaded) {
+                        slv::preset::SetShaderRootDir(rec.root); // restore the record's own root
+                        std::printf("load FAILED [%s]: %s\n", rec.AbsolutePath().c_str(),
+                            loaded.error().message.c_str());
+                        return nullptr;
+                }
+                return std::make_unique<slv::Preset>(std::move(*loaded));
+        }
+
+        bool SelectPreset(int index, bool forceReload = false)
         {
                 if (records_.empty()) {
                         std::printf("no presets discovered — pass a directory or .slangp path\n");
@@ -371,62 +437,23 @@ private:
                 index = ((index % count) + count) % count;
                 const demo::PresetRecord &rec = records_[static_cast<size_t>(index)];
 
-                // SEC-01 sandbox: preset-internal references resolve against the
-                // record's shader root. Re-point it per preset so one menu can mix
-                // the bundled demos, test fixtures and a slang-shaders checkout.
-                slv::preset::SetShaderRootDir(rec.root);
-
                 auto &cached = presetCache_[rec.AbsolutePath()];
-                if (!cached) {
-                        auto loaded = slv::Preset::load(*device_, rec.AbsolutePath());
-                        if (!loaded) {
-                                // Pack layouts reference sibling trees via ../..
-                                // (slang-shaders: presets/crt-plus-signal/*.slangp
-                                // -> ../../crt/shaders/...). A direct-file record
-                                // roots the SEC-01 sandbox at the preset's own
-                                // folder, so those references resolve but then sit
-                                // outside the root and load with an empty path.
-                                // Retry with ancestor roots, mirroring the resolver's
-                                // own ancestor walk; each attempt re-runs the whole
-                                // load so the retry is the real path, not a patch.
-                                namespace fs = std::filesystem;
-                                const std::string &err1 = loaded.error().message;
-                                // Both failure shapes mean "the SEC-01 root was
-                                // set too narrow for this preset's layout":
-                                //  - "cannot open shader file" — pack presets
-                                //    referencing sibling trees via ../..
-                                //  - "include target outside the shaders root" —
-                                //    slang-shaders presets reached from a subtree
-                                //    (crt/crt-effects/*.slangp include
-                                //    ../../../include/compat_macros.inc, which
-                                //    lives at the corpus root).
-                                const bool rootTooNarrow = err1.find("cannot open shader file") != std::string::npos
-                                    || err1.find("include target outside the shaders root") != std::string::npos
-                                    // #reference wrappers (Mega Bezel): the
-                                    // referenced preset sits outside the
-                                    // file-rooted sandbox, the resolver
-                                    // refuses it and reports the empty path.
-                                    || err1.find("cannot open preset file") != std::string::npos;
-                                if (rootTooNarrow) {
-                                        fs::path dir(rec.root);
-                                        for (int level = 0; level < 6 && !loaded; ++level) {
-                                                const fs::path parent = dir.parent_path();
-                                                if (parent.empty() || parent == dir)
-                                                        break;
-                                                dir = parent;
-                                                slv::preset::SetShaderRootDir(dir.generic_string());
-                                                loaded = slv::Preset::load(*device_, rec.AbsolutePath());
-                                        }
-                                }
-                        }
-                        if (!loaded) {
-                                slv::preset::SetShaderRootDir(rec.root); // restore the record's own root
-                                std::printf("load FAILED [%s]: %s\n", rec.AbsolutePath().c_str(),
-                                    loaded.error().message.c_str());
+                std::unique_ptr<slv::Preset> fresh;
+                if (forceReload && cached) {
+                        // Re-parse from disk into a side slot; the cache entry is
+                        // swapped only after the rebuilt chain replaced the old
+                        // one, so the cache-outlives-chain invariant holds at
+                        // every step (a failed re-parse keeps everything intact).
+                        fresh = LoadPresetFromRecord(rec);
+                        if (!fresh)
                                 return false;
-                        }
-                        cached = std::make_unique<slv::Preset>(std::move(*loaded));
                 }
+                if (!cached) {
+                        cached = LoadPresetFromRecord(rec);
+                        if (!cached)
+                                return false;
+                }
+                slv::Preset &preset = fresh ? *fresh : *cached;
 
                 uint32_t outWidth = kHeadlessOutWidth;
                 uint32_t outHeight = kHeadlessOutHeight;
@@ -441,15 +468,18 @@ private:
                 chainOptions.outputWidth = outWidth;
                 chainOptions.outputHeight = outHeight;
                 chainOptions.outputFormat = VK_FORMAT_R8G8B8A8_UNORM;
-                auto built = slv::Chain::create(*device_, *cached, chainOptions);
+                auto built = slv::Chain::create(*device_, preset, chainOptions);
                 if (!built) {
                         std::printf("chain FAILED [%s]: %s\n", rec.displayName.c_str(), built.error().message.c_str());
                         return false;
                 }
 
                 chain_ = std::move(*built);
+                if (fresh)
+                        cached = std::move(fresh); // old Preset dies after its chain
                 current_ = index;
                 currentPreset_ = cached.get();
+                runtimeParams_.clear();
                 frameCount_ = 0;
                 inputDirty_ = true;
                 screenshotPending_ = false;
@@ -841,9 +871,9 @@ private:
         void PrintPrompt() const
         {
                 if (current_ >= 0)
-                        std::printf("[%d] shader_demo (n/p/i/w/l/params/set/q, ? for help) > ", current_);
+                        std::printf("[%d] shader_demo (n/p/i/r/w/l/params/set/q, ? for help) > ", current_);
                 else
-                        std::printf("shader_demo (number/n/p/i/w/l/params/set/q, ? for help) > ");
+                        std::printf("shader_demo (number/n/p/i/r/w/l/params/set/q, ? for help) > ");
                 std::fflush(stdout);
         }
 
@@ -882,11 +912,18 @@ private:
                         std::printf("preset has no parameters\n");
                         return;
                 }
-                for (const slv::ParameterInfo &p : params)
-                        std::printf("  %s = %.3f (default %.3f, range %.3f..%.3f step %.3f)\n", p.name.c_str(),
-                            static_cast<double>(p.defaultValue), static_cast<double>(p.defaultValue),
+                for (const slv::ParameterInfo &p : params) {
+                        float current = p.defaultValue;
+                        const auto overridden = runtimeParams_.find(UpperCopy(p.name));
+                        if (overridden != runtimeParams_.end())
+                                current = overridden->second;
+                        std::printf("  %s = %.3f (preset %.3f, range %.3f..%.3f step %.3f)%s\n",
+                            p.name.c_str(), static_cast<double>(current),
+                            static_cast<double>(p.defaultValue),
                             static_cast<double>(p.minimum), static_cast<double>(p.maximum),
-                            static_cast<double>(p.step));
+                            static_cast<double>(p.step),
+                            overridden != runtimeParams_.end() ? " [runtime override]" : "");
+                }
         }
 
         void PrintHelp() const
@@ -894,12 +931,15 @@ private:
                 std::printf("commands:\n"
                             "  <number>  load + switch to preset number N\n"
                             "  n / p     next / previous preset\n"
+                            "  r / reload  re-read the current preset from disk + rebuild its chain\n"
                             "  i         toggle input (testcard.png <-> animated pattern)\n"
                             "  w         write PNG (headless: render + dump; windowed: screenshot)\n"
                             "  l / list  list presets around the current one\n"
-                            "  params    show shader parameters\n"
-                            "  set NAME VALUE   override a parameter (next frame)\n"
-                            "  q         quit\n");
+                            "  params    show shader parameters (live values)\n"
+                            "  set NAME VALUE   override a parameter (live, next frame)\n"
+                            "  q         quit\n"
+                            "note: file edits to presets/shaders need 'reload' (or a restart) —\n"
+                            "      presets are cached per session\n");
         }
 
         /** @brief Returns false only when the app should quit. */
@@ -945,6 +985,15 @@ private:
                         PrintParams();
                         return true;
                 }
+                if (line == "r" || line == "reload") {
+                        if (current_ < 0) {
+                                std::printf("no preset loaded\n");
+                                return true;
+                        }
+                        if (SelectPreset(current_, true) && !windowed_)
+                                RenderAndDump();
+                        return true;
+                }
                 if (line.rfind("set ", 0) == 0) {
                         const std::string rest = Trim(line.substr(4));
                         const size_t space = rest.find(' ');
@@ -956,9 +1005,11 @@ private:
                         const float value = std::strtof(rest.c_str() + space + 1, nullptr);
                         if (auto r = chain_->setParameter(name, value); !r)
                                 std::printf("set FAILED: %s\n", r.error().message.c_str());
-                        else
+                        else {
+                                runtimeParams_[UpperCopy(name)] = value;
                                 std::printf("%s = %.3f (applies next frame)\n", name.c_str(),
                                     static_cast<double>(value));
+                        }
                         return true;
                 }
                 const bool numeric =
@@ -986,6 +1037,9 @@ private:
         std::unique_ptr<slv::Device> device_;
         std::vector<demo::PresetRecord> records_;
         std::unordered_map<std::string, std::unique_ptr<slv::Preset>> presetCache_;
+        // Uppercased parameter name -> last `set` value, for live display; cleared
+        // whenever a chain is (re)built. The chain owns the authoritative values.
+        std::unordered_map<std::string, float> runtimeParams_;
 #ifdef SLANGVK_DEMO_WINDOW
         std::unique_ptr<demo::WindowTarget> window_;
 #endif
