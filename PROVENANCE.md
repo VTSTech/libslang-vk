@@ -870,3 +870,33 @@ joined the canonical descriptor layout.**
   format-isolation set; the round-2 shape matrix it was building
   toward is unnecessary — the failure is fully explained and fixed
   library-side.
+
+**Session 10 (2026-10-19, Windows, RX 560, shader_demo pre-`550dfbd`
+build) — miss-list #12's interactive-params item closed by the
+maintainer's field test; the opening report ("changing the values …
+image did not change") is fully explained: two demo gaps, zero library
+bugs.**
+
+- **Live `set` verified on hardware:** `set BRIGHTNESS 3.0` on
+  `demo-bright` changed the image on the next frame — the lib's
+  runtime-override path (per-frame UBO refill from the merged
+  parameter map), already pinned by `runner_m2` in CI, now confirmed
+  interactively on the RX 560.
+- **The confusing half was demo-side, fixed upstream the same day
+  (`550dfbd`):** (a) `params` printed the preset default as the
+  current value, so a `set` looked like it had not taken; it now
+  reports live values with a `[runtime override]` tag; (b) the
+  maintainer's original attempt edited the `#pragma parameter` default
+  inside the slang file — a compile-time value a running session never
+  re-reads (presets are cached per session, no hot watch by design);
+  the new `r`/`reload` command re-parses the current preset from disk
+  and rebuilds the chain (fresh parse staged in a side slot, cache
+  swapped only after the rebuilt chain replaced the old one; a failed
+  re-parse keeps the old preset + chain intact).
+- **Sweep bookkeeping:** #12's interactive-params item closes on this
+  evidence; remaining hardware items are resize/fullscreen (swapchain
+  rebuild), the VRAM-teardown soak, a real-GPU (dGPU) Linux run, and
+  validation layers enabled on hardware. The deeper live-param
+  protocol from the runbook (stepped sweep over the full range,
+  hot-swap reset check, glow sweep) remains available as optional
+  hardening.

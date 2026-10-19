@@ -278,6 +278,7 @@ PROVENANCE.md's per-milestone sections are authoritative.
 5. **Reflection surface** — expose per-pass uniform/texture introspection for hosts building debug OSDs, or keep v1 minimal?
 6. **Extraction mechanics** — clean-room retype into the new repo vs. mechanical move with per-file relicense headers; decision affects `PROVENANCE.md` granularity.
 7. **Deferred perf/memory levers (recorded 2026-10-18)** — sync2 barriers + dynamic rendering (PROVENANCE divergence #5), the `Chain::trim()` memory hook (divergence #6), async upload via timeline semaphores, and the disk SPIR-V cache (#3 above): all deliberately out of v1. Revisit as a post-1.0 perf round with the corpus ledger + perf budgets in hand.
+8. **Load-path budgets (recorded 2026-10-19 — closes the Risk-6 residual)** — hardware numbers: 4.05 s worst cold start on the heaviest field preset, warm-cache collapse 196→73 ms. Posture: no hard load-time gate pre-1.0 — `conformance perf --report`/`--budgets` is the per-host standing vehicle (render side measured, e.g. `tests/golden/perf-rx560.txt` + derived `budgets-rx560.txt`), in-`Preset` memoization covers repeated selections within a session, and the disk SPIR-V cache (#3 above) remains the documented post-1.0 lever for cold starts.
 
 ## 14. References
 
