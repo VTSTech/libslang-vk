@@ -1877,6 +1877,9 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         Impl &impl = *impl_;
         if (input.view == VK_NULL_HANDLE || input.width == 0 || input.height == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid input frame"));
+        if (input.pixelBuffer != VK_NULL_HANDLE && input.image == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "render: InputFrame::pixelBuffer requires InputFrame::image"));
 
         // M4 output dispatch: swapchain targets always go through the present
         // draw (letterbox + rotation); offscreen targets keep the direct
@@ -2292,6 +2295,43 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         // acquire semaphore at COLOR_ATTACHMENT_OUTPUT; the submit fence makes
         // the image present-ready when render() returns.
         auto recorded = impl.device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
+                // (0) Host staging upload (single-submit path): the frame's pixel
+                // buffer is copied into the input image BEFORE the history blits
+                // or passes touch it. The image rests in SHADER_READ_ONLY_OPTIMAL
+                // before and after the frame (the same contract as the standalone
+                // Image::update path); this folds that path's separate
+                // submit->fence-wait cycle into the frame's own submission.
+                if (input.pixelBuffer != VK_NULL_HANDLE) {
+                        VkImageMemoryBarrier toDst{};
+                        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        toDst.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                        toDst.image = input.image;
+                        toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                        // The previous frame's reads (passes, history blits) must
+                        // complete before the layout transition discards content.
+                        toDst.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+                        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+                        VkBufferImageCopy copy{};
+                        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                        copy.imageExtent = {input.width, input.height, 1};
+                        vkCmdCopyBufferToImage(cmd, input.pixelBuffer, input.image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+                        VkImageMemoryBarrier toRead = toDst;
+                        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toRead);
+                }
+
                 // The input image is borrowed as a blit source for the history
                 // ring and the pass-0 mip copy, then restored to
                 // SHADER_READ_ONLY before any pass samples it.

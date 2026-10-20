@@ -125,6 +125,29 @@ public:
         /** @brief Blocks until all work submitted through this Device finishes. */
         SLANGVK_API auto waitIdle() const -> std::expected<void, Error>;
 
+        /** @brief A host-mapped buffer for per-frame CPU->GPU uploads. */
+        struct MappedBuffer {
+                VkBuffer buffer = VK_NULL_HANDLE;
+                VmaAllocation allocation = VK_NULL_HANDLE;
+                void *mapped = nullptr;   ///< Persistently mapped host pointer.
+                VkDeviceSize size = 0;    ///< Bytes allocated.
+        };
+
+        /**
+         * @brief Allocates a persistently mapped host-visible buffer
+         * (TRANSFER_SRC | TRANSFER_DST). Intended for the per-frame game-frame
+         * upload: create once at frame size, memcpy into `mapped` every frame,
+         * pass `buffer` as InputFrame::pixelBuffer, destroy with
+         * destroyMappedBuffer(). Safe to reuse across frames only after the
+         * consuming render() has returned (the runner's synchronous contract
+         * fences every submission).
+         */
+        SLANGVK_API auto createMappedBuffer(VkDeviceSize size)
+            -> std::expected<MappedBuffer, Error>;
+
+        /** @brief Frees a buffer created by createMappedBuffer(). */
+        SLANGVK_API auto destroyMappedBuffer(MappedBuffer &buffer) -> void;
+
 
         /**
          * @brief Reads an image back to host memory (row-major, tightly packed).
@@ -276,6 +299,19 @@ struct InputFrame {
         uint32_t width = 0;
         uint32_t height = 0;
         Rotation rotation = Rotation::None;
+        /**
+         * @brief Optional host-mapped staging buffer (Device::createMappedBuffer)
+         * holding the frame as width*height tightly packed texels of `format`.
+         *
+         * When set, the frame's own command buffer records the upload copy at
+         * the top (shader-read -> transfer-dst -> copy -> shader-read) BEFORE
+         * the history blits and passes run: one submit per frame instead of
+         * two, removing the extra submit->fence-wait cycle the standalone
+         * Image::update path costs. The host must not rewrite the buffer until
+         * render() has returned (the runner fences every submission).
+         * Requires `image` to be set. Leave null to render without an upload.
+         */
+        VkBuffer pixelBuffer = VK_NULL_HANDLE;
 };
 
 /**

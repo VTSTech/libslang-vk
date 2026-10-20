@@ -363,6 +363,40 @@ auto Device::waitIdle() const -> std::expected<void, Error>
         return {};
 }
 
+auto Device::createMappedBuffer(VkDeviceSize size) -> std::expected<MappedBuffer, Error>
+{
+        if (impl_ == nullptr || impl_->allocator == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "createMappedBuffer: device is not initialized"));
+        if (size == 0)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "createMappedBuffer: zero size"));
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+            | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo mappedInfo{};
+        MappedBuffer out;
+        if (vmaCreateBuffer(impl_->allocator, &bufferInfo, &allocInfo, &out.buffer, &out.allocation, &mappedInfo)
+            != VK_SUCCESS)
+                return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "mapped buffer allocation failed"));
+        out.mapped = mappedInfo.pMappedData;
+        out.size = size;
+        return out;
+}
+
+auto Device::destroyMappedBuffer(MappedBuffer &buffer) -> void
+{
+        if (impl_ == nullptr || impl_->allocator == VK_NULL_HANDLE)
+                return;
+        if (buffer.buffer != VK_NULL_HANDLE)
+                vmaDestroyBuffer(impl_->allocator, buffer.buffer, buffer.allocation);
+        buffer = {};
+}
+
 auto Device::validationErrors() const -> std::vector<std::string> { return impl_->validation.errors; }
 
 } // namespace slv
