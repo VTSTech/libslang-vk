@@ -95,16 +95,16 @@ extern "C" {
 /* ---- Status codes (mirror slv::Errc 1:1) ---------------------------------- */
 
 typedef enum slangvk_result {
-	SLANGVK_OK = 0,
-	SLANGVK_ERR_PRESET_PARSE = 1,        /**< .slangp/.slang syntax or reference problem */
-	SLANGVK_ERR_INCLUDE_CYCLE = 2,       /**< #include / #reference cycle detected */
-	SLANGVK_ERR_SHADER_COMPILE = 3,      /**< glslang front-end rejected a stage */
-	SLANGVK_ERR_UNSUPPORTED_FEATURE = 4, /**< valid construct not yet implemented */
-	SLANGVK_ERR_INVALID_ARGUMENT = 5,    /**< mismatched sizes/formats/layouts */
-	SLANGVK_ERR_VK_INIT_FAILED = 6,      /**< loader/instance/device creation failed */
-	SLANGVK_ERR_VK_DEVICE_LOST = 7,      /**< VK_ERROR_DEVICE_LOST during execution */
-	SLANGVK_ERR_VK_OUT_OF_MEMORY = 8,    /**< host or device allocation failed */
-	SLANGVK_ERR_VK_ERROR = 9             /**< any other Vulkan VkResult failure */
+        SLANGVK_OK = 0,
+        SLANGVK_ERR_PRESET_PARSE = 1,        /**< .slangp/.slang syntax or reference problem */
+        SLANGVK_ERR_INCLUDE_CYCLE = 2,       /**< #include / #reference cycle detected */
+        SLANGVK_ERR_SHADER_COMPILE = 3,      /**< glslang front-end rejected a stage */
+        SLANGVK_ERR_UNSUPPORTED_FEATURE = 4, /**< valid construct not yet implemented */
+        SLANGVK_ERR_INVALID_ARGUMENT = 5,    /**< mismatched sizes/formats/layouts */
+        SLANGVK_ERR_VK_INIT_FAILED = 6,      /**< loader/instance/device creation failed */
+        SLANGVK_ERR_VK_DEVICE_LOST = 7,      /**< VK_ERROR_DEVICE_LOST during execution */
+        SLANGVK_ERR_VK_OUT_OF_MEMORY = 8,    /**< host or device allocation failed */
+        SLANGVK_ERR_VK_ERROR = 9             /**< any other Vulkan VkResult failure */
 } slangvk_result;
 
 /** @brief Short name of a result code ("OK", "shader_compile", ...) for logs. */
@@ -126,29 +126,29 @@ typedef struct slangvk_chain slangvk_chain;
 
 /** @brief Input rotation relative to the output (RetroArch uint 0..3). */
 enum {
-	SLANGVK_ROTATION_NONE = 0,
-	SLANGVK_ROTATION_CW90 = 1,
-	SLANGVK_ROTATION_CW180 = 2,
-	SLANGVK_ROTATION_CW270 = 3
+        SLANGVK_ROTATION_NONE = 0,
+        SLANGVK_ROTATION_CW90 = 1,
+        SLANGVK_ROTATION_CW180 = 2,
+        SLANGVK_ROTATION_CW270 = 3
 };
 
 typedef struct slangvk_device_options {
-	const char *app_name;                       /**< NULL = "". */
-	uint32_t min_api_version;                   /**< 0 = VK_API_VERSION_1_1. */
-	uint32_t validation_layers;                 /**< 0/1: VK_LAYER_KHRONOS_validation. */
-	const char *const *instance_extensions;     /**< Verbatim (surface exts go here). */
-	uint32_t instance_extension_count;
-	const char *const *device_extensions;       /**< Verbatim (VK_KHR_swapchain). */
-	uint32_t device_extension_count;
+        const char *app_name;                       /**< NULL = "". */
+        uint32_t min_api_version;                   /**< 0 = VK_API_VERSION_1_1. */
+        uint32_t validation_layers;                 /**< 0/1: VK_LAYER_KHRONOS_validation. */
+        const char *const *instance_extensions;     /**< Verbatim (surface exts go here). */
+        uint32_t instance_extension_count;
+        const char *const *device_extensions;       /**< Verbatim (VK_KHR_swapchain). */
+        uint32_t device_extension_count;
 } slangvk_device_options;
 
 /** @brief Physical device identity, for host logs/UI. */
 typedef struct slangvk_device_info {
-	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
-	uint32_t api_version;
-	uint32_t vendor_id;
-	uint32_t device_id;
-	uint32_t driver_version;
+        char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
+        uint32_t api_version;
+        uint32_t vendor_id;
+        uint32_t device_id;
+        uint32_t driver_version;
 } slangvk_device_info;
 
 /**
@@ -183,16 +183,27 @@ slangvk_result slangvk_device_get_handles(const slangvk_device *device, VkInstan
 /** @brief Blocks until all work submitted through this device finishes. */
 slangvk_result slangvk_device_wait_idle(const slangvk_device *device);
 
+/**
+ * @brief Reads an image back to host memory (row-major, tightly packed).
+ * Headless helper for tests / golden images / CI (same contract as the C++
+ * Device::readPixels). Transition-safe: the image is moved to TRANSFER_SRC
+ * and restored to @p current_layout afterwards.
+ * @param out_pixels Caller-allocated buffer of at least
+ *                   width*height*bytesPerTexel bytes.
+ */
+slangvk_result slangvk_device_read_pixels(slangvk_device *device, VkImage image, VkFormat format,
+    uint32_t width, uint32_t height, VkImageLayout current_layout, void *out_pixels, size_t out_pixels_bytes);
+
 /* ---- Image (convenience host-side image + view + staging) ------------------- */
 
 typedef struct slangvk_image_options {
-	uint32_t width;
-	uint32_t height;
-	VkFormat format;          /**< 0 = VK_FORMAT_R8G8B8A8_UNORM. */
-	VkImageUsageFlags usage;  /**< 0 = sampled | color_attachment | transfer_src | transfer_dst. */
-	const void *pixels;       /**< Optional initial content, tightly packed. */
-	size_t pixel_bytes;       /**< Must equal width*height*bytesPerTexel when pixels != NULL. */
-	VkImageLayout final_layout; /**< 0 = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL. */
+        uint32_t width;
+        uint32_t height;
+        VkFormat format;          /**< 0 = VK_FORMAT_R8G8B8A8_UNORM. */
+        VkImageUsageFlags usage;  /**< 0 = sampled | color_attachment | transfer_src | transfer_dst. */
+        const void *pixels;       /**< Optional initial content, tightly packed. */
+        size_t pixel_bytes;       /**< Must equal width*height*bytesPerTexel when pixels != NULL. */
+        VkImageLayout final_layout; /**< 0 = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL. */
 } slangvk_image_options;
 
 slangvk_result slangvk_image_create(slangvk_device *device, const slangvk_image_options *options, slangvk_image **out_image);
@@ -214,18 +225,18 @@ slangvk_result slangvk_image_get_handles(const slangvk_image *image, VkImageView
 /* ---- Preset ----------------------------------------------------------------- */
 
 typedef struct slangvk_preset_options {
-	uint32_t strict;      /**< Promote translator warnings to load errors. */
-	uint32_t no_lut_images; /**< Skip LUT texture upload (compile-only sweeps). */
+        uint32_t strict;      /**< Promote translator warnings to load errors. */
+        uint32_t no_lut_images; /**< Skip LUT texture upload (compile-only sweeps). */
 } slangvk_preset_options;
 
 /** @brief Metadata for one shader parameter (merged preset + pragma view). */
 typedef struct slangvk_parameter {
-	char name[128];
-	char description[256];
-	float default_value;
-	float minimum;
-	float maximum;
-	float step;
+        char name[128];
+        char description[256];
+        float default_value;
+        float minimum;
+        float maximum;
+        float step;
 } slangvk_parameter;
 
 /**
@@ -251,27 +262,27 @@ slangvk_result slangvk_preset_parameter(const slangvk_preset *preset, uint32_t i
 
 /** @brief Pixel rectangle; x/y may be negative when host-supplied. */
 typedef struct slangvk_rect {
-	int32_t x;
-	int32_t y;
-	uint32_t width;
-	uint32_t height;
+        int32_t x;
+        int32_t y;
+        uint32_t width;
+        uint32_t height;
 } slangvk_rect;
 
 /** @brief The chain's input texture (host-owned; must be SHADER_READ_ONLY_OPTIMAL). */
 typedef struct slangvk_input_frame {
-	VkImageView view; /**< Required. */
-	VkImage image;    /**< Required for history/mipmap-input presets (blitted, never modified). May be NULL otherwise. */
-	VkFormat format;
-	uint32_t width;
-	uint32_t height;
-	uint32_t rotation; /**< SLANGVK_ROTATION_*. */
+        VkImageView view; /**< Required. */
+        VkImage image;    /**< Required for history/mipmap-input presets (blitted, never modified). May be NULL otherwise. */
+        VkFormat format;
+        uint32_t width;
+        uint32_t height;
+        uint32_t rotation; /**< SLANGVK_ROTATION_*. */
 } slangvk_input_frame;
 
 /** @brief Per-frame inputs (values written into the params UBO). */
 typedef struct slangvk_frame_info {
-	uint64_t frame_count;
-	float frame_delta_us; /**< Microseconds since the previous frame (FrameTime). */
-	int32_t frame_direction; /**< 1 forward, -1 rewind. */
+        uint64_t frame_count;
+        float frame_delta_us; /**< Microseconds since the previous frame (FrameTime). */
+        int32_t frame_direction; /**< 1 forward, -1 rewind. */
 } slangvk_frame_info;
 
 /**
@@ -283,12 +294,12 @@ typedef struct slangvk_frame_info {
  * needs no wait semaphore.
  */
 typedef struct slangvk_swapchain_frame {
-	VkImageView swapchain_image_view; /**< The acquired image's view. */
-	VkFormat format;                  /**< The swapchain's current format. */
-	uint32_t width;
-	uint32_t height;
-	slangvk_rect output_rect;         /**< Content rect; all-zero = fit + center (letterbox). */
-	VkSemaphore acquire_semaphore;    /**< Signaled by the host's acquire; optional (VK_NULL_HANDLE). */
+        VkImageView swapchain_image_view; /**< The acquired image's view. */
+        VkFormat format;                  /**< The swapchain's current format. */
+        uint32_t width;
+        uint32_t height;
+        slangvk_rect output_rect;         /**< Content rect; all-zero = fit + center (letterbox). */
+        VkSemaphore acquire_semaphore;    /**< Signaled by the host's acquire; optional (VK_NULL_HANDLE). */
 } slangvk_swapchain_frame;
 
 /**
@@ -297,11 +308,11 @@ typedef struct slangvk_swapchain_frame {
  * draws straight in (byte-exact); otherwise fit-and-center + letterbox.
  */
 typedef struct slangvk_offscreen {
-	VkImageView view;   /**< Required. */
-	VkImage image;      /**< Required only when the final pass is feedback-read. May be NULL otherwise. */
-	VkFormat format;
-	uint32_t width;
-	uint32_t height;
+        VkImageView view;   /**< Required. */
+        VkImage image;      /**< Required only when the final pass is feedback-read. May be NULL otherwise. */
+        VkFormat format;
+        uint32_t width;
+        uint32_t height;
 } slangvk_offscreen;
 
 /**

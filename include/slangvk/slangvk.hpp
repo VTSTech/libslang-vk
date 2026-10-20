@@ -23,4 +23,5 @@
 // core-only consumers define SLANGVK_NO_DEFAULTS or turn the option off and
 // include only the core headers they need).
 #include "slangvk/runner.hpp"
+#include "slangvk/c.h" // extern "C" surface over the runner (same enable gate: it only declares, but its symbols live in the runner library)
 #endif

@@ -94,4 +94,16 @@ if(SLANGVK_ENABLE_VK)
         target_compile_definitions(test_runner_pushblock PRIVATE
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_pushblock COMMAND test_runner_pushblock)
+
+        # C API smoke: the extern "C" surface (slangvk/c.h) drives the same
+        # headless path end-to-end — device create, image create/update,
+        # preset load + parameter metadata + live override, identity/gain
+        # chains, resize, error paths — with byte-exact readback expectations.
+        # The test TU consumes ONLY the C header; readback goes through
+        # slangvk_device_read_pixels, so this also pins the full C contract.
+        add_executable(test_c_api test_c_api.cpp)
+        target_link_libraries(test_c_api PRIVATE slangvk)
+        target_compile_definitions(test_c_api PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME c_api COMMAND test_c_api)
 endif()

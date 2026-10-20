@@ -83,7 +83,10 @@ if(SLANGVK_ENABLE_VK)
             src/vk/lut.cpp
             src/vk/preset.cpp
             src/vk/chain.cpp
-            src/vk/vma_impl.cpp)
+            src/vk/vma_impl.cpp
+            # extern "C" surface (include/slangvk/c.h); bridges the runner,
+            # so it belongs to the same enable gate.
+            src/c_api.cpp)
 endif()
 
 # Each variant compiles the core sources once with its own export defines:
