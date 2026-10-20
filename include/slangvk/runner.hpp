@@ -43,6 +43,15 @@
 
 #include "slangvk/export.h"
 
+// Forward declaration of the VMA handle used by Device::MappedBuffer below.
+// Expands to the exact same `typedef struct VmaAllocation_T* VmaAllocation;`
+// that vk_mem_alloc.h emits (VMA declares this type with VK_DEFINE_HANDLE),
+// so translation units that also include vk_mem_alloc.h get a legal
+// identical typedef redeclaration, and units that don't still compile.
+// This keeps the public header's only external dependency on Vulkan headers
+// (VMA's include dir is PRIVATE to the library target).
+VK_DEFINE_HANDLE(VmaAllocation)
+
 namespace slv {
 
 /** @brief Error categories reported through Error::code. */
