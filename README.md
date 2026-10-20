@@ -3,7 +3,8 @@
 [![ci](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml/badge.svg)](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml)
 
 Parse, translate and compile **libretro slang shader presets** (`.slangp` /
-`.slang`) as an embeddable C++23 library, with a **Vulkan** execution path.
+`.slang`) as an embeddable C++23 library — pure-C binding included — with a
+**Vulkan** execution path.
 
 ```
 .slangp ──parser──▶ pass chain ──translator──▶ per-stage GLSL ──glslang──▶ SPIR-V ──runner──▶ Vulkan
@@ -16,8 +17,8 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4 (presentation) — library milestones complete.** All library-side
-M0–M4 gates are green: 25/25 ctest, byte-exact goldens, zero validation-layer
+**Status: M4.05 — library milestones complete.** All library-side M0–M4
+gates are green: 26/26 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
 M2 execution contract (history rings `OriginalHistory#`, feedback
@@ -25,9 +26,12 @@ double-buffering `PassFeedback#` / `<name>Feedback`, per-pass FBO formats,
 `mipmap_input` refill, FBO recreation on resize, live parameters), M3 LUT
 uploads, and — since M4 — swapchain presentation: the final pass draws into an
 acquired swapchain image with the letterbox rect and orientation handled by
-the library (plan §8 output mode (a)). Per-item implementation status,
-audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md); notable
-changes per milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
+the library (plan §8 output mode (a)). M4.05 adds the pure-C API
+([`include/slangvk/c.h`](include/slangvk/c.h) — [C API](#c-api)) and the
+single-submit per-frame upload path (`Device::createMappedBuffer` +
+`InputFrame::pixelBuffer`). Per-item implementation status, audited against
+the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md); notable changes per
+milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 **Corpus verdict (M4.03):** the full libretro preset corpus — all 2,658
 presets, pinned to the revision recorded in the ledger header — is swept
@@ -53,6 +57,7 @@ exit gate.
 - [Shader demo](#shader-demo)
 - [Consuming](#consuming)
 - [Vulkan runner](#vulkan-runner-m1--m2--m3--m4)
+- [C API](#c-api)
 - [Example](#example)
 - [Conformance: golden images + perf budgets](#conformance-golden-images--perf-budgets)
 - [Building and testing](#building-and-testing)
@@ -88,6 +93,9 @@ auto chain  = slv::Chain::create(*device, *preset, {.outputWidth = 1280, .output
 chain->render(inputFrame, outputTarget, {});   // once per frame
 ```
 
+The same runner speaks C too — [`include/slangvk/c.h`](include/slangvk/c.h)
+is an `extern "C"` mirror of the C++ surface (see [C API](#c-api)).
+
 ## Shader demo
 
 [`examples/shader_demo`](examples/shader_demo) is a working host built
@@ -121,8 +129,9 @@ Menu commands (terminal-driven, both modes):
 | `i`            | toggle input: `testcard.png` (default) ↔ animated pattern      |
 | `w`            | write PNG (headless: render + dump now; windowed: screenshot)  |
 | `l` / `list`   | list presets around the current one                            |
-| `params`       | show the current preset's shader parameters                    |
+| `params`       | show the current preset's shader parameters (live values)      |
 | `set NAME VAL` | override a parameter (applies on the next frame)               |
+| `r` / `reload` | re-read the current preset from disk and rebuild its chain     |
 | `q`            | quit                                                           |
 
 Notes:
@@ -261,10 +270,60 @@ validation-error gate — `tests/test_runner_headless.cpp` (M1),
 `tests/test_runner_m2.cpp` (M2 field canaries), `tests/test_runner_m3.cpp`
 (M3) and `tests/test_runner_m4.cpp` (M4).
 
+M4.05 trims the per-frame sync cost for hosts that upload every frame:
+`Device::createMappedBuffer()` hands back a persistently mapped staging
+buffer — memcpy into it and pass it as `InputFrame::pixelBuffer`, and the
+chain records the upload copy at the top of its own frame submit
+(shader-read → transfer-dst → copy → shader-read barriers, before history
+blits and passes run). One command buffer, one submit, one fence wait per
+frame — the standalone `Image::update` round-trip's second submit + fence
+drain disappears, along with the per-frame staging alloc/free.
+`Image::update` stays for headless and test use.
+
 Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
 (no link-time libvulkan); memory comes from vendored
 [VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator).
 Hosts adopting a context keep owning their instance/device/queue.
+
+## C API
+
+Since M4.05 the runner also ships a pure-C surface,
+[`include/slangvk/c.h`](include/slangvk/c.h): `stddef.h`/`stdint.h` +
+`vulkan/vulkan.h` only, `extern "C"`, consumable from C and any FFI
+language. It mirrors the C++ API 1:1 — opaque `slangvk_device` /
+`slangvk_image` / `slangvk_preset` / `slangvk_chain` handles,
+`slangvk_result` codes matching `slv::Errc` one-for-one, and thread-local
+`slangvk_last_error()` carrying the last failed call's message. Device
+creation mirrors the two C++ modes: `slangvk_device_create` (library-owned)
+or `slangvk_device_adopt` (host-owned instance/device/queue).
+
+```c
+/* abridged — the header's opening comment is the full walkthrough */
+slangvk_device dev;  slangvk_image img;
+slangvk_preset preset;  slangvk_chain chain;
+
+slangvk_device_create(&dev_opt, &dev);            /* or slangvk_device_adopt(...) */
+slangvk_image_create(dev, &img_opt, &img);        /* input texture */
+slangvk_preset_load(dev, "shaders/crt/royale.slangp", NULL, &preset);
+slangvk_chain_create(dev, preset, SWAP_W, SWAP_H, swap_format, &chain);
+
+/* per frame: */
+slangvk_image_update(img, my_cpu_framebuffer, GAME_W * GAME_H * 4);
+slangvk_image_get_handles(img, &in.view, &in.image, &in.format, &in.width, &in.height);
+if (slangvk_chain_render_swapchain(chain, &in, &out, &fi) != SLANGVK_OK)
+        fprintf(stderr, "render failed: %s\n", slangvk_last_error());
+```
+
+Contracts carry over verbatim (input layout, preset outlives chains,
+single-threaded chains, resize before render after an extent change;
+destroy order chains → presets → images → device). `slangvk.hpp` pulls the
+header in and both `slangvk` and `slangvk-shared` build the adapter, so the
+CMake consuming story is unchanged.
+[`tests/test_c_api.cpp`](tests/test_c_api.cpp) consumes only the C header
+and drives the full loop — device create, image create/update, preset load
++ parameter metadata + live override, identity/gain chains, resize, error
+paths — with byte-exact readback expectations (ctest: `c_api`), skipping
+cleanly when no Vulkan ICD is present.
 
 ## Example
 
@@ -504,6 +563,8 @@ header.
   translation and execution semantics, section by section).
 - [docs/API.md](docs/API.md) — the public C++23 API reference (draft,
   pre-freeze): core + runner layers, error model, lifetimes, walkthrough.
+  (The C ABI's contract lives in the [`c.h`](include/slangvk/c.h) header
+  comment.)
 - [docs/PLAN.md](docs/PLAN.md) — milestones, API sketch, risk register.
 - [docs/CHECKLIST.md](docs/CHECKLIST.md) — per-item M0–M4 implementation
   status, audited against the plan.
