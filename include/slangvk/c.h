@@ -1,5 +1,6 @@
 // slangvk_c.h — minimal extern "C" integration header for libslang-vk
 // Written by VTSTech (Nigel Todman) (veritas@vts-tech.org)
+// AI Assisted by Super-Z (GLM-5.3-Flash)
 // License: MIT
 //
 // A drop-in C binding over the C++23 public API (include/slangvk/runner.hpp).
