@@ -5,13 +5,57 @@ slang shader presets — are documented in this file.
 
 Milestones follow the M-series plan in [PLAN.md §11](PLAN.md) (`M0` → `M5`).
 Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
-`M0` … `M4.04`. Format adapted from
+`M0` … `M4.05`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [M4.05] — 2026-10-18/20
+
+The freeze-review + C-ABI + frame-path wave: the freeze-review findings
+land as code and contract changes (process-global glslang frontend mutex,
+`Chain::resize` dead parameters dropped, `docs/API.md` folded to match the
+delivered surface), the library ships its first foreign-ABI surface — a
+pure-C header, adapter and headless test suite — and the per-frame Vulkan
+path drops its second submit + fence-drain cycle by folding the host
+upload into the chain's own frame submit. Closes with the fix that keeps
+the public header's only external dependency on the Vulkan headers.
 
 ### Added
 
+- **C API (`include/slangvk/c.h` + `src/c_api.cpp`)** — the runner's first
+  foreign-ABI surface: a pure-C header (`stddef.h`/`stdint.h` +
+  `vulkan/vulkan.h` only, `extern "C"`, consumable from any FFI language)
+  mirroring the C++ API 1:1. `slangvk_result` mirrors `slv::Errc`
+  code-for-code, `slangvk_result_name()` names codes for logs and
+  thread-local `slangvk_last_error()` carries the last failed call's
+  message; opaque `slangvk_device` / `slangvk_image` / `slangvk_preset` /
+  `slangvk_chain` handles; 25 entry points covering device `create`
+  (library-owned) or `adopt` (host-owned instance/device/queue — the
+  DevilutionX mode) plus `get_handles`/`get_info`/`wait_idle`/
+  `read_pixels`, image `create`/`update`/`get_handles`, preset `load` +
+  pass/parameter queries, and chain `create`/`set_parameter`/`resize`/
+  `render_swapchain`/`render_offscreen`/`pass_output_size` — with the C++
+  contracts carried over verbatim (input layout, preset outlives chains,
+  single-threaded chains, resize before render after an extent change).
+  `slangvk.hpp` pulls the header in; both `slangvk` and `slangvk-shared`
+  build the adapter. `tests/test_c_api.cpp` (424 lines) drives the
+  create → load → render → destroy loop headless at 64×64 and exercises
+  the error model, skipping cleanly (exit 0) when no Vulkan ICD is
+  present — CI runs it on lavapipe, Windows CI has none.
+- **Single-submit per-frame upload path** (`Device::createMappedBuffer` /
+  `destroyMappedBuffer`, `InputFrame::pixelBuffer`) — hosts doing their own
+  per-frame upload no longer pay the standalone `Image::update` round-trip:
+  its own staging alloc/free + command buffer + submit + fence drain on top
+  of the chain's render submit. `createMappedBuffer()` allocates a
+  persistently mapped host-visible staging buffer once at frame size; every
+  frame the host memcpys into `mapped` and passes `buffer` as
+  `InputFrame::pixelBuffer`, and the chain records the buffer→image copy at
+  the top of its own frame submit (shader-read → transfer-dst → copy →
+  shader-read barriers, before history blits and passes run). Per frame:
+  one command buffer, one submit, one fence wait, zero staging churn —
+  motivated by the DevilutionX integration, where the extra submit+drain
+  cycle dominated the frame budget with cheap presets (a passthrough preset
+  cost ~4.4 ms/frame over the no-shader path). `Image::update` stays for
+  headless/test use.
 - **shader_demo `r` / `reload`** — re-reads the current preset from disk and
   rebuilds its chain: the edit-slangp → reload → see-result loop without
   restarting the demo. The fresh parse goes into a side slot and the cache
@@ -67,6 +111,16 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 
 ### Fixed
 
+- **`runner.hpp` builds without VMA on the include path.** The mapped-buffer
+  API put `VmaAllocation` into the public header, whose only external
+  include had been `vulkan/vulkan.h` (VMA is linked PRIVATE —
+  `vk_mem_alloc.h` reached only the `src/vk/` TUs), so the first public
+  consumer TU (`src/c_api.cpp`) failed the CI build with "'VmaAllocation'
+  does not name a type". Fixed with a `VK_DEFINE_HANDLE(VmaAllocation)`
+  forward declaration: it expands to the identical
+  `typedef struct VmaAllocation_T* VmaAllocation` that `vk_mem_alloc.h`
+  emits, so both include orders are legal identical-typedef redeclarations
+  and the public header keeps its single Vulkan-headers dependency.
 - **shader_demo `params` now shows live values.** It printed the preset
   default as the *current* value, so after `set BRIGHTNESS 3.0` the display
   still read `1.250` — indistinguishable from "the set didn't take" (the
@@ -76,6 +130,8 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
   verified by byte-different PNG dumps before/after `set` on llvmpipe.
   Help text and both CI artifact USAGE blocks document `reload` and the
   file-edits-need-reload rule.
+
+## [Unreleased]
 
 ### Planned
 
@@ -423,7 +479,8 @@ Conformance + perf wave (partial per PLAN.md §11).
 
 ---
 
-[Unreleased]: https://github.com/VTSTech/libslang-vk/compare/31519c8...HEAD
+[Unreleased]: https://github.com/VTSTech/libslang-vk/compare/540c9d6...HEAD
+[M4.05]: https://github.com/VTSTech/libslang-vk/compare/31519c8...540c9d6
 [M4.04]: https://github.com/VTSTech/libslang-vk/compare/89963da...31519c8
 [M4.03]: https://github.com/VTSTech/libslang-vk/commit/89963da
 [M4.02]: https://github.com/VTSTech/libslang-vk/commit/cf91f52
