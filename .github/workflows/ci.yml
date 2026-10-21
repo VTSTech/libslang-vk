@@ -102,6 +102,133 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [Release, Debug]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools + lavapipe + validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build mesa-vulkan-drivers vulkan-validationlayers libvulkan1
+          # GLFW dev stack for the shader_demo windowed backend (auto-detected
+          # in examples/CMakeLists.txt). Without these the demo silently
+          # builds headless-only — fine for the test suite, but the Release
+          # artifact should ship the real windowed binary. The Wayland
+          # packages are best-effort; X11 alone satisfies the detection.
+          sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxext-dev libxcursor-dev libxi-dev libxkbcommon-dev libwayland-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Stage shader_demo artifact
+        if: matrix.build_type == 'Release'
+        run: |
+          mkdir -p stage/shader-demo/presets
+          cp build/examples/shader_demo stage/shader-demo/
+          cp build/examples/corpus_sweep stage/shader-demo/
+          cp build/examples/conformance stage/shader-demo/
+          cp -r examples/presets/. stage/shader-demo/presets/
+          cp examples/shader_demo/assets/testcard.png stage/shader-demo/
+          # golden-image conformance kit: manifest + goldens + budgets + the
+          # fixture preset trees the manifest references.
+          cp -r tests/golden stage/shader-demo/tests-golden
+          cp -r tests/data stage/shader-demo/tests-data
+          cat > stage/shader-demo/USAGE.txt <<EOF
+          shader_demo — CI artifact (linux-x64, windowed GLFW build)
+          commit:    ${GITHUB_SHA}
+          ref:       ${GITHUB_REF_NAME}
+          toolchain: runner GCC, CMake + Ninja (Release)
+
+          shader_demo    host demo binary (statically linked with
+                         libslangvk + glslang; no install needed)
+          presets/       self-contained demo presets (start here)
+          testcard.png   480x320 default input image (auto-found next
+                         to the exe; --input pattern for the animated one)
+
+          Usage:
+            ./shader_demo --list presets
+            ./shader_demo --no-menu --frames 10 --out dump presets
+            ./shader_demo presets                windowed + TUI menu
+                                                 (starts on testcard.png)
+            ./shader_demo --input pattern presets
+
+          Windowed mode needs a Vulkan ICD with swapchain support (X11 or
+          Wayland); on a headless server it falls back to PNG dumps
+          automatically, or force it with --headless. Point the positional
+          argument at any preset directory (e.g. a slang-shaders checkout).
+          Controls: 1-9 switch preset, n/p next/prev, r reload preset from
+          disk, i input source, l list, params (live values) /
+          set NAME VALUE, q quit. Preset/shader file edits need reload
+          (or a restart) - presets are cached per session.
+
+          corpus_sweep         full-corpus load sweep + ledger tool (see
+                               corpus/baseline-ledger.txt and the corpus
+                               workflow). Pass .slangp roots; use an
+                               ABSOLUTE root path. Example:
+            ./corpus_sweep /abs/path/slang-shaders --ledger new.txt --baseline old.txt
+
+          conformance          golden-image + perf-budget suite. The bundle
+                               ships the kit (tests-golden/: manifest, goldens,
+                               budgets) and the fixture presets (tests-data/):
+            ./conformance golden --manifest tests-golden/manifest.txt \\
+                --golden-dir tests-golden tests-data .
+            ./conformance perf tests-data . --budgets tests-golden/budgets-lavapipe.txt
+            ./conformance drill --manifest tests-golden/drill/manifest.txt \\
+                tests-golden tests-data
+          Goldens were generated on a lavapipe CPU renderer; on a real GPU
+          expect drift — regenerate in place with --update. The drill is
+          the fallback regression: every listed preset must be rejected
+          cleanly with the device unharmed (CHECKLIST miss #11).
+          EOF
+          (cd stage && zip -qr ../shader-demo-linux-x64.zip shader-demo)
+
+      - name: Upload shader_demo artifact
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-demo-linux-x64
+          path: shader-demo-linux-x64.zip
+          if-no-files-found: error
+
+      - name: Stage artifacts
+        if: matrix.build_type == 'Release'
+        run: |
+          mkdir -p stage/libslangvk/include
+          cp -r include/slangvk stage/libslangvk/include/
+          cp build/libslangvk.a build/libslangvk.so stage/libslangvk/
+          cp LICENSE stage/libslangvk/
+          cat > stage/libslangvk/ARTIFACTS.txt <<EOF
+          libslang-vk — CI artifacts (linux-x64)
+          commit: ${GITHUB_SHA}
+          ref:    ${GITHUB_REF_NAME}
+          toolchain: runner GCC, CMake + Ninja (Release)
+
+          libslangvk.a     static library
+          libslangvk.so    shared library (glslang + volk linked in statically)
+          include/slangvk/ public headers
+
+          Notes:
+          - C++23 API: same-toolchain ABI only; prefer building via
+            FetchContent (README) when your toolchain differs.
+          - The static lib does not embed glslang; consumers add
+            glslang::glslang + glslang::SPIRV (cmake/deps.cmake pins it).
+          - MIT (LICENSE); third-party components keep their own licenses
+            (PROVENANCE.md).
+          EOF
+          (cd stage && zip -qr ../libslangvk-linux-x64.zip libslangvk)
+
+      - name: Upload artifacts
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libslangvk-linux-x64
+          path: libslangvk-linux-x64.zip
+          if-no-files-found: error
 
   linux-asan:
     name: linux-x64 (asan+ubsan test build)
