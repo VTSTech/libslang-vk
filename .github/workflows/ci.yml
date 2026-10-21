@@ -96,8 +96,11 @@ jobs:
             changed_files=""
           else
             echo "Normal commit diff"
-            # Correct order: old commit first, then new commit
-            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.sha }} ${{ github.event.before }} 2>/dev/null || echo "")
+            # Get the actual parent of the current commit
+            parent=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+            echo "Debug: parent commit = $parent"
+            echo "Debug: using git diff: $parent HEAD"
+            changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT $parent HEAD 2>/dev/null || echo "")
           fi
           
           # Additional fallback: check the current commit directly
