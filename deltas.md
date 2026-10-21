@@ -110,6 +110,14 @@ resources to be per-frame.
   where the backpressure lives: the chain waits there when the host runs ahead.
 - **C API** — `slangvk_chain_options` + `slangvk_chain_create_ex()` expose
   `frames_in_flight`; `slangvk_chain_create()` is unchanged (one frame in flight).
+- **The descriptor pool was resized for the slots** — three sets per pass per
+  slot, plus the shared empty set and the present set. The budget was one set
+  short, and since the present set is allocated last the failure surfaced as
+  "present descriptor set allocation failed" on drivers that enforce
+  `maxSets` strictly (lavapipe does not, which is why the local and CI
+  suites did not catch it). The chain now also counts the sets it allocates
+  and refuses to exceed the pool's budget, so a mis-sizing fails the same
+  way everywhere.
 
 **Contract and limits (stated rather than glossed over).**
 

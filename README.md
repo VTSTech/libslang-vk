@@ -17,8 +17,8 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4.06 — async rendering and device-lost recovery.** All library-side M0–M4
-gates are green: 29/29 ctest, byte-exact goldens, zero validation-layer
+**Status: M4.06 — async rendering, frame pipelining and device-lost recovery.** All library-side M0–M4
+gates are green: 30/30 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
 M2 execution contract (history rings `OriginalHistory#`, feedback
@@ -31,7 +31,8 @@ the library (plan §8 output mode (a)). M4.05 adds the pure-C API
 single-submit per-frame upload path (`Device::createMappedBuffer` +
 `InputFrame::pixelBuffer`). M4.06 splits the frame path into record / submit
 / wait, so a host can keep a frame in flight
-(`Chain::render_async()` + `Chain::wait_async()`), and adds device-lost
+(`Chain::render_async()` + `Chain::wait_async()`); lets several frames be
+pipelined at once (`ChainOptions::framesInFlight`); and adds device-lost
 recovery (`Device::recover()`, with the preset's textures and the chain
 rebuilt automatically).
 Per-item implementation status, audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md);

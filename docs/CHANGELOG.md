@@ -10,10 +10,11 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 
 ## [M4.06] — 2026-10-21
 
-The robustness wave: the two Medium findings from the codebase audit land as
+The robustness wave: the three Medium findings from the codebase audit land as
 code. The frame path is split into record / submit / wait so a host can hold
-a frame in flight, and a lost Vulkan device can be rebuilt — together with the
-presets and chains that lived on it — instead of ending the process.
+a frame in flight, several frames can be pipelined at once, and a lost Vulkan
+device can be rebuilt — together with the presets and chains that lived on it
+— instead of ending the process.
 
 ### Added
 
@@ -103,9 +104,18 @@ presets and chains that lived on it — instead of ending the process.
   `SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED` keeps `slangvk_result` aligned
   with `slv::Errc` (the C enum mirrors it code-for-code).
 
-- **CI gate** — the GitHub Actions workflow skips the build jobs for commits
-  that only touch documentation, using the `tj-actions/changed-files` action.
-  This reduces CI resource usage and speeds up documentation-only updates.
+- **CI: skip the build jobs for documentation-only commits** — the workflow
+  diffs the commit range (three-dot, so a stale `before` still yields the
+  real change set) and skips the heavy jobs when every changed file is
+  `*.md`/`*.txt`/`*.rst`. No third-party action is involved; the range comes
+  from the event payload and the checkout is a full clone so the diff has
+  the history it needs.
+- **CI: self-containment check** (`tools/check_self_contained.sh`) — every
+  public header and every test translation unit is compiled on its own, with
+  only the includes it declares. A translation unit that leans on another
+  header pulling in `<optional>` (or `<string>`, ...) can build fine locally
+  and fail on CI; the check turns that into a failure in seconds instead of
+  at the end of a long build.
 
 ### Changed
 
@@ -127,6 +137,15 @@ presets and chains that lived on it — instead of ending the process.
   `ChainOptions::framesInFlight` and the per-frame resource slots.
 - **ROB-35** — limited error recovery for device-lost scenarios: closed by
   `Device::recover()` and the automatic rebuild.
+- **The descriptor pool's set budget** — the per-frame resources changed what
+  a chain allocates (three sets per pass per frame slot, plus the empty and
+  present sets), and the pool's `maxSets` was one short of that. The present
+  set is allocated last, so the failure surfaced as "present descriptor set
+  allocation failed" on drivers that enforce `maxSets` strictly. lavapipe
+  hands out more sets than `maxSets`, so the local and CI suites did not
+  notice. The chain now also counts the sets it allocates and refuses to
+  exceed the pool's budget, so a mis-sizing fails the same way on every
+  driver.
 
 ### Tests
 
@@ -136,7 +155,9 @@ presets and chains that lived on it — instead of ending the process.
 - `tests/test_runner_pipeline.cpp` — the pipelining path: several frames
   outstanding on the GPU at once, overlapped frames producing byte-identical
   output to a serial render, and the history and feedback presets producing
-  the same pixels pipelined as they do serially.
+  the same pixels pipelined as they do serially. It also builds a two-pass
+  chain with 1, 3 and 8 frame slots, which is the case the descriptor pool
+  budget got wrong.
 - `tests/test_runner_recovery.cpp` — the recovery path: device replacement,
   the chain rebuilding itself, byte-identical output afterwards, further
   recoveries, and the release of stale objects.
