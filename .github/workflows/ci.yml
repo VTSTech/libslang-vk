@@ -72,48 +72,55 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - uses: ytj/changed-files@v1.0.4
-        id: changed-files
         with:
-          files: |
-            **/*.md
-            **/*.txt
-            **/*.rst
+          # Full history: the .md gate diffs HEAD^..HEAD, and a shallow
+          # clone (checkout's default depth=1) has no HEAD^ to diff against.
+          fetch-depth: 0
       - name: Check if only .md files changed
         id: check
         run: |
-          echo "All changed files:"
-          echo ${{ steps.changed-files.outputs.all_changed_files }}
-          echo ""
-          echo "Modified files:"
-          echo ${{ steps.changed-files.outputs.modified_files }}
-          echo ""
-          echo "Added files:"
-          echo ${{ steps.changed-files.outputs.added_files }}
-          
-          # Check if all changed files are .md files
-          if [[ -n "${{ steps.changed-files.outputs.all_changed_files }}" ]]; then
-            # Check if any non-.md file was changed
-            non_md=false
-            for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
-              if [[ "$file" != *.md ]]; then
-                echo "Non-.md file changed: $file"
-                non_md=true
-                break
-              fi
-            done
-            
-            if [[ "$non_md" == true ]]; then
-              echo "Non-.md files detected - running CI"
-              echo "should-skip=false" >> $GITHUB_OUTPUT
-            else
-              echo "Only .md files changed - skipping CI"
-              echo "should-skip=true" >> $GITHUB_OUTPUT
-            fi
+          set -uo pipefail
+
+          # Determine the diff range. A push gives before..sha; a PR gives
+          # base..head. Both SHAs are fetched above (fetch-depth: 0).
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            range="${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          elif [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
+            # New branch: the root commit's files are the "new" set.
+            range=""
           else
-            echo "No files changed - skipping CI"
-            echo "should-skip=true" >> $GITHUB_OUTPUT
+            # Three-dot: merge-base..sha, so a stale (non-ancestor) `before`
+            # still yields the real change set instead of a fatal error.
+            range="${{ github.event.before }}...${{ github.sha }}"
           fi
+
+          if [[ -n "$range" ]]; then
+            if ! git rev-parse --verify --quiet "${{ github.sha }}" >/dev/null; then
+              echo "Could not resolve ${{ github.sha }} - running CI to be safe."
+              echo "should-skip=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            changed_files=$(git diff --name-only --diff-filter=ACMR "$range" 2>/dev/null) || changed_files=""
+          else
+            root=$(git rev-list --max-parents=0 HEAD 2>/dev/null | head -1) || root=""
+            changed_files=$(git show --pretty=format: --name-only --diff-filter=ACMR "$root" 2>/dev/null) || changed_files=""
+          fi
+
+          echo "Changed files:"
+          echo "$changed_files"
+
+          # Skip the heavy jobs when every changed file is documentation.
+          skip=true
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              *.md|*.txt|*.rst) ;;
+              *) echo "Non-doc file changed: $file"; skip=false; break ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "should-skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "should-skip=$skip"
   linux:
     name: linux-x64 (${{ matrix.build_type }})
     runs-on: ubuntu-latest
