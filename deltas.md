@@ -149,9 +149,9 @@ resources to be per-frame.
   history-ring and feedback cases.
 - ASAN + UBSAN builds are clean; the leak profile is unchanged from the pre-change
   baseline (240 bytes in 3 allocations, the same as the untouched runner tests).
-- **Downstream hosts**: the M4.06 build was exercised against two downstream
-  consumers (Doom and Diablo) — both load presets and render with the shaders
-  working again.
+- **Downstream hosts**: the M4.06 build was exercised against both reference
+  implementations (**DevilutionX-libslang-vk** and **Chocolate-Doom-VK**) —
+  both load presets and render with the shaders working again.
 
 ---
 
@@ -363,9 +363,12 @@ compile.
   live-parameter cases that exercise the override cache's invalidation.
 - ASAN + UBSAN builds are clean; the leak profile is unchanged from the
   pre-change baseline (240 bytes in 3 allocations).
-- **Downstream host**: the M4.07 build was smoke-tested on the Diablo
-  implementation — presets load, the shaders work, and the run holds
-  **140+ FPS with FXAA.slangp**. The allocation work is therefore confirmed
-  on a real GPU, not only counted on the software rasterizer.
+- **Downstream host**: the M4.07 build was smoke-tested on the
+  **DevilutionX-libslang-vk** fork — presets load, the shaders work, and the
+  run holds **140+ FPS with FXAA.slangp**. The allocation work is therefore
+  confirmed on a real GPU, not only counted on the software rasterizer.
+  (The other reference implementation, **Chocolate-Doom-VK**, is engine-locked
+  to 35 FPS, so it exercises the shader path but its frame rate says nothing
+  about the shader cost.)
 
 ---

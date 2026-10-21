@@ -69,16 +69,28 @@ enabler, which lets a host's own compile cache be correct by construction.
 
 ### Validation
 
-- **Downstream host** — the M4.07 build was smoke-tested on the Diablo
-  implementation: presets load, the shaders work, and the run holds
-  **140+ FPS with FXAA.slangp**. This is the first frame-rate figure from
-  real hardware rather than the software rasterizer, so the allocation work
-  above is confirmed on a real GPU rather than only counted.
+- **Downstream host** — the M4.07 build was smoke-tested on the
+  **DevilutionX-libslang-vk** fork: presets load, the shaders work, and the
+  run holds **140+ FPS with FXAA.slangp**. This is the first frame-rate
+  figure from real hardware rather than the software rasterizer, so the
+  allocation work above is confirmed on a real GPU rather than only counted.
+  (The other reference implementation, **Chocolate-Doom-VK**, is engine-locked
+  to 35 FPS, so it exercises the shader path but its frame rate says nothing
+  about the shader cost.)
+
+### Changed
+
+- **The README is now a landing page** (677 → 88 lines). The prose moved to
+  [docs/STATUS.md](STATUS.md), the API examples to
+  [docs/EXAMPLES.md](EXAMPLES.md), and the usage to [USAGE.md](../USAGE.md).
+  The README now names the two reference implementations:
+  **DevilutionX-libslang-vk** (the fork branch) and
+  **Chocolate-Doom-VK** (`VTSTech/chocolate-doom-vk`).
 
 ### Audited
 
-- SEC-07 and PERF-09 are removed from [audit.md](audit.md) and recorded in
-  [deltas.md](deltas.md). 8 findings remain, all Low severity.
+- SEC-07 and PERF-09 are removed from [audit.md](../audit.md) and recorded in
+  [deltas.md](../deltas.md). 8 findings remain, all Low severity.
 
 ## [M4.06] — 2026-10-21
 
@@ -221,10 +233,10 @@ device can be rebuilt — together with the presets and chains that lived on it
 
 ### Validation
 
-- **Downstream hosts** — the M4.06 build was exercised against two downstream
-  consumers (Doom and Diablo): both load presets and render with the shaders
-  working again. The descriptor pool budget fix below was found through the
-  first of those runs.
+- **Downstream hosts** — the M4.06 build was exercised against both reference
+  implementations (**DevilutionX-libslang-vk** and **Chocolate-Doom-VK**):
+  both load presets and render with the shaders working again. The descriptor
+  pool budget fix below was found through those runs.
 
 ### Tests
 
@@ -243,8 +255,8 @@ device can be rebuilt — together with the presets and chains that lived on it
 
 ### Audited
 
-- The two findings are removed from [audit.md](audit.md) and recorded in
-  [deltas.md](deltas.md) with what actually shipped.
+- The two findings are removed from [audit.md](../audit.md) and recorded in
+  [deltas.md](../deltas.md) with what actually shipped.
 
 ## [M4.05] — 2026-10-18/20
 
