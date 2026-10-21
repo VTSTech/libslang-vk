@@ -170,13 +170,54 @@ auto Preset::load(Device &device, const std::filesystem::path &slangp, const Pre
                         const std::string resolved = core::ResolvePresetFilePath(impl.parsed.dir, texture.path);
                         Preset::Impl::LutGpu lut;
                         lut.name = texture.name;
+                        lut.sourcePath = resolved;
                         auto uploaded = vk::UploadLutTexture(device, texture, resolved, lut);
                         if (!uploaded)
                                 return std::unexpected(uploaded.error());
                         impl.luts.push_back(std::move(lut));
                 }
+        } else {
+                impl.lutsSkipped = true;
         }
+        // The textures belong to the device generation they were uploaded
+        // on; a later device replacement invalidates them (ROB-35).
+        impl.generation = device.generation();
         return out;
+}
+
+auto Preset::rebuildLuts(Device &device) const -> std::expected<void, Error>
+{
+        Impl &impl = *impl_;
+        if (impl.device == nullptr)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Preset::rebuildLuts: no device"));
+        if (impl.device != &device)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "Preset::rebuildLuts: the device does not match the one the preset was loaded with"));
+
+        // The device that owned the old textures is gone (device lost, or
+        // replaced by a recovery): drop the stale handles first, then upload
+        // the textures again from the files they were decoded from.
+        //
+        // When the device was replaced, the old textures died with the old
+        // device and must NOT be destroyed through the new one — they are
+        // simply forgotten.
+        const bool deviceReplaced = (impl.generation != device.generation());
+        impl.ReleaseLuts(deviceReplaced);
+
+        if (impl.lutsSkipped)
+                return {};
+
+        for (const slv::preset::TextureDef &texture : impl.parsed.textures) {
+                Preset::Impl::LutGpu lut;
+                lut.name = texture.name;
+                lut.sourcePath = slv::preset::ResolvePresetFilePath(impl.parsed.dir, texture.path);
+                auto uploaded = vk::UploadLutTexture(device, texture, lut.sourcePath, lut);
+                if (!uploaded)
+                        return std::unexpected(uploaded.error());
+                impl.luts.push_back(std::move(lut));
+        }
+        impl.generation = device.generation();
+        return {};
 }
 
 Preset::~Preset() = default;

@@ -105,6 +105,16 @@ if(SLANGVK_ENABLE_VK)
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_async COMMAND test_runner_async)
 
+        # M4.06 device-lost recovery (audit ROB-35): Device::recover() replaces
+        # the VkDevice, and the chain notices that its resources belong to a
+        # replaced device and rebuilds itself before the next frame. The test
+        # drives the same machinery the automatic recovery path uses.
+        add_executable(test_runner_recovery test_runner_recovery.cpp)
+        target_link_libraries(test_runner_recovery PRIVATE slangvk)
+        target_compile_definitions(test_runner_recovery PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_recovery COMMAND test_runner_recovery)
+
         # C API smoke: the extern "C" surface (slangvk/c.h) drives the same
         # headless path end-to-end — device create, image create/update,
         # preset load + parameter metadata + live override, identity/gain

@@ -303,6 +303,22 @@ public:
         /** @brief Parameter metadata: pragma defaults merged with preset overrides. */
         SLANGVK_API auto parameterInfo() const -> std::span<const ParameterInfo>;
 
+        /**
+         * @brief Re-uploads the preset's LUT textures (ROB-35).
+         *
+         * The textures a preset owns live on the Vulkan device. After a
+         * device-lost recovery the device is a new one and the old textures
+         * are gone, so they have to be uploaded again before any chain that
+         * uses them can render. The preset's CPU-side data (pass
+         * definitions, translations, SPIR-V) survives a device loss and is
+         * not reloaded.
+         *
+         * Call this after Device::recover() and before using the preset's
+         * chains. A preset loaded with noLutImages has no textures to
+         * re-upload and the call is a no-op.
+         */
+        SLANGVK_API auto rebuildLuts(Device &device) const -> std::expected<void, Error>;
+
         /// @cond internal
         auto impl() const -> Impl & { return *impl_; }
         /// @endcond
@@ -429,6 +445,14 @@ class Chain {
 public:
         struct Impl; // Internal (pimpl access below is library-internal).
 
+        /**
+         * @brief Creates a render chain for a preset.
+         *
+         * The preset is borrowed, not owned: it must outlive the chain (and
+         * must not be moved while the chain exists). The chain keeps a
+         * reference to it because a device-lost recovery rebuilds the chain
+         * from the preset's pass data and re-uploads the preset's textures.
+         */
         SLANGVK_API static auto create(Device &, const Preset &, const ChainOptions &)
             -> std::expected<Chain, Error>;
 
@@ -470,6 +494,19 @@ public:
         /** @brief Sizes of a pass's output FBO as currently allocated. */
         SLANGVK_API auto passOutputSize(uint32_t passIndex) const
             -> std::expected<std::pair<uint32_t, uint32_t>, Error>;
+
+        /**
+         * @brief Rebuilds the chain's GPU resources (ROB-35).
+         *
+         * Releases the chain's pipelines, render passes, framebuffers,
+         * descriptor sets, UBOs and pass targets, then creates them again
+         * from the preset the chain was built from. Used after a device-lost
+         * recovery: the lost device took all of those objects with it.
+         *
+         * The preset's LUT textures must have been re-uploaded first (see
+         * Preset::rebuildLuts) — the chain borrows them.
+         */
+        SLANGVK_API auto rebuild() -> std::expected<void, Error>;
 
         /**
          * @brief Renders one frame without waiting for the GPU to finish.

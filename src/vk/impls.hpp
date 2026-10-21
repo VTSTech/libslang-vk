@@ -104,7 +104,8 @@ struct Device::Impl {
                 const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence);
                 if (submitted != VK_SUCCESS) {
                         vkDestroyFence(device, fence, nullptr);
-                        return std::unexpected(SLV_VKERR(submitted, Errc::vk_error, "vkQueueSubmit"));
+                        return std::unexpected(SLV_VKERR(submitted,
+                            ::slv::vk::VkErrorCode(submitted, Errc::vk_error), "vkQueueSubmit"));
                 }
                 const VkResult waited = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
                 vkDestroyFence(device, fence, nullptr);
@@ -179,7 +180,8 @@ struct Device::Impl {
                 }
                 const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence);
                 if (submitted != VK_SUCCESS)
-                        return std::unexpected(SLV_VKERR(submitted, Errc::vk_error, "vkQueueSubmit"));
+                        return std::unexpected(SLV_VKERR(submitted,
+                            ::slv::vk::VkErrorCode(submitted, Errc::vk_error), "vkQueueSubmit"));
                 return {};
         }
 
@@ -197,7 +199,20 @@ struct Device::Impl {
                         commandPool = VK_NULL_HANDLE;
                 }
                 if (allocator != VK_NULL_HANDLE) {
-                        vmaDestroyAllocator(allocator);
+                        // The old allocator is deliberately NOT destroyed.
+                        //
+                        // A lost device takes its memory with it, and the
+                        // objects that owned that memory (the chain's
+                        // buffers and images, the preset's textures, and
+                        // whatever the host allocated) cannot be freed
+                        // through a dead device. Destroying the allocator
+                        // anyway trips VMA's "allocations were not freed"
+                        // assertion and aborts the process.
+                        //
+                        // Leaking the allocator's host-side bookkeeping is
+                        // the lesser evil: it is a bounded, one-off cost per
+                        // device loss, while the alternative is a hard
+                        // abort in the middle of the recovery.
                         allocator = VK_NULL_HANDLE;
                 }
                 if (device != VK_NULL_HANDLE) {
@@ -278,6 +293,10 @@ struct Preset::Impl {
         // Chain::Impl::luts (Preset must outlive its Chains).
         struct LutGpu {
                 std::string name; // Declared spelling (case-sensitive GLSL name).
+                // Absolute path the texture was decoded from. Kept so the
+                // upload can be repeated after a device-lost recovery
+                // (ROB-35) without re-parsing the preset.
+                std::string sourcePath;
                 uint32_t width = 0;
                 uint32_t height = 0;
                 uint32_t mipLevels = 1;
@@ -290,19 +309,47 @@ struct Preset::Impl {
         std::vector<PassSpirv> spirv;
         std::vector<ParameterInfo> parameters;
         std::vector<LutGpu> luts;
+        // True when the preset was loaded with noLutImages: the textures were
+        // never uploaded, so a rebuild must not upload them either.
+        bool lutsSkipped = false;
+        // The device generation these textures were uploaded on. A mismatch
+        // means the device was replaced and the textures have to be uploaded
+        // again (ROB-35).
+        uint64_t generation = 0;
         slv::preset::Preset parsed; // Core data model (textures, feedback, histories).
 
         ~Impl()
         {
+                ReleaseLuts();
+        }
+
+        // Releases the uploaded LUT images. Split out of the destructor so a
+        // device-lost recovery (ROB-35) can drop the dead textures before the
+        // device that owns them is replaced.
+        // Releases the uploaded LUT images. Split out of the destructor so a
+        // device-lost recovery (ROB-35) can drop the dead textures before the
+        // device that owns them is replaced.
+        //
+        // `deviceLost` skips the destroy calls: the device that owned the
+        // textures is gone, and destroying its objects through a different
+        // device would be invalid. The handles are simply forgotten.
+        void ReleaseLuts(bool deviceLost = false)
+        {
                 if (device == nullptr)
                         return;
-                VkDevice dev = device->device();
-                for (LutGpu &lut : luts) {
-                        if (lut.img.view != VK_NULL_HANDLE)
-                                vkDestroyImageView(dev, lut.img.view, nullptr);
-                        if (lut.img.image != VK_NULL_HANDLE)
-                                vmaDestroyImage(device->impl().allocator, lut.img.image, lut.img.allocation);
+                if (!deviceLost) {
+                        VkDevice dev = device->device();
+                        for (LutGpu &lut : luts) {
+                                if (lut.img.view != VK_NULL_HANDLE)
+                                        vkDestroyImageView(dev, lut.img.view, nullptr);
+                                if (lut.img.image != VK_NULL_HANDLE)
+                                        vmaDestroyImage(
+                                            device->impl().allocator, lut.img.image, lut.img.allocation);
+                        }
                 }
+                for (LutGpu &lut : luts)
+                        lut.img = {};
+                luts.clear();
         }
 };
 

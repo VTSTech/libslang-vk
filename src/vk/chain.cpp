@@ -488,6 +488,16 @@ struct Chain::Impl {
         };
 
         Device *device = nullptr;
+        // The device generation this chain's GPU resources belong to. A
+        // mismatch means the device was replaced (a device-lost recovery)
+        // and the chain has to rebuild itself (ROB-35).
+        uint64_t generation = 0;
+        // The preset this chain was built from, borrowed (not owned): a
+        // rebuild after a device-lost recovery re-reads the preset's pass
+        // data and re-uploads its LUT textures (ROB-35). The preset must
+        // outlive the chain — the same contract the preset's own
+        // documentation states.
+        const Preset *preset = nullptr;
         std::vector<PassRuntime> passes;
         // Uploaded LUT textures (M3): borrowed views into Preset::Impl's images
         // (read-only, so sharing across chains of the same preset is safe) plus
@@ -569,9 +579,28 @@ struct Chain::Impl {
 
         ~Impl()
         {
+                DestroyGpuResources();
+        }
+
+        // Releases every GPU resource the chain owns. Split out of the
+        // destructor so a device-lost rebuild (ROB-35) can drop the dead
+        // resources before the device itself is replaced.
+        void DestroyGpuResources()
+        {
                 if (device == nullptr)
                         return;
                 VkDevice dev = device->device();
+                // An async frame may still be in flight: wait for it and
+                // release its fence and command buffer before the device
+                // objects the frame references are destroyed.
+                if (pendingFrame.fence != VK_NULL_HANDLE) {
+                        vkWaitForFences(dev, 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
+                        vkDestroyFence(dev, pendingFrame.fence, nullptr);
+                        if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
+                                vkFreeCommandBuffers(
+                                    dev, device->impl().commandPool, 1, &pendingFrame.commandBuffer);
+                        pendingFrame = {};
+                }
                 for (PassRuntime &pass : passes) {
                         for (auto &entry : pass.pipelines)
                                 vkDestroyPipeline(dev, entry.second, nullptr);
@@ -628,6 +657,70 @@ struct Chain::Impl {
                         vkDestroyRenderPass(dev, entry.second, nullptr);
                 for (auto &entry : presentSwapchainFramebuffers)
                         vkDestroyFramebuffer(dev, entry.second, nullptr);
+
+                // Reset every handle so a rebuild starts from a clean slate
+                // and the destructor never touches a stale handle twice.
+                ReleaseGpuHandles();
+        }
+
+        // Drops the chain's GPU handles without destroying them.
+        //
+        // Used when the device that owned them is gone (device lost, or
+        // replaced by a recovery): the objects died with the device, so
+        // calling the destroy functions through a different device would be
+        // invalid. The handles are simply forgotten.
+        void ReleaseGpuHandles()
+        {
+                for (PassRuntime &pass : passes) {
+                        pass.pipelines.clear();
+                        pass.pipelineLayout = VK_NULL_HANDLE;
+                        pass.vertexModule = VK_NULL_HANDLE;
+                        pass.fragmentModule = VK_NULL_HANDLE;
+                        pass.set1 = VK_NULL_HANDLE;
+                        pass.set2 = VK_NULL_HANDLE;
+                        pass.set3 = VK_NULL_HANDLE;
+                        // The pass targets and UBOs own images/views/buffers;
+                        // forget them without destroying (see above).
+                        for (PassTarget &t : pass.targets)
+                                t = {};
+                        for (Ubo &ubo : pass.vertexUbos)
+                                ubo = {};
+                        for (Ubo &ubo : pass.fragmentUbos)
+                                ubo = {};
+                }
+                // The history ring and the pass-0 mip copy own images too.
+                history.slots.clear();
+                history.width = 0;
+                history.height = 0;
+                history.slot = 0;
+                history.seeded = false;
+                sourceMipCopy = {};
+                srcMipWidth = 0;
+                srcMipHeight = 0;
+                outputFramebuffers.clear();
+                renderPasses.clear();
+                samplers.clear();
+                set2Layouts.clear();
+                set1Layout = VK_NULL_HANDLE;
+                set3Layout = VK_NULL_HANDLE;
+                emptyLayout = VK_NULL_HANDLE;
+                descriptorPool = VK_NULL_HANDLE;
+                emptySet = VK_NULL_HANDLE;
+                pipelineLayout = VK_NULL_HANDLE;
+                vertexBuffer = VK_NULL_HANDLE;
+                vertexAllocation = VK_NULL_HANDLE;
+                presentPipelines.clear();
+                presentVertexModule = VK_NULL_HANDLE;
+                presentFragmentModule = VK_NULL_HANDLE;
+                presentPipelineLayout = VK_NULL_HANDLE;
+                presentSetLayout = VK_NULL_HANDLE;
+                presentSet = VK_NULL_HANDLE;
+                presentSampler = VK_NULL_HANDLE;
+                presentVertexBuffer = VK_NULL_HANDLE;
+                presentVertexAllocation = VK_NULL_HANDLE;
+                presentVertexMapped = nullptr;
+                presentSwapchainPasses.clear();
+                presentSwapchainFramebuffers.clear();
         }
 
         void DestroyPassTarget(PassTarget &t)
@@ -1290,14 +1383,456 @@ struct Chain::Impl {
                         return VK_NULL_HANDLE;
                 return set;
         }
-        
-        // Pending async render work for tracking command buffers until submission
-        struct AsyncWork {
-            VkFence fence;
-            VkCommandBuffer commandBuffer;
-            VkSemaphore semaphore;
+
+        // The single async frame that may be in flight (ROB-33). The chain
+        // owns the fence and the recorded command buffer until the frame
+        // retires; wait_async() (or the next render_async()) reclaims both.
+        struct PendingFrame {
+                VkFence fence = VK_NULL_HANDLE;
+                VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         };
-        std::vector<AsyncWork> pendingAsyncWork;
+        PendingFrame pendingFrame;
+
+        // Rebuilds the device, the preset's LUT textures and this chain's
+        // resources after a device loss (ROB-35).
+        //
+        // Ordering matters. The objects of the lost device are already gone
+        // as far as the driver is concerned, so they must NOT be destroyed
+        // through the replacement device — they are simply dropped. The
+        // device is then replaced, the preset's textures are uploaded again
+        // on it, and only then is the chain rebuilt (the chain borrows the
+        // preset's textures).
+        auto RecoverFromDeviceLost() -> std::expected<void, Error>
+        {
+                if (preset == nullptr)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                            "device lost: the chain has no preset to rebuild from"));
+
+                // 1. Release the resources that died with the device. The
+                // destroy calls themselves fail on a lost device, but they
+                // still clear the allocator's bookkeeping, which the
+                // allocator's own destruction asserts on.
+                DestroyGpuResources();
+                preset->impl().ReleaseLuts();
+
+                // 2. Replace the device itself.
+                auto recovered = device->recover();
+                if (!recovered)
+                        return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
+                            "device lost: could not rebuild the Vulkan device: " + recovered.error().message));
+
+                // 3. Re-upload the preset's textures on the new device.
+                auto luts = preset->rebuildLuts(*device);
+                if (!luts)
+                        return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
+                            "device lost: could not re-upload the preset's textures: " + luts.error().message));
+
+                // 4. Build this chain's resources again on the new device.
+                auto built = BuildAll(*preset);
+                if (!built)
+                        return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
+                            "device lost: could not rebuild the chain: " + built.error().message));
+                generation = device->generation();
+                return {};
+        }
+
+        // Brings the chain up to date after the device was replaced behind
+        // its back (the host called Device::recover() directly). The chain's
+        // resources belong to the old device, so they are dropped (not
+        // destroyed) and rebuilt on the new one.
+        auto RefreshAfterDeviceChange() -> std::expected<void, Error>
+        {
+                if (preset == nullptr)
+                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                            "the device was replaced: the chain has no preset to rebuild from"));
+
+                ReleaseGpuHandles();
+
+                // The preset's textures died with the old device too.
+                if (preset->impl().generation != device->generation()) {
+                        auto luts = preset->rebuildLuts(*device);
+                        if (!luts)
+                                return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
+                                    "the device was replaced: could not re-upload the preset's textures: "
+                                        + luts.error().message));
+                }
+
+                auto built = BuildAll(*preset);
+                if (!built)
+                        return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
+                            "the device was replaced: could not rebuild the chain: " + built.error().message));
+                generation = device->generation();
+                return {};
+        }
+
+        // Waits for the in-flight async frame (if any) and reclaims its
+        // fence and command buffer. Called at the start of every
+        // render_async() so a chain never has two frames recording into the
+        // same descriptor sets at once.
+        auto WaitPendingFrame() -> std::expected<void, Error>
+        {
+                if (pendingFrame.fence == VK_NULL_HANDLE)
+                        return {};
+                const VkResult waited = vkWaitForFences(
+                    device->device(), 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
+                if (waited != VK_SUCCESS) {
+                        // The device may be gone; the objects are dead either
+                        // way, so drop them without further Vulkan calls.
+                        pendingFrame = {};
+                        return std::unexpected(SLV_VKERR(waited,
+                            ::slv::vk::VkErrorCode(waited, Errc::vk_error), "vkWaitForFences"));
+                }
+                vkDestroyFence(device->device(), pendingFrame.fence, nullptr);
+                if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
+                        vkFreeCommandBuffers(
+                            device->device(), device->impl().commandPool, 1, &pendingFrame.commandBuffer);
+                pendingFrame = {};
+                return {};
+        }
+
+        // Builds the chain from a preset: the CPU-side analysis (LUT
+        // bindings, feedback/history detection) plus every GPU resource
+        // (descriptor layouts and pool, per-pass shader modules, pipelines,
+        // UBOs and descriptor sets, the quad vertex buffer and the M4
+        // present pipeline).
+        //
+        // Split out of Chain::create so it can be re-run after a device-lost
+        // recovery (ROB-35): the lost device took all of the GPU resources
+        // with it, but the preset's CPU-side data (pass definitions,
+        // translations, SPIR-V) is still valid.
+        auto BuildAll(const Preset &preset) -> std::expected<void, Error>
+        {
+                // Remember which device generation these resources belong to,
+                // so a later device replacement can be noticed (ROB-35).
+                generation = device->generation();
+
+        // LUT bindings (M3): views are borrowed from the preset's uploaded
+        // images — a Preset must therefore outlive every Chain created from it
+        // (runner.hpp contract). A preset loaded with noLutImages produces
+        // bindings with null views; renders fail with an explicit error.
+        for (const slv::preset::TextureDef &texture : preset.impl().parsed.textures) {
+                Chain::Impl::LutBinding binding;
+                binding.name = texture.name;
+                binding.def = texture;
+                for (const Preset::Impl::LutGpu &uploaded : preset.impl().luts) {
+                        if (vk::CaseInsensitiveEqual(uploaded.name, texture.name)) {
+                                binding.view = uploaded.img.view;
+                                binding.width = uploaded.width;
+                                binding.height = uploaded.height;
+                                break;
+                        }
+                }
+                luts.push_back(std::move(binding));
+        }
+        presetParameterOverrides = preset.impl().parsed.parameters;
+        maxFboWidth = preset.impl().parsed.maxFboWidth;
+        maxFboHeight = preset.impl().parsed.maxFboHeight;
+
+        const auto &presetPasses = preset.impl().passDefs;
+        const auto &presetTranslations = preset.impl().translations;
+        const auto &presetSpirv = preset.impl().spirv;
+        const size_t passCount = presetPasses.size();
+
+        // Layouts: set0 empty placeholder, set1 vertex UBO, set2 textures, set3 params UBO.
+        VkDescriptorSetLayoutCreateInfo emptyInfo{};
+        emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        SLV_VK(vkCreateDescriptorSetLayout(device->device(), &emptyInfo, nullptr, &emptyLayout), Errc::vk_error);
+
+        // Bindings 0 and 1 on both UBO sets: plain UBOs are dense 0..1 and the
+        // re-homed push-constant block takes binding 1 whenever a plain UBO is
+        // present (tests/test_runner_pushblock.cpp pins the interface).
+        const VkDescriptorSetLayoutBinding set1Bindings[2] = {
+            {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
+        VkDescriptorSetLayoutCreateInfo set1Info{};
+        set1Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        set1Info.bindingCount = 2;
+        set1Info.pBindings = set1Bindings;
+        SLV_VK(vkCreateDescriptorSetLayout(device->device(), &set1Info, nullptr, &set1Layout), Errc::vk_error);
+
+        const VkDescriptorSetLayoutBinding set3Bindings[2] = {
+            {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+        VkDescriptorSetLayoutCreateInfo set3Info{};
+        set3Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        set3Info.bindingCount = 2;
+        set3Info.pBindings = set3Bindings;
+        SLV_VK(vkCreateDescriptorSetLayout(device->device(), &set3Info, nullptr, &set3Layout), Errc::vk_error);
+
+        // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts,
+        // plus the M4 present set.
+        VkDescriptorPoolSize poolSizes[2]{};
+        // Worst case 2 UBOs x 2 stages per pass (bindings 0 and 1; the
+        // push-constant re-home can occupy binding 1 of either set).
+        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(4 * passCount)};
+        uint32_t samplerCount = 0;
+        for (const SlangTranslation &translation : presetTranslations)
+                samplerCount += static_cast<uint32_t>(translation.fragment.textures.size());
+        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(samplerCount, 1u) + 1};
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        poolInfo.maxSets = static_cast<uint32_t>(4 * passCount) + 1;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
+        SLV_VK(vkCreateDescriptorPool(device->device(), &poolInfo, nullptr, &descriptorPool), Errc::vk_error);
+        emptySet = AllocateSet(emptyLayout);
+        if (emptySet == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::vk_error, "empty descriptor set allocation failed"));
+
+        // Per-pass resources.
+        passes.resize(passCount);
+
+        // M2 chain analysis: history depth, demand-driven feedback double
+        // buffering (SPEC 5.3), mip targets (F1), and the final-pass feedback
+        // guard (the final pass writes the host target directly; a
+        // previous-frame copy of it needs the M4 presentation path).
+        for (size_t i = 0; i < passCount; ++i) {
+                if (i + 1 < passCount && presetPasses[i + 1].mipmapInput)
+                        passes[i].nextPassReadsMips = true;
+                for (const TextureRef &ref : presetTranslations[i].fragment.textures) {
+                        const std::string &n = ref.name;
+                        if (n.size() > 12 && n.compare(0, 12, "PassFeedback") == 0) {
+                                const int idx = std::atoi(n.c_str() + 12);
+                                if (idx >= 0 && static_cast<size_t>(idx) < passCount)
+                                        passes[static_cast<size_t>(idx)].feedbackRead = true;
+                        } else if (n.size() > 8 && vk::CaseInsensitiveEqual(n.substr(n.size() - 8), "Feedback")) {
+                                const std::string base = n.substr(0, n.size() - 8);
+                                for (size_t j = 0; j < passCount; ++j) {
+                                        const bool aliasHit = !presetPasses[j].alias.empty()
+                                            && vk::CaseInsensitiveEqual(presetPasses[j].alias, base);
+                                        const bool nameHit = !presetTranslations[j].pragmaName.empty()
+                                            && vk::CaseInsensitiveEqual(presetTranslations[j].pragmaName, base);
+                                        if (aliasHit || nameHit)
+                                                passes[j].feedbackRead = true;
+                                }
+                        }
+                }
+        }
+        for (size_t i = 0; i < passCount; ++i)
+                passes[i].targetCount = passes[i].feedbackRead ? 2u : 1u;
+        for (const SlangTranslation &translation : presetTranslations)
+                for (const TextureRef &ref : translation.fragment.textures)
+                        if (ref.name.size() > 15 && ref.name.compare(0, 15, "OriginalHistory") == 0) {
+                                const int n = std::atoi(ref.name.c_str() + 15);
+                                if (n >= 1)
+                                        historyDepth = std::max(historyDepth, static_cast<uint32_t>(n));
+                        }
+        useSourceMipCopy = presetPasses[0].mipmapInput;
+
+        for (size_t i = 0; i < passCount; ++i) {
+                Chain::Impl::PassRuntime &pass = passes[i];
+                pass.def = presetPasses[i];
+                pass.translation = presetTranslations[i];
+                pass.targetFormat = vk::MapTargetFormat(
+                    pass.translation.pragmaFormat, pass.def.srgbFramebuffer, pass.def.floatFramebuffer);
+
+                VkShaderModuleCreateInfo moduleInfo{};
+                moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presetSpirv[i].vertex.data());
+                moduleInfo.codeSize = presetSpirv[i].vertex.size();
+                SLV_VK(vkCreateShaderModule(device->device(), &moduleInfo, nullptr, &pass.vertexModule), Errc::shader_compile);
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presetSpirv[i].fragment.data());
+                moduleInfo.codeSize = presetSpirv[i].fragment.size();
+                SLV_VK(vkCreateShaderModule(device->device(), &moduleInfo, nullptr, &pass.fragmentModule), Errc::shader_compile);
+
+                // Pipeline layout: [set0 empty, set1 vertex UBO, set2 textures, set3 params UBO],
+                // with empty slots where the pass declares no such resource.
+                const bool hasVertexUbo = !pass.translation.vertex.uniformBlocks.empty();
+                const bool hasFragmentUbo = !pass.translation.fragment.uniformBlocks.empty();
+                const size_t textureCount = pass.translation.fragment.textures.size();
+                const VkDescriptorSetLayout set2Layout = GetSet2Layout(textureCount);
+                if (set2Layout == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "set2 layout creation failed"));
+                std::array<VkDescriptorSetLayout, 4> setLayouts = {emptyLayout,
+                    hasVertexUbo ? set1Layout : emptyLayout, set2Layout,
+                    hasFragmentUbo ? set3Layout : emptyLayout};
+                VkPipelineLayoutCreateInfo layoutInfo{};
+                layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+                layoutInfo.pSetLayouts = setLayouts.data();
+                SLV_VK(vkCreatePipelineLayout(device->device(), &layoutInfo, nullptr, &pass.pipelineLayout), Errc::vk_error);
+
+                // Default-format pipeline (built at load so pipeline problems
+                // surface at Preset/Chain creation time). The final pass may
+                // render straight into the host target (host format) or into
+                // its own FBO (present path) — the render loop lazily builds
+                // the variant it needs for the other format.
+                const bool isLastPassAtCreate = i + 1 == passCount;
+                const bool rendersToHostAtCreate = isLastPassAtCreate && !pass.feedbackRead;
+                const VkFormat defaultFormat = rendersToHostAtCreate && targetFormat != VK_FORMAT_UNDEFINED
+                    ? targetFormat
+                    : pass.targetFormat;
+                auto madePipeline = MakePassPipeline(pass, defaultFormat, i);
+                if (!madePipeline)
+                        return std::unexpected(madePipeline.error());
+
+                // Descriptor sets (empty slots bound as real empty sets).
+                pass.set1 = AllocateSet(hasVertexUbo ? set1Layout : emptyLayout);
+                pass.set2 = AllocateSet(set2Layout);
+                pass.set3 = AllocateSet(hasFragmentUbo ? set3Layout : emptyLayout);
+                if (pass.set1 == VK_NULL_HANDLE || pass.set2 == VK_NULL_HANDLE || pass.set3 == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "descriptor set allocation failed"));
+
+                // UBOs sized by the reflected blocks; UBO descriptors written
+                // once, at each block's own binding (0 = plain UBO, 1 = second
+                // plain UBO or the re-homed push-constant block).
+                for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
+                        if (block.binding >= 2)
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "vertex uniform block binding out of range: " + block.instanceName));
+                        uint32_t bytes = 16;
+                        for (const UniformMember &member : block.members)
+                                bytes = std::max(bytes, member.offset + member.size);
+                        auto made = MakeUbo(bytes, pass.vertexUbos[block.binding]);
+                        if (!made)
+                                return std::unexpected(made.error());
+                        VkDescriptorBufferInfo bufferInfo{pass.vertexUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
+                        VkWriteDescriptorSet write{};
+                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                        write.dstSet = pass.set1;
+                        write.dstBinding = block.binding;
+                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                        write.descriptorCount = 1;
+                        write.pBufferInfo = &bufferInfo;
+                        vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
+                }
+                for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
+                        if (block.binding >= 2)
+                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                    "fragment uniform block binding out of range: " + block.instanceName));
+                        uint32_t bytes = 16;
+                        for (const UniformMember &member : block.members)
+                                bytes = std::max(bytes, member.offset + member.size);
+                        auto made = MakeUbo(bytes, pass.fragmentUbos[block.binding]);
+                        if (!made)
+                                return std::unexpected(made.error());
+                        VkDescriptorBufferInfo bufferInfo{pass.fragmentUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
+                        VkWriteDescriptorSet write{};
+                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                        write.dstSet = pass.set3;
+                        write.dstBinding = block.binding;
+                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                        write.descriptorCount = 1;
+                        write.pBufferInfo = &bufferInfo;
+                        vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
+                }
+        }
+
+        // Fullscreen unit quad: positions in [0,1], uv = position (Vulkan-native
+        // orientation; see the MVP comment at the top of this file).
+        static constexpr float kQuad[4][6] = {
+            {0.F, 0.F, 0.F, 1.F, 0.F, 0.F},
+            {1.F, 0.F, 0.F, 1.F, 1.F, 0.F},
+            {0.F, 1.F, 0.F, 1.F, 0.F, 1.F},
+            {1.F, 1.F, 0.F, 1.F, 1.F, 1.F},
+        };
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeof(kQuad);
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        VmaAllocationCreateInfo vertexAllocInfo{};
+        vertexAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        vertexAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+            | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo vertexMapped{};
+        if (vmaCreateBuffer(device->impl().allocator, &bufferInfo, &vertexAllocInfo, &vertexBuffer,
+                &vertexAllocation, &vertexMapped)
+            != VK_SUCCESS)
+                return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "vertex buffer allocation failed"));
+        std::memcpy(vertexMapped.pMappedData, kQuad, sizeof(kQuad));
+
+        // --- M4 present pipeline (letterbox/rotation draw) -------------------
+        {
+                // Trivial quad shaders, compiled with the same in-process
+                // glslang path as preset passes (bare GLSL, Vulkan 1.0).
+                preset::SlangTranslation presentTranslation;
+                presentTranslation.vertex.present = true;
+                presentTranslation.vertex.glsl =
+                    "#version 450\n"
+                    "layout(location = 0) in vec2 aPos;\n" // NDC
+                    "layout(location = 1) in vec2 aUV;\n"
+                    "layout(location = 0) out vec2 vUV;\n"
+                    "void main() { vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+                presentTranslation.fragment.present = true;
+                presentTranslation.fragment.glsl =
+                    "#version 450\n"
+                    "layout(set = 0, binding = 0) uniform sampler2D uTex;\n"
+                    "layout(location = 0) in vec2 vUV;\n"
+                    "layout(location = 0) out vec4 oColor;\n"
+                    "void main() { oColor = texture(uTex, vUV); }\n";
+                preset::PassSpirv presentSpirv;
+                std::string compileError;
+                if (!preset::CompilePass(presentTranslation, presentSpirv, compileError))
+                        return std::unexpected(
+                            SLV_ERROR(Errc::shader_compile, "present pipeline compile failed: " + compileError));
+
+                VkShaderModuleCreateInfo moduleInfo{};
+                moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.vertex.data());
+                moduleInfo.codeSize = presentSpirv.vertex.size();
+                SLV_VK(vkCreateShaderModule(device->device(), &moduleInfo, nullptr, &presentVertexModule),
+                    Errc::shader_compile);
+                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.fragment.data());
+                moduleInfo.codeSize = presentSpirv.fragment.size();
+                SLV_VK(vkCreateShaderModule(device->device(), &moduleInfo, nullptr, &presentFragmentModule),
+                    Errc::shader_compile);
+
+                VkDescriptorSetLayoutBinding presentBinding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                    VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                VkDescriptorSetLayoutCreateInfo presentLayoutInfo{};
+                presentLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                presentLayoutInfo.bindingCount = 1;
+                presentLayoutInfo.pBindings = &presentBinding;
+                SLV_VK(vkCreateDescriptorSetLayout(device->device(), &presentLayoutInfo, nullptr,
+                    &presentSetLayout), Errc::vk_error);
+
+                VkPipelineLayoutCreateInfo presentPipelineLayoutInfo{};
+                presentPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                presentPipelineLayoutInfo.setLayoutCount = 1;
+                presentPipelineLayoutInfo.pSetLayouts = &presentSetLayout;
+                SLV_VK(vkCreatePipelineLayout(device->device(), &presentPipelineLayoutInfo, nullptr,
+                    &presentPipelineLayout), Errc::vk_error);
+
+                presentSet = AllocateSet(presentSetLayout);
+                if (presentSet == VK_NULL_HANDLE)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "present descriptor set allocation failed"));
+
+                // Linear + clamp-to-edge: the reference host's present blit
+                // filtering (letterbox edges never wrap; sampling stays inside
+                // the rect's uv range).
+                VkSamplerCreateInfo samplerInfo{};
+                samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                samplerInfo.magFilter = VK_FILTER_LINEAR;
+                samplerInfo.minFilter = VK_FILTER_LINEAR;
+                samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                samplerInfo.maxLod = 0.0F;
+                SLV_VK(vkCreateSampler(device->device(), &samplerInfo, nullptr, &presentSampler), Errc::vk_error);
+
+                // Host-mapped quad buffer, rewritten every present draw.
+                VkBufferCreateInfo presentBufferInfo{};
+                presentBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                presentBufferInfo.size = 4 * 2 * 2 * sizeof(float);
+                presentBufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+                VmaAllocationCreateInfo presentAllocInfo{};
+                presentAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+                presentAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                VmaAllocationInfo presentMapped{};
+                if (vmaCreateBuffer(device->impl().allocator, &presentBufferInfo, &presentAllocInfo,
+                        &presentVertexBuffer, &presentVertexAllocation, &presentMapped)
+                    != VK_SUCCESS)
+                        return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "present vertex buffer allocation failed"));
+                presentVertexMapped = presentMapped.pMappedData;
+        }
+
+
+                return {};
+        }
+
 };
 
 namespace {
@@ -1515,329 +2050,13 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         impl.targetWidth = options.outputWidth;
         impl.targetHeight = options.outputHeight;
         impl.targetFormat = options.outputFormat;
-        // LUT bindings (M3): views are borrowed from the preset's uploaded
-        // images — a Preset must therefore outlive every Chain created from it
-        // (runner.hpp contract). A preset loaded with noLutImages produces
-        // bindings with null views; renders fail with an explicit error.
-        for (const slv::preset::TextureDef &texture : preset.impl().parsed.textures) {
-                Chain::Impl::LutBinding binding;
-                binding.name = texture.name;
-                binding.def = texture;
-                for (const Preset::Impl::LutGpu &uploaded : preset.impl().luts) {
-                        if (vk::CaseInsensitiveEqual(uploaded.name, texture.name)) {
-                                binding.view = uploaded.img.view;
-                                binding.width = uploaded.width;
-                                binding.height = uploaded.height;
-                                break;
-                        }
-                }
-                impl.luts.push_back(std::move(binding));
-        }
-        impl.presetParameterOverrides = preset.impl().parsed.parameters;
-        impl.maxFboWidth = preset.impl().parsed.maxFboWidth;
-        impl.maxFboHeight = preset.impl().parsed.maxFboHeight;
+        // The preset is borrowed, not owned: a rebuild after a device-lost
+        // recovery re-reads the preset's pass data and LUT images.
+        impl.preset = &preset;
 
-        const auto &presetPasses = preset.impl().passDefs;
-        const auto &presetTranslations = preset.impl().translations;
-        const auto &presetSpirv = preset.impl().spirv;
-        const size_t passCount = presetPasses.size();
-
-        // Layouts: set0 empty placeholder, set1 vertex UBO, set2 textures, set3 params UBO.
-        VkDescriptorSetLayoutCreateInfo emptyInfo{};
-        emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        SLV_VK(vkCreateDescriptorSetLayout(device.device(), &emptyInfo, nullptr, &impl.emptyLayout), Errc::vk_error);
-
-        // Bindings 0 and 1 on both UBO sets: plain UBOs are dense 0..1 and the
-        // re-homed push-constant block takes binding 1 whenever a plain UBO is
-        // present (tests/test_runner_pushblock.cpp pins the interface).
-        const VkDescriptorSetLayoutBinding set1Bindings[2] = {
-            {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
-        VkDescriptorSetLayoutCreateInfo set1Info{};
-        set1Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        set1Info.bindingCount = 2;
-        set1Info.pBindings = set1Bindings;
-        SLV_VK(vkCreateDescriptorSetLayout(device.device(), &set1Info, nullptr, &impl.set1Layout), Errc::vk_error);
-
-        const VkDescriptorSetLayoutBinding set3Bindings[2] = {
-            {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
-        VkDescriptorSetLayoutCreateInfo set3Info{};
-        set3Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        set3Info.bindingCount = 2;
-        set3Info.pBindings = set3Bindings;
-        SLV_VK(vkCreateDescriptorSetLayout(device.device(), &set3Info, nullptr, &impl.set3Layout), Errc::vk_error);
-
-        // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts,
-        // plus the M4 present set.
-        VkDescriptorPoolSize poolSizes[2]{};
-        // Worst case 2 UBOs x 2 stages per pass (bindings 0 and 1; the
-        // push-constant re-home can occupy binding 1 of either set).
-        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(4 * passCount)};
-        uint32_t samplerCount = 0;
-        for (const SlangTranslation &translation : presetTranslations)
-                samplerCount += static_cast<uint32_t>(translation.fragment.textures.size());
-        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(samplerCount, 1u) + 1};
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = static_cast<uint32_t>(4 * passCount) + 1;
-        poolInfo.poolSizeCount = 2;
-        poolInfo.pPoolSizes = poolSizes;
-        SLV_VK(vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &impl.descriptorPool), Errc::vk_error);
-        impl.emptySet = impl.AllocateSet(impl.emptyLayout);
-        if (impl.emptySet == VK_NULL_HANDLE)
-                return std::unexpected(SLV_ERROR(Errc::vk_error, "empty descriptor set allocation failed"));
-
-        // Per-pass resources.
-        impl.passes.resize(passCount);
-
-        // M2 chain analysis: history depth, demand-driven feedback double
-        // buffering (SPEC 5.3), mip targets (F1), and the final-pass feedback
-        // guard (the final pass writes the host target directly; a
-        // previous-frame copy of it needs the M4 presentation path).
-        for (size_t i = 0; i < passCount; ++i) {
-                if (i + 1 < passCount && presetPasses[i + 1].mipmapInput)
-                        impl.passes[i].nextPassReadsMips = true;
-                for (const TextureRef &ref : presetTranslations[i].fragment.textures) {
-                        const std::string &n = ref.name;
-                        if (n.size() > 12 && n.compare(0, 12, "PassFeedback") == 0) {
-                                const int idx = std::atoi(n.c_str() + 12);
-                                if (idx >= 0 && static_cast<size_t>(idx) < passCount)
-                                        impl.passes[static_cast<size_t>(idx)].feedbackRead = true;
-                        } else if (n.size() > 8 && vk::CaseInsensitiveEqual(n.substr(n.size() - 8), "Feedback")) {
-                                const std::string base = n.substr(0, n.size() - 8);
-                                for (size_t j = 0; j < passCount; ++j) {
-                                        const bool aliasHit = !presetPasses[j].alias.empty()
-                                            && vk::CaseInsensitiveEqual(presetPasses[j].alias, base);
-                                        const bool nameHit = !presetTranslations[j].pragmaName.empty()
-                                            && vk::CaseInsensitiveEqual(presetTranslations[j].pragmaName, base);
-                                        if (aliasHit || nameHit)
-                                                impl.passes[j].feedbackRead = true;
-                                }
-                        }
-                }
-        }
-        for (size_t i = 0; i < passCount; ++i)
-                impl.passes[i].targetCount = impl.passes[i].feedbackRead ? 2u : 1u;
-        for (const SlangTranslation &translation : presetTranslations)
-                for (const TextureRef &ref : translation.fragment.textures)
-                        if (ref.name.size() > 15 && ref.name.compare(0, 15, "OriginalHistory") == 0) {
-                                const int n = std::atoi(ref.name.c_str() + 15);
-                                if (n >= 1)
-                                        impl.historyDepth = std::max(impl.historyDepth, static_cast<uint32_t>(n));
-                        }
-        impl.useSourceMipCopy = presetPasses[0].mipmapInput;
-
-        for (size_t i = 0; i < passCount; ++i) {
-                Chain::Impl::PassRuntime &pass = impl.passes[i];
-                pass.def = presetPasses[i];
-                pass.translation = presetTranslations[i];
-                pass.targetFormat = vk::MapTargetFormat(
-                    pass.translation.pragmaFormat, pass.def.srgbFramebuffer, pass.def.floatFramebuffer);
-
-                VkShaderModuleCreateInfo moduleInfo{};
-                moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presetSpirv[i].vertex.data());
-                moduleInfo.codeSize = presetSpirv[i].vertex.size();
-                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &pass.vertexModule), Errc::shader_compile);
-                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presetSpirv[i].fragment.data());
-                moduleInfo.codeSize = presetSpirv[i].fragment.size();
-                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &pass.fragmentModule), Errc::shader_compile);
-
-                // Pipeline layout: [set0 empty, set1 vertex UBO, set2 textures, set3 params UBO],
-                // with empty slots where the pass declares no such resource.
-                const bool hasVertexUbo = !pass.translation.vertex.uniformBlocks.empty();
-                const bool hasFragmentUbo = !pass.translation.fragment.uniformBlocks.empty();
-                const size_t textureCount = pass.translation.fragment.textures.size();
-                const VkDescriptorSetLayout set2Layout = impl.GetSet2Layout(textureCount);
-                if (set2Layout == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "set2 layout creation failed"));
-                std::array<VkDescriptorSetLayout, 4> setLayouts = {impl.emptyLayout,
-                    hasVertexUbo ? impl.set1Layout : impl.emptyLayout, set2Layout,
-                    hasFragmentUbo ? impl.set3Layout : impl.emptyLayout};
-                VkPipelineLayoutCreateInfo layoutInfo{};
-                layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-                layoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-                layoutInfo.pSetLayouts = setLayouts.data();
-                SLV_VK(vkCreatePipelineLayout(device.device(), &layoutInfo, nullptr, &pass.pipelineLayout), Errc::vk_error);
-
-                // Default-format pipeline (built at load so pipeline problems
-                // surface at Preset/Chain creation time). The final pass may
-                // render straight into the host target (host format) or into
-                // its own FBO (present path) — the render loop lazily builds
-                // the variant it needs for the other format.
-                const bool isLastPassAtCreate = i + 1 == passCount;
-                const bool rendersToHostAtCreate = isLastPassAtCreate && !pass.feedbackRead;
-                const VkFormat defaultFormat = rendersToHostAtCreate && impl.targetFormat != VK_FORMAT_UNDEFINED
-                    ? impl.targetFormat
-                    : pass.targetFormat;
-                auto madePipeline = impl.MakePassPipeline(pass, defaultFormat, i);
-                if (!madePipeline)
-                        return std::unexpected(madePipeline.error());
-
-                // Descriptor sets (empty slots bound as real empty sets).
-                pass.set1 = impl.AllocateSet(hasVertexUbo ? impl.set1Layout : impl.emptyLayout);
-                pass.set2 = impl.AllocateSet(set2Layout);
-                pass.set3 = impl.AllocateSet(hasFragmentUbo ? impl.set3Layout : impl.emptyLayout);
-                if (pass.set1 == VK_NULL_HANDLE || pass.set2 == VK_NULL_HANDLE || pass.set3 == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "descriptor set allocation failed"));
-
-                // UBOs sized by the reflected blocks; UBO descriptors written
-                // once, at each block's own binding (0 = plain UBO, 1 = second
-                // plain UBO or the re-homed push-constant block).
-                for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
-                        if (block.binding >= 2)
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                                    "vertex uniform block binding out of range: " + block.instanceName));
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = impl.MakeUbo(bytes, pass.vertexUbos[block.binding]);
-                        if (!made)
-                                return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.vertexUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set1;
-                        write.dstBinding = block.binding;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
-                }
-                for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
-                        if (block.binding >= 2)
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                                    "fragment uniform block binding out of range: " + block.instanceName));
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = impl.MakeUbo(bytes, pass.fragmentUbos[block.binding]);
-                        if (!made)
-                                return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.fragmentUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set3;
-                        write.dstBinding = block.binding;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
-                }
-        }
-
-        // Fullscreen unit quad: positions in [0,1], uv = position (Vulkan-native
-        // orientation; see the MVP comment at the top of this file).
-        static constexpr float kQuad[4][6] = {
-            {0.F, 0.F, 0.F, 1.F, 0.F, 0.F},
-            {1.F, 0.F, 0.F, 1.F, 1.F, 0.F},
-            {0.F, 1.F, 0.F, 1.F, 0.F, 1.F},
-            {1.F, 1.F, 0.F, 1.F, 1.F, 1.F},
-        };
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = sizeof(kQuad);
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        VmaAllocationCreateInfo vertexAllocInfo{};
-        vertexAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-        vertexAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-            | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo vertexMapped{};
-        if (vmaCreateBuffer(device.impl().allocator, &bufferInfo, &vertexAllocInfo, &impl.vertexBuffer,
-                &impl.vertexAllocation, &vertexMapped)
-            != VK_SUCCESS)
-                return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "vertex buffer allocation failed"));
-        std::memcpy(vertexMapped.pMappedData, kQuad, sizeof(kQuad));
-
-        // --- M4 present pipeline (letterbox/rotation draw) -------------------
-        {
-                // Trivial quad shaders, compiled with the same in-process
-                // glslang path as preset passes (bare GLSL, Vulkan 1.0).
-                preset::SlangTranslation presentTranslation;
-                presentTranslation.vertex.present = true;
-                presentTranslation.vertex.glsl =
-                    "#version 450\n"
-                    "layout(location = 0) in vec2 aPos;\n" // NDC
-                    "layout(location = 1) in vec2 aUV;\n"
-                    "layout(location = 0) out vec2 vUV;\n"
-                    "void main() { vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
-                presentTranslation.fragment.present = true;
-                presentTranslation.fragment.glsl =
-                    "#version 450\n"
-                    "layout(set = 0, binding = 0) uniform sampler2D uTex;\n"
-                    "layout(location = 0) in vec2 vUV;\n"
-                    "layout(location = 0) out vec4 oColor;\n"
-                    "void main() { oColor = texture(uTex, vUV); }\n";
-                preset::PassSpirv presentSpirv;
-                std::string compileError;
-                if (!preset::CompilePass(presentTranslation, presentSpirv, compileError))
-                        return std::unexpected(
-                            SLV_ERROR(Errc::shader_compile, "present pipeline compile failed: " + compileError));
-
-                VkShaderModuleCreateInfo moduleInfo{};
-                moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.vertex.data());
-                moduleInfo.codeSize = presentSpirv.vertex.size();
-                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &impl.presentVertexModule),
-                    Errc::shader_compile);
-                moduleInfo.pCode = reinterpret_cast<const uint32_t *>(presentSpirv.fragment.data());
-                moduleInfo.codeSize = presentSpirv.fragment.size();
-                SLV_VK(vkCreateShaderModule(device.device(), &moduleInfo, nullptr, &impl.presentFragmentModule),
-                    Errc::shader_compile);
-
-                VkDescriptorSetLayoutBinding presentBinding = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-                    VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-                VkDescriptorSetLayoutCreateInfo presentLayoutInfo{};
-                presentLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                presentLayoutInfo.bindingCount = 1;
-                presentLayoutInfo.pBindings = &presentBinding;
-                SLV_VK(vkCreateDescriptorSetLayout(device.device(), &presentLayoutInfo, nullptr,
-                    &impl.presentSetLayout), Errc::vk_error);
-
-                VkPipelineLayoutCreateInfo presentPipelineLayoutInfo{};
-                presentPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-                presentPipelineLayoutInfo.setLayoutCount = 1;
-                presentPipelineLayoutInfo.pSetLayouts = &impl.presentSetLayout;
-                SLV_VK(vkCreatePipelineLayout(device.device(), &presentPipelineLayoutInfo, nullptr,
-                    &impl.presentPipelineLayout), Errc::vk_error);
-
-                impl.presentSet = impl.AllocateSet(impl.presentSetLayout);
-                if (impl.presentSet == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "present descriptor set allocation failed"));
-
-                // Linear + clamp-to-edge: the reference host's present blit
-                // filtering (letterbox edges never wrap; sampling stays inside
-                // the rect's uv range).
-                VkSamplerCreateInfo samplerInfo{};
-                samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-                samplerInfo.magFilter = VK_FILTER_LINEAR;
-                samplerInfo.minFilter = VK_FILTER_LINEAR;
-                samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-                samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-                samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-                samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-                samplerInfo.maxLod = 0.0F;
-                SLV_VK(vkCreateSampler(device.device(), &samplerInfo, nullptr, &impl.presentSampler), Errc::vk_error);
-
-                // Host-mapped quad buffer, rewritten every present draw.
-                VkBufferCreateInfo presentBufferInfo{};
-                presentBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                presentBufferInfo.size = 4 * 2 * 2 * sizeof(float);
-                presentBufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-                VmaAllocationCreateInfo presentAllocInfo{};
-                presentAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-                presentAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                VmaAllocationInfo presentMapped{};
-                if (vmaCreateBuffer(device.impl().allocator, &presentBufferInfo, &presentAllocInfo,
-                        &impl.presentVertexBuffer, &impl.presentVertexAllocation, &presentMapped)
-                    != VK_SUCCESS)
-                        return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "present vertex buffer allocation failed"));
-                impl.presentVertexMapped = presentMapped.pMappedData;
-        }
-
+        auto built = impl.BuildAll(preset);
+        if (!built)
+                return std::unexpected(built.error());
         return out;
 }
 
@@ -1879,10 +2098,43 @@ auto Chain::passOutputSize(uint32_t passIndex) const -> std::expected<std::pair<
         return std::make_pair(pass.outputWidth, pass.outputHeight);
 }
 
-auto Chain::render(const InputFrame &input, const OutputTarget &target, const FrameInfo &frame)
-    -> std::expected<void, Error>
+auto Chain::rebuild() -> std::expected<void, Error>
 {
         Impl &impl = *impl_;
+        if (impl.preset == nullptr)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::rebuild: the chain has no preset"));
+        // Drop the dead resources, then build them again from the preset.
+        impl.DestroyGpuResources();
+        auto built = impl.BuildAll(*impl.preset);
+        if (!built)
+                return std::unexpected(built.error());
+        return {};
+}
+
+auto Chain::render_async(const InputFrame &input, const OutputTarget &target, const FrameInfo &frame)
+    -> std::expected<VkFence, Error>
+{
+        Impl &impl = *impl_;
+
+        // At most one async frame may be in flight per chain: the frame's
+        // descriptor writes (set2 texture bindings, the present sampler) are
+        // updated in place on the chain's shared descriptor sets, so a second
+        // frame cannot be recorded while the first is still executing. Drain
+        // the previous frame first; the host still gets real overlap between
+        // render_async() and wait_async().
+        auto drained = impl.WaitPendingFrame();
+        if (!drained)
+                return std::unexpected(drained.error());
+
+        // The device may have been replaced since the last frame (the host
+        // called Device::recover(), or an earlier frame triggered a
+        // recovery). The chain's resources belong to the old device, so they
+        // have to be rebuilt before this frame can use them.
+        if (impl.device->generation() != impl.generation) {
+                auto refreshed = impl.RefreshAfterDeviceChange();
+                if (!refreshed)
+                        return std::unexpected(refreshed.error());
+        }
         if (input.view == VK_NULL_HANDLE || input.width == 0 || input.height == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid input frame"));
         if (input.pixelBuffer != VK_NULL_HANDLE && input.image == VK_NULL_HANDLE)
@@ -2299,12 +2551,10 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                 framePipelines[i] = *pipeline;
         }
 
-        // 6. Record + submit (synchronous). Swapchain frames wait the host's
-        // acquire semaphore at COLOR_ATTACHMENT_OUTPUT; the submit fence makes
-        // the image present-ready when render() returns.
-        // Added device lost recovery (ROB-35): attempt to recover from VK_ERROR_DEVICE_LOST
-        // by recreating necessary Vulkan objects and retrying the operation.
-        auto recorded = impl.device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
+        // 6. Record. Swapchain frames wait the host's acquire semaphore at
+        // COLOR_ATTACHMENT_OUTPUT; the submit fence makes the image
+        // present-ready once the frame's work completes.
+        auto recorded = impl.device->impl().RecordCommandBuffer([&](VkCommandBuffer cmd) {
                 // (0) Host staging upload (single-submit path): the frame's pixel
                 // buffer is copied into the input image BEFORE the history blits
                 // or passes touch it. The image rests in SHADER_READ_ONLY_OPTIMAL
@@ -2524,117 +2774,72 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                             VK_ACCESS_SHADER_READ_BIT);
                 }
-        },
+        });
+        if (!recorded)
+                return std::unexpected(recorded.error());
+
+        // 7. Submit without waiting. The fence is the host's completion
+        // signal; wait_async() (or the next render_async()) reclaims the
+        // command buffer once the work has retired.
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        SLV_VK(vkCreateFence(impl.device->device(), &fenceInfo, nullptr, &fence), Errc::vk_error);
+
+        auto submitted = impl.device->impl().SubmitRecorded(*recorded,
             swapchainTarget ? swap->acquireSemaphore : VK_NULL_HANDLE,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        if (!recorded) {
-                // Device lost recovery (ROB-35): Check if this is a device lost error
-                // and attempt recovery by recreating necessary Vulkan objects
-                if (recorded.error().code == Errc::vk_error && 
-                    recorded.error().message.find("VK_ERROR_DEVICE_LOST") != std::string::npos) {
-                        
-                        // Attempt device lost recovery
-                        auto recoveryResult = impl.device->impl().RecoverFromDeviceLost();
-                        if (!recoveryResult) {
-                                return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
-                                    "Failed to recover from device lost: " + recoveryResult.error().message));
-                        }
-                        
-                        // Retry the submission after recovery
-                        recorded = impl.device->impl().SubmitAndWait([&](VkCommandBuffer cmd) {
-                                // Copy the original render command recording logic here
-                                // (This would be extracted into a shared function in practice)
-                                
-                                // (0) Host staging upload if needed
-                                if (input.pixelBuffer != VK_NULL_HANDLE) {
-                                        VkImageMemoryBarrier toDst{};
-                                        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                                        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                        toDst.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                        toDst.image = input.image;
-                                        toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                                        toDst.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-                                        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
-
-                                        VkBufferImageCopy copy{};
-                                        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                                        copy.imageExtent = {input.width, input.height, 1};
-                                        vkCmdCopyBufferToImage(cmd, input.pixelBuffer, input.image,
-                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-
-                                        VkImageMemoryBarrier toRead = toDst;
-                                        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-                                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toRead);
-                                }
-                                
-                                // TODO: Copy the full render command recording logic from the original method
-                                // This would include history updates, pass execution, present setup, etc.
-                        }, swapchainTarget ? swap->acquireSemaphore : VK_NULL_HANDLE, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-                        
-                        if (!recorded) {
-                                return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
-                                    "Device lost recovery failed: " + recorded.error().message));
-                        }
-                } else {
-                        return std::unexpected(recorded.error());
-                }
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, fence);
+        if (!submitted) {
+                vkDestroyFence(impl.device->device(), fence, nullptr);
+                vkFreeCommandBuffers(impl.device->device(), impl.device->impl().commandPool, 1, &recorded.value());
+                return std::unexpected(submitted.error());
         }
 
-        // Double-buffered passes flip AFTER the frame (SPEC 5.3): this
-        // frame's write buffer becomes the next frame's feedback source.
+        // Double-buffered passes flip AFTER the frame is recorded (SPEC 5.3):
+        // this frame's write buffer becomes the next frame's feedback source.
+        // The flip happens at record time (not at wait time) so the recorded
+        // commands and the next frame's descriptor writes agree on which
+        // buffer holds frame T-N.
         for (Chain::Impl::PassRuntime &pass : impl.passes)
                 if (pass.targetCount == 2)
                         pass.writeIndex ^= 1u;
 
-        return {};
+        impl.pendingFrame = Chain::Impl::PendingFrame{fence, *recorded};
+        return fence;
 }
 
-auto Chain::render_async(const InputFrame &input, const OutputTarget &target, const FrameInfo &frame)
-    -> std::expected<VkFence, Error>
-{
-    // For now, render_async provides a basic async interface by creating a fence
-    // and command buffer, but delegates the actual recording to the synchronous
-    // render method. This allows for async submission while maintaining compatibility
-    // with the existing render logic.
-    
-    Impl &impl = *impl_;
-    
-    // Create fence for tracking completion
-    VkFence fence = VK_NULL_HANDLE;
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    SLV_VK(vkCreateFence(impl.device->device(), &fenceInfo, nullptr, &fence), Errc::vk_error);
-    
-    // Store the fence for later submission
-    // The actual command buffer recording and submission happens in submit_and_wait
-    impl.pendingAsyncWork.emplace_back(fence, VK_NULL_HANDLE, VK_NULL_HANDLE);
-    
-    return fence;
-}
-
-auto Chain::submit_and_wait(VkFence fence, VkSemaphore semaphore, VkPipelineStageFlags stageMask)
+auto Chain::render(const InputFrame &input, const OutputTarget &target, const FrameInfo &frame)
     -> std::expected<void, Error>
 {
-    Impl &impl = *impl_;
-    
-    // For now, delegate to the synchronous render method
-    // This provides a basic async interface while maintaining compatibility
-    // with existing render logic
-    InputFrame input{};
-    OutputTarget outputTarget{};
-    FrameInfo frameInfo{};
-    
-    // Create dummy input/output for the synchronous render
-    // In a full implementation, these would be passed from render_async
-    return render(input, outputTarget, frameInfo);
+        // Synchronous render: record, submit, and wait for the frame to
+        // retire before returning. Implemented on top of the async path so
+        // both entry points share one recording implementation.
+        auto fence = render_async(input, target, frame);
+        if (!fence) {
+                // A device loss is recoverable: rebuild the device, the
+                // preset's LUTs and this chain's resources, then try the
+                // frame once more (ROB-35).
+                if (fence.error().code != Errc::vk_device_lost)
+                        return std::unexpected(fence.error());
+                auto recovered = impl_->RecoverFromDeviceLost();
+                if (!recovered)
+                        return std::unexpected(recovered.error());
+                fence = render_async(input, target, frame);
+                if (!fence)
+                        return std::unexpected(fence.error());
+        }
+        return wait_async(*fence);
+}
+
+auto Chain::wait_async(VkFence fence) -> std::expected<void, Error>
+{
+        Impl &impl = *impl_;
+        if (fence == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "wait_async: null fence"));
+        if (impl.pendingFrame.fence != fence)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                    "wait_async: fence does not belong to this chain's pending frame"));
+        return impl.WaitPendingFrame();
 }
 
 } // namespace slv
