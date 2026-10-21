@@ -78,7 +78,6 @@ struct Device::Impl {
         // being released does not invalidate the iteration.
         void ReleaseRegisteredResources()
         {
-                { extern long g_callbacks; g_callbacks += (long)releaseCallbacks.size(); }
                 auto callbacks = std::move(releaseCallbacks);
                 releaseCallbacks.clear();
                 for (auto &entry : callbacks)
@@ -245,20 +244,12 @@ struct Device::Impl {
                         commandPool = VK_NULL_HANDLE;
                 }
                 if (allocator != VK_NULL_HANDLE) {
-                        // The old allocator is deliberately NOT destroyed.
-                        //
-                        // A lost device takes its memory with it, and the
-                        // objects that owned that memory (the chain's
-                        // buffers and images, the preset's textures, and
-                        // whatever the host allocated) cannot be freed
-                        // through a dead device. Destroying the allocator
-                        // anyway trips VMA's "allocations were not freed"
-                        // assertion and aborts the process.
-                        //
-                        // Leaking the allocator's host-side bookkeeping is
-                        // the lesser evil: it is a bounded, one-off cost per
-                        // device loss, while the alternative is a hard
-                        // abort in the middle of the recovery.
+                        // Safe now: ReleaseRegisteredResources() above gave
+                        // every object a chance to free its allocations
+                        // first, so the allocator holds no live allocation
+                        // and VMA's "allocations were not freed" assertion
+                        // does not fire.
+                        vmaDestroyAllocator(allocator);
                         allocator = VK_NULL_HANDLE;
                 }
                 if (device != VK_NULL_HANDLE) {

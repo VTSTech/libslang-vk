@@ -415,12 +415,6 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
 } // namespace slv::vk
 
 namespace slv {
-long g_created = 0;
-long g_destroyed = 0;
-long g_released = 0;
-long g_callbacks = 0;
-extern "C" void slv_debug_pipeline_counts(long *c, long *d) { *c = g_created; *d = g_destroyed; }
-extern "C" void slv_debug_release_counts(long *r, long *cb) { *r = g_released; *cb = g_callbacks; }
 
 
 // Core-layer vocabulary + internal Vulkan helpers, unqualified in these TUs.
@@ -665,7 +659,6 @@ struct Chain::Impl {
                 }
                 for (PassRuntime &pass : passes) {
                         for (auto &entry : pass.pipelines) {
-                                g_destroyed++;
                                 vkDestroyPipeline(dev, entry.second, nullptr);
                         }
                         if (pass.pipelineLayout != VK_NULL_HANDLE)
@@ -1352,7 +1345,6 @@ struct Chain::Impl {
                         return std::unexpected(SLV_VKERR(created, Errc::shader_compile,
                             "pass " + std::to_string(passIndex) + " '" + pass.def.shaderPath
                                 + "': pass pipeline (format " + vk::FormatShortName(renderFormat) + ")"));
-                g_created++;
                 pass.pipelines.emplace(renderFormat, pipeline);
                 return pipeline;
         }

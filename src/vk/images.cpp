@@ -16,12 +16,6 @@
 #include "impls.hpp"
 
 namespace slv {
-extern "C" void slv_debug_image_release(unsigned long gen, unsigned long devgen, int stale)
-{
-        static int count = 0;
-        std::printf("  [img release #%d] gen=%lu devgen=%lu stale=%d\n", ++count, gen, devgen, stale);
-        std::fflush(stdout);
-}
 
 namespace vk {
 
@@ -166,7 +160,6 @@ struct Image::Impl {
         {
                 if (device == nullptr)
                         return;
-                { extern "C" void slv_debug_image_release(unsigned long gen, unsigned long devgen, int stale); slv_debug_image_release(generation, device->generation(), device->generation() != generation); }
                 if (device->generation() != generation) {
                         // The owning device is gone: the handles are stale,
                         // so they are simply forgotten.

@@ -35,8 +35,6 @@
 int main() { return 0; } // Core-only build: runner not compiled.
 #else
 
-extern "C" void slv_debug_pipeline_counts(long *c, long *d);
-extern "C" void slv_debug_release_counts(long *r, long *cb);
 
 namespace {
 
@@ -277,10 +275,6 @@ int main()
                 Check(true, "stale objects release cleanly after the device was replaced");
         }
 
-        long c = 0, d = 0, r = 0, cb = 0;
-        slv_debug_pipeline_counts(&c, &d);
-        slv_debug_release_counts(&r, &cb);
-        std::printf("pipelines created=%ld destroyed=%ld | chain releases=%ld callbacks fired=%ld\n", c, d, r, cb);
         std::printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
         std::fflush(stdout);
         return failures == 0 ? 0 : 1;
