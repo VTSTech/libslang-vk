@@ -71,7 +71,6 @@ jobs:
       should-skip: ${{ steps.check.outputs.should-skip }}
     steps:
       - name: Checkout code
-      - name: Checkout code
         uses: actions/checkout@v4
       - uses: ytj/changed-files@v1.0.4
         id: changed-files
