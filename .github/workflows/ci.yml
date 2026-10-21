@@ -96,7 +96,8 @@ jobs:
             changed_files=""
           else
             echo "Normal commit diff"
-            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }} 2>/dev/null || echo "")
+            # Correct order: old commit first, then new commit
+            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.sha }} ${{ github.event.before }} 2>/dev/null || echo "")
           fi
           
           # Additional fallback: check the current commit directly
