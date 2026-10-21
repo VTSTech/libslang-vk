@@ -163,6 +163,10 @@ int main()
                 && queue != VK_NULL_HANDLE,
             "device handles resolve");
         Check(slangvk_device_wait_idle(device) == SLANGVK_OK, "device wait idle");
+        // Device-lost recovery (ROB-35): the C surface exposes the same
+        // rebuild the C++ API does. The device's objects die with it, so
+        // this runs at the end of the test, after everything else.
+        Check(slangvk_device_recover(nullptr) == SLANGVK_ERR_INVALID_ARGUMENT, "device recover rejects NULL");
 
         const std::string dataDir = SLANGVK_TESTS_DATA_DIR;
 

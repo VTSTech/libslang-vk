@@ -9,12 +9,19 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <utility>
 
 #include "vk_internal.hpp"
 #include "impls.hpp"
 
 namespace slv {
+extern "C" void slv_debug_image_release(unsigned long gen, unsigned long devgen, int stale)
+{
+        static int count = 0;
+        std::printf("  [img release #%d] gen=%lu devgen=%lu stale=%d\n", ++count, gen, devgen, stale);
+        std::fflush(stdout);
+}
 
 namespace vk {
 
@@ -113,16 +120,65 @@ struct Image::Impl {
         vk::VkImageWithView obj;
         ImageDesc desc;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // The device generation the image was created on. When the device
+        // was replaced (a device-lost recovery, ROB-35) the image died with
+        // the old one and must not be destroyed through the new device.
+        uint64_t generation = 0;
+        // Token of this image's entry in the device's release registry.
+        uint64_t releaseToken = 0;
 
         ~Impl()
         {
                 if (device == nullptr)
                         return;
+                device->impl().RemoveReleaseCallback(releaseToken);
+                Release();
+        }
+
+        // Registers (or re-registers) the image with the device's release
+        // registry, so a device replacement can release the image while it
+        // still belongs to a live device (ROB-35).
+        //
+        // The callback re-registers afterwards: a released image is empty,
+        // so releasing it again is a harmless no-op, but it keeps the image
+        // covered by the next replacement.
+        void RegisterReleaseCallback()
+        {
+                if (device == nullptr)
+                        return;
+                releaseToken = device->impl().AddReleaseCallback([this]() {
+                        Release();
+                        if (device != nullptr)
+                                RegisterReleaseCallback();
+                });
+        }
+
+        // True when the device that owned the image was replaced: the
+        // image's handles are stale and must not be used.
+        bool IsStale() const
+        {
+                return device != nullptr && device->generation() != generation;
+        }
+
+        // Destroys the image, or forgets it when the device that owned it
+        // is already gone.
+        void Release()
+        {
+                if (device == nullptr)
+                        return;
+                { extern "C" void slv_debug_image_release(unsigned long gen, unsigned long devgen, int stale); slv_debug_image_release(generation, device->generation(), device->generation() != generation); }
+                if (device->generation() != generation) {
+                        // The owning device is gone: the handles are stale,
+                        // so they are simply forgotten.
+                        obj = {};
+                        return;
+                }
                 VkDevice dev = device->device();
                 if (obj.view != VK_NULL_HANDLE)
                         vkDestroyImageView(dev, obj.view, nullptr);
                 if (obj.image != VK_NULL_HANDLE)
                         vmaDestroyImage(device->impl().allocator, obj.image, obj.allocation);
+                obj = {};
         }
 };
 
@@ -142,6 +198,10 @@ auto Image::create(Device &device, const CreateInfo &info) -> std::expected<Imag
         out.impl_ = std::make_unique<Impl>();
         Impl &impl = *out.impl_;
         impl.device = &device;
+        impl.generation = device.generation();
+        // Register with the device so a device replacement can release the
+        // image while it still belongs to a live device (ROB-35).
+        impl.RegisterReleaseCallback();
         impl.desc = info.desc;
         impl.layout = info.finalLayout;
 
@@ -239,6 +299,9 @@ auto Image::update(const void *pixels, size_t pixelBytes) -> std::expected<void,
 {
         if (impl_ == nullptr || impl_->device == nullptr)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Image::update: image is not initialized"));
+        if (impl_->IsStale())
+                return std::unexpected(SLV_ERROR(Errc::vk_device_lost,
+                    "Image::update: the device was replaced; recreate the image"));
         if (pixels == nullptr)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Image::update: null pixels"));
         const uint32_t texelSize = vk::FormatTexelSize(impl_->desc.format);

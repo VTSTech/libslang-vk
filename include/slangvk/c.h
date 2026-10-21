@@ -103,8 +103,9 @@ typedef enum slangvk_result {
         SLANGVK_ERR_INVALID_ARGUMENT = 5,    /**< mismatched sizes/formats/layouts */
         SLANGVK_ERR_VK_INIT_FAILED = 6,      /**< loader/instance/device creation failed */
         SLANGVK_ERR_VK_DEVICE_LOST = 7,      /**< VK_ERROR_DEVICE_LOST during execution */
-        SLANGVK_ERR_VK_OUT_OF_MEMORY = 8,    /**< host or device allocation failed */
-        SLANGVK_ERR_VK_ERROR = 9             /**< any other Vulkan VkResult failure */
+        SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED = 8, /**< device-lost recovery attempt failed */
+        SLANGVK_ERR_VK_OUT_OF_MEMORY = 9,    /**< host or device allocation failed */
+        SLANGVK_ERR_VK_ERROR = 10            /**< any other Vulkan VkResult failure */
 } slangvk_result;
 
 /** @brief Short name of a result code ("OK", "shader_compile", ...) for logs. */
@@ -182,6 +183,21 @@ slangvk_result slangvk_device_get_handles(const slangvk_device *device, VkInstan
 
 /** @brief Blocks until all work submitted through this device finishes. */
 slangvk_result slangvk_device_wait_idle(const slangvk_device *device);
+
+/**
+ * @brief Rebuilds the Vulkan device after a device-lost event.
+ *
+ * Recreates the VkDevice, its command pool and the library's memory
+ * allocator from the same instance and physical device. Only devices
+ * created with slangvk_device_create can be recovered this way; an adopted
+ * device stays the host's to recreate and is reported as
+ * SLANGVK_UNSUPPORTED.
+ *
+ * Every object the lost device owned is gone after this call: images,
+ * presets and chains created from it must be recreated (presets and chains
+ * rebuild themselves on the next use) before they are used again.
+ */
+slangvk_result slangvk_device_recover(slangvk_device *device);
 
 /**
  * @brief Reads an image back to host memory (row-major, tightly packed).

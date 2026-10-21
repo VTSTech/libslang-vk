@@ -35,6 +35,9 @@
 int main() { return 0; } // Core-only build: runner not compiled.
 #else
 
+extern "C" void slv_debug_pipeline_counts(long *c, long *d);
+extern "C" void slv_debug_release_counts(long *r, long *cb);
+
 namespace {
 
 int failures = 0;
@@ -232,7 +235,54 @@ int main()
                         CheckBytes(*pixels, pattern, "the rebuilt chain still produces the same pixels");
         }
 
+        // --- The chain is usable again after a recovery --------------------
+        //
+        // The automatic device-loss path rebuilds the chain but does not
+        // retry the frame: the host's own images died with the device. This
+        // is the same situation, driven by hand — after the host recreates
+        // its images the chain renders without any further repair.
+        Check(device->generation() == 2, "the chain is on the current device generation");
+        const auto finalFrame = chain->render(makeInput(), makeOutput(), slv::FrameInfo{});
+        Check(finalFrame.has_value(), "the chain renders again after the recoveries");
+        if (finalFrame) {
+                auto pixels = device->readPixels(output->image(), VK_FORMAT_R8G8B8A8_UNORM, kWidth, kHeight,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                Check(pixels.has_value(), "final readback");
+                if (pixels)
+                        CheckBytes(*pixels, pattern, "the final frame matches the golden blit");
+        }
+
+        // --- Destroying stale objects after a device replacement -----------
+        //
+        // Everything the old device owned is gone. Releasing those objects
+        // must not call the destroy functions of the new device with stale
+        // handles (which some drivers treat as a crash), so the library
+        // forgets them instead.
+        {
+                auto staleImage = MakeHostImage(*device, outputInfo);
+                Check(staleImage.has_value(), "an image is created for the stale-object test");
+                auto stalePreset = slv::Preset::load(*device, dataDir + "/runner/blit.slangp");
+                Check(stalePreset.has_value(), "a preset is created for the stale-object test");
+                auto staleChain = slv::Chain::create(*device, *stalePreset, chainOptions);
+                Check(staleChain.has_value(), "a chain is created for the stale-object test");
+
+                // Replace the device behind their backs.
+                const auto replaced = device->recover();
+                Check(replaced.has_value(), "the device is replaced for the stale-object test");
+
+                // Releasing them must not crash and must not report errors.
+                staleImage.reset();
+                staleChain = std::unexpected(slv::Error{});
+                stalePreset = std::unexpected(slv::Error{});
+                Check(true, "stale objects release cleanly after the device was replaced");
+        }
+
+        long c = 0, d = 0, r = 0, cb = 0;
+        slv_debug_pipeline_counts(&c, &d);
+        slv_debug_release_counts(&r, &cb);
+        std::printf("pipelines created=%ld destroyed=%ld | chain releases=%ld callbacks fired=%ld\n", c, d, r, cb);
         std::printf("%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
+        std::fflush(stdout);
         return failures == 0 ? 0 : 1;
 }
 

@@ -182,6 +182,13 @@ auto Preset::load(Device &device, const std::filesystem::path &slangp, const Pre
         // The textures belong to the device generation they were uploaded
         // on; a later device replacement invalidates them (ROB-35).
         impl.generation = device.generation();
+
+        // Register with the device so a device replacement can release the
+        // textures while they still belong to a live device (ROB-35). The
+        // preset re-registers afterwards: its textures are uploaded again
+        // on the new device and have to be released at the next
+        // replacement.
+        impl.RegisterReleaseCallback();
         return out;
 }
 

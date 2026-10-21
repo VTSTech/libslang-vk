@@ -115,6 +115,11 @@ if(SLANGVK_ENABLE_VK)
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_recovery COMMAND test_runner_recovery)
 
+        add_executable(probe_test probe_test.cpp)
+        target_link_libraries(probe_test PRIVATE slangvk)
+        target_compile_definitions(probe_test PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+
         # C API smoke: the extern "C" surface (slangvk/c.h) drives the same
         # headless path end-to-end — device create, image create/update,
         # preset load + parameter metadata + live override, identity/gain

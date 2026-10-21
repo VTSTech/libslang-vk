@@ -45,6 +45,46 @@ struct Device::Impl {
         // stale object can be recognised and rebuilt (ROB-35).
         uint64_t generation = 0;
 
+        // --- Release registry (ROB-35) -------------------------------------
+        //
+        // Everything created on the device (chains, presets, images) has to
+        // release its GPU resources BEFORE the device is replaced: a
+        // destroyed device does not reliably reclaim the memory its objects
+        // used, and the objects cannot be destroyed through the replacement
+        // device either. Owners register a callback here; recover() runs
+        // them all, then swaps the device.
+        std::vector<std::pair<uint64_t, std::function<void()>>> releaseCallbacks;
+        uint64_t nextReleaseToken = 1;
+
+        auto AddReleaseCallback(std::function<void()> callback) -> uint64_t
+        {
+                const uint64_t token = nextReleaseToken++;
+                releaseCallbacks.emplace_back(token, std::move(callback));
+                return token;
+        }
+
+        void RemoveReleaseCallback(uint64_t token)
+        {
+                for (auto it = releaseCallbacks.begin(); it != releaseCallbacks.end(); ++it) {
+                        if (it->first == token) {
+                                releaseCallbacks.erase(it);
+                                return;
+                        }
+                }
+        }
+
+        // Releases every registered object's GPU resources. The callbacks
+        // are moved out first so an owner that unregisters itself while
+        // being released does not invalidate the iteration.
+        void ReleaseRegisteredResources()
+        {
+                { extern long g_callbacks; g_callbacks += (long)releaseCallbacks.size(); }
+                auto callbacks = std::move(releaseCallbacks);
+                releaseCallbacks.clear();
+                for (auto &entry : callbacks)
+                        entry.second();
+        }
+
         ~Impl()
         {
                 // Destroy in reverse dependency order: pool's command buffers
@@ -191,6 +231,12 @@ struct Device::Impl {
         // lost device first (chains and presets do that before calling in).
         auto RecreateDevice() -> std::expected<void, Error>
         {
+                // Let everything created on this device release its GPU
+                // resources first. The objects still belong to the device
+                // that is about to go away, so this is the last chance to
+                // destroy them properly (ROB-35).
+                ReleaseRegisteredResources();
+
                 // Drop the old device's resources. On a lost device these
                 // calls report VK_ERROR_DEVICE_LOST, which is expected and
                 // harmless: the objects are already gone.
@@ -316,11 +362,33 @@ struct Preset::Impl {
         // means the device was replaced and the textures have to be uploaded
         // again (ROB-35).
         uint64_t generation = 0;
+        // Token of this preset's entry in the device's release registry.
+        uint64_t releaseToken = 0;
         slv::preset::Preset parsed; // Core data model (textures, feedback, histories).
 
         ~Impl()
         {
-                ReleaseLuts();
+                if (device != nullptr)
+                        device->impl().RemoveReleaseCallback(releaseToken);
+                // When the device was replaced (a device-lost recovery) the
+                // textures died with the old device and must not be
+                // destroyed through the new one.
+                const bool deviceReplaced = (device != nullptr && device->generation() != generation);
+                ReleaseLuts(deviceReplaced);
+        }
+
+        // Registers (or re-registers) the preset with the device's release
+        // registry, so a device replacement can release the textures while
+        // they still belong to a live device (ROB-35).
+        void RegisterReleaseCallback()
+        {
+                if (device == nullptr)
+                        return;
+                releaseToken = device->impl().AddReleaseCallback([this]() {
+                        ReleaseLuts();
+                        if (device != nullptr)
+                                RegisterReleaseCallback();
+                });
         }
 
         // Releases the uploaded LUT images. Split out of the destructor so a

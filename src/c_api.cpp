@@ -74,6 +74,8 @@ slangvk_result MapErrc(slv::Errc code)
                 return SLANGVK_ERR_VK_INIT_FAILED;
         case slv::Errc::vk_device_lost:
                 return SLANGVK_ERR_VK_DEVICE_LOST;
+        case slv::Errc::device_lost_recovery_failed:
+                return SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED;
         case slv::Errc::vk_out_of_memory:
                 return SLANGVK_ERR_VK_OUT_OF_MEMORY;
         case slv::Errc::vk_error:
@@ -175,6 +177,8 @@ const char *slangvk_result_name(slangvk_result result)
                 return "vk_init_failed";
         case SLANGVK_ERR_VK_DEVICE_LOST:
                 return "vk_device_lost";
+        case SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED:
+                return "device_lost_recovery_failed";
         case SLANGVK_ERR_VK_OUT_OF_MEMORY:
                 return "vk_out_of_memory";
         case SLANGVK_ERR_VK_ERROR:
@@ -267,6 +271,13 @@ slangvk_result slangvk_device_wait_idle(const slangvk_device *device)
         if (device == nullptr)
                 return SetInvalid("device is NULL");
         return Check(device->device.waitIdle());
+}
+
+slangvk_result slangvk_device_recover(slangvk_device *device)
+{
+        if (device == nullptr)
+                return SetInvalid("device is NULL");
+        return Check(device->device.recover());
 }
 
 slangvk_result slangvk_device_read_pixels(slangvk_device *device, VkImage image, VkFormat format,

@@ -415,6 +415,13 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
 } // namespace slv::vk
 
 namespace slv {
+long g_created = 0;
+long g_destroyed = 0;
+long g_released = 0;
+long g_callbacks = 0;
+extern "C" void slv_debug_pipeline_counts(long *c, long *d) { *c = g_created; *d = g_destroyed; }
+extern "C" void slv_debug_release_counts(long *r, long *cb) { *r = g_released; *cb = g_callbacks; }
+
 
 // Core-layer vocabulary + internal Vulkan helpers, unqualified in these TUs.
 using slv::preset::FilterMode;
@@ -492,6 +499,10 @@ struct Chain::Impl {
         // mismatch means the device was replaced (a device-lost recovery)
         // and the chain has to rebuild itself (ROB-35).
         uint64_t generation = 0;
+        // Token of this chain's entry in the device's release registry: the
+        // device calls it before it replaces itself, so the chain's
+        // resources are destroyed while they still belong to a live device.
+        uint64_t releaseToken = 0;
         // The preset this chain was built from, borrowed (not owned): a
         // rebuild after a device-lost recovery re-reads the preset's pass
         // data and re-uploads its LUT textures (ROB-35). The preset must
@@ -579,6 +590,57 @@ struct Chain::Impl {
 
         ~Impl()
         {
+                if (device != nullptr) {
+                        // Unregister before releasing: the device may be
+                        // calling the release callback right now.
+                        device->impl().RemoveReleaseCallback(releaseToken);
+                }
+                ReleaseAllResources();
+        }
+
+        // Registers (or re-registers) the chain with the device's release
+        // registry. The device calls the callback before it replaces
+        // itself, so the chain's resources are destroyed while they still
+        // belong to a live device (ROB-35).
+        //
+        // The callback re-registers the chain afterwards: the chain rebuilds
+        // itself on the new device and has to be released again at the next
+        // replacement.
+        void RegisterReleaseCallback()
+        {
+                releaseToken = device->impl().AddReleaseCallback([this]() {
+                        ReleaseAllResources();
+                        if (device != nullptr)
+                                RegisterReleaseCallback();
+                });
+        }
+
+        // Releases everything the chain owns, in the order a device
+        // replacement needs: the in-flight frame first, then the GPU
+        // resources.
+        void ReleaseAllResources()
+        {
+                if (device == nullptr)
+                        return;
+                if (device->generation() != generation) {
+                        // The device was replaced (a device-lost recovery):
+                        // the resources died with the old device, so they
+                        // must not be destroyed through the new one.
+                        ReleaseGpuHandles();
+                        return;
+                }
+                // An async frame may still be in flight: wait for it and
+                // release its fence and command buffer before the device
+                // objects the frame references are destroyed.
+                if (pendingFrame.fence != VK_NULL_HANDLE) {
+                        vkWaitForFences(
+                            device->device(), 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
+                        vkDestroyFence(device->device(), pendingFrame.fence, nullptr);
+                        if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
+                                vkFreeCommandBuffers(device->device(), device->impl().commandPool, 1,
+                                    &pendingFrame.commandBuffer);
+                        pendingFrame = {};
+                }
                 DestroyGpuResources();
         }
 
@@ -602,8 +664,10 @@ struct Chain::Impl {
                         pendingFrame = {};
                 }
                 for (PassRuntime &pass : passes) {
-                        for (auto &entry : pass.pipelines)
+                        for (auto &entry : pass.pipelines) {
+                                g_destroyed++;
                                 vkDestroyPipeline(dev, entry.second, nullptr);
+                        }
                         if (pass.pipelineLayout != VK_NULL_HANDLE)
                                 vkDestroyPipelineLayout(dev, pass.pipelineLayout, nullptr);
                         if (pass.vertexModule != VK_NULL_HANDLE)
@@ -1288,6 +1352,7 @@ struct Chain::Impl {
                         return std::unexpected(SLV_VKERR(created, Errc::shader_compile,
                             "pass " + std::to_string(passIndex) + " '" + pass.def.shaderPath
                                 + "': pass pipeline (format " + vk::FormatShortName(renderFormat) + ")"));
+                g_created++;
                 pass.pipelines.emplace(renderFormat, pipeline);
                 return pipeline;
         }
@@ -1408,14 +1473,11 @@ struct Chain::Impl {
                         return std::unexpected(SLV_ERROR(Errc::invalid_argument,
                             "device lost: the chain has no preset to rebuild from"));
 
-                // 1. Release the resources that died with the device. The
-                // destroy calls themselves fail on a lost device, but they
-                // still clear the allocator's bookkeeping, which the
-                // allocator's own destruction asserts on.
-                DestroyGpuResources();
-                preset->impl().ReleaseLuts();
-
-                // 2. Replace the device itself.
+                // 1. Replace the device itself. recover() first releases
+                // every registered object's resources (this chain's and the
+                // preset's among them) while they still belong to the old
+                // device, so they are destroyed properly instead of
+                // leaking.
                 auto recovered = device->recover();
                 if (!recovered)
                         return std::unexpected(SLV_ERROR(Errc::device_lost_recovery_failed,
@@ -2057,6 +2119,11 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         auto built = impl.BuildAll(preset);
         if (!built)
                 return std::unexpected(built.error());
+
+        // Register with the device so a device replacement can release the
+        // chain's resources while they still belong to a live device
+        // (ROB-35).
+        impl.RegisterReleaseCallback();
         return out;
 }
 
@@ -2103,7 +2170,12 @@ auto Chain::rebuild() -> std::expected<void, Error>
         Impl &impl = *impl_;
         if (impl.preset == nullptr)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::rebuild: the chain has no preset"));
-        // Drop the dead resources, then build them again from the preset.
+        if (impl.device->generation() != impl.generation) {
+                // The device was replaced: the chain's resources died with
+                // it and must not be destroyed through the new device.
+                return impl.RefreshAfterDeviceChange();
+        }
+        // Drop the old resources, then build them again from the preset.
         impl.DestroyGpuResources();
         auto built = impl.BuildAll(*impl.preset);
         if (!built)
@@ -2816,17 +2888,25 @@ auto Chain::render(const InputFrame &input, const OutputTarget &target, const Fr
         // both entry points share one recording implementation.
         auto fence = render_async(input, target, frame);
         if (!fence) {
-                // A device loss is recoverable: rebuild the device, the
-                // preset's LUTs and this chain's resources, then try the
-                // frame once more (ROB-35).
                 if (fence.error().code != Errc::vk_device_lost)
                         return std::unexpected(fence.error());
+
+                // The device was lost. Rebuild it, the preset's textures and
+                // this chain's resources so the chain is usable again
+                // (ROB-35).
+                //
+                // The frame is NOT retried: the input and output images the
+                // host handed in died with the old device, and the library
+                // cannot recreate them (it does not know their contents or
+                // layout). The host has to recreate its own device-side
+                // resources and render again — the chain is already rebuilt
+                // and ready for that.
                 auto recovered = impl_->RecoverFromDeviceLost();
                 if (!recovered)
                         return std::unexpected(recovered.error());
-                fence = render_async(input, target, frame);
-                if (!fence)
-                        return std::unexpected(fence.error());
+                return std::unexpected(SLV_ERROR(Errc::vk_device_lost,
+                    "the Vulkan device was lost and has been rebuilt; recreate the host's images "
+                    "(and any other device-side resources) and render again"));
         }
         return wait_async(*fence);
 }
