@@ -37,6 +37,13 @@ struct Device::Impl {
         VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
         ValidationLog validation;
         VmaVulkanFunctions vulkanFunctions{}; // volk-bound fetchers (see adopt/create).
+        // Device extensions requested at create() time. Kept so recover()
+        // can build a replacement device with the same extension set.
+        std::vector<std::string> deviceExtensions;
+        // Bumped by every successful recover(). Presets and chains stamp
+        // their GPU resources with the generation they were built in, so a
+        // stale object can be recognised and rebuilt (ROB-35).
+        uint64_t generation = 0;
 
         ~Impl()
         {
@@ -102,32 +109,165 @@ struct Device::Impl {
                 const VkResult waited = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
                 vkDestroyFence(device, fence, nullptr);
                 SLV_VK(waited, Errc::vk_error);
-                SLV_VK(vkResetCommandPool(device, commandPool, 0), Errc::vk_error);
+                // Return the command buffer to the pool. A pool-wide
+                // vkResetCommandPool would also free command buffers that are
+                // still in flight on an async (ROB-33) submission, so the
+                // single buffer is freed instead.
+                vkFreeCommandBuffers(device, commandPool, 1, &cmd);
                 return {};
         }
-        
-        // Device lost recovery (ROB-35): Attempt to recover from VK_ERROR_DEVICE_LOST
-        // by recreating necessary Vulkan objects and resetting the device state
+
+        // --- Async submission primitives (ROB-33) ---------------------------
+        //
+        // The synchronous SubmitAndWait above collapses record -> submit ->
+        // wait into one call. The async path splits it so the host can hold a
+        // frame in flight while it does its own CPU work:
+        //
+        //   RecordCommandBuffer()  -> a recorded (not yet submitted) command
+        //   SubmitRecorded()        -> queue submit, no wait
+        //   the host waits on the fence it was handed
+        //
+        // Command buffers come from the same pool as the sync path, but they
+        // are freed individually (never by a pool reset), so an in-flight
+        // async frame is never pulled out from under the GPU.
+
+        // Allocates a command buffer from the pool and records into it.
+        // The caller owns the returned buffer until it frees it (or submits
+        // it and lets the chain reclaim it after the fence signals).
+        auto RecordCommandBuffer(const std::function<void(VkCommandBuffer)> &record)
+            -> std::expected<VkCommandBuffer, Error>
+        {
+                VkCommandBufferAllocateInfo allocInfo{};
+                allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                allocInfo.commandPool = commandPool;
+                allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                allocInfo.commandBufferCount = 1;
+                VkCommandBuffer cmd = VK_NULL_HANDLE;
+                SLV_VK(vkAllocateCommandBuffers(device, &allocInfo, &cmd), Errc::vk_error);
+
+                VkCommandBufferBeginInfo beginInfo{};
+                beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
+                        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+                        return std::unexpected(
+                            SLV_ERROR(Errc::vk_error, "vkBeginCommandBuffer failed"));
+                }
+                record(cmd);
+                if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+                        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "vkEndCommandBuffer failed"));
+                }
+                return cmd;
+        }
+
+        // Submits a recorded command buffer. `fence` is signalled when the
+        // work completes; this call does NOT wait. The optional wait
+        // semaphore is the M4 swapchain contract (the host's acquire
+        // semaphore is waited at `waitDstStageMask` before the work runs).
+        auto SubmitRecorded(VkCommandBuffer cmd, VkSemaphore waitSemaphore,
+            VkPipelineStageFlags waitDstStageMask, VkFence fence) -> std::expected<void, Error>
+        {
+                VkSubmitInfo submitInfo{};
+                submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &cmd;
+                if (waitSemaphore != VK_NULL_HANDLE) {
+                        submitInfo.waitSemaphoreCount = 1;
+                        submitInfo.pWaitSemaphores = &waitSemaphore;
+                        submitInfo.pWaitDstStageMask = &waitDstStageMask;
+                }
+                const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence);
+                if (submitted != VK_SUCCESS)
+                        return std::unexpected(SLV_VKERR(submitted, Errc::vk_error, "vkQueueSubmit"));
+                return {};
+        }
+
+        // Device lost recovery (ROB-35): rebuilds the VkDevice, its command
+        // pool and the VMA allocator from the existing instance + physical
+        // device. The caller must have released the objects it created on the
+        // lost device first (chains and presets do that before calling in).
+        auto RecreateDevice() -> std::expected<void, Error>
+        {
+                // Drop the old device's resources. On a lost device these
+                // calls report VK_ERROR_DEVICE_LOST, which is expected and
+                // harmless: the objects are already gone.
+                if (commandPool != VK_NULL_HANDLE) {
+                        vkDestroyCommandPool(device, commandPool, nullptr);
+                        commandPool = VK_NULL_HANDLE;
+                }
+                if (allocator != VK_NULL_HANDLE) {
+                        vmaDestroyAllocator(allocator);
+                        allocator = VK_NULL_HANDLE;
+                }
+                if (device != VK_NULL_HANDLE) {
+                        vkDestroyDevice(device, nullptr);
+                        device = VK_NULL_HANDLE;
+                }
+                graphicsQueue = VK_NULL_HANDLE;
+
+                // Build the replacement device with the same queue setup and
+                // extension set the original was created with.
+                const float priority = 1.0F;
+                VkDeviceQueueCreateInfo queueInfo{};
+                queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+                queueInfo.queueFamilyIndex = graphicsFamily;
+                queueInfo.queueCount = 1;
+                queueInfo.pQueuePriorities = &priority;
+
+                std::vector<const char *> extensions;
+                extensions.reserve(deviceExtensions.size());
+                for (const std::string &name : deviceExtensions)
+                        extensions.push_back(name.c_str());
+
+                VkDeviceCreateInfo deviceInfo{};
+                deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+                deviceInfo.queueCreateInfoCount = 1;
+                deviceInfo.pQueueCreateInfos = &queueInfo;
+                deviceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+                deviceInfo.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
+
+                VkDevice newDevice = VK_NULL_HANDLE;
+                SLV_VK(vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &newDevice), Errc::vk_init_failed);
+                device = newDevice;
+                volkLoadDevice(device);
+
+                vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
+                vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+
+                VmaAllocatorCreateInfo allocInfo{};
+                allocInfo.physicalDevice = physicalDevice;
+                allocInfo.device = device;
+                allocInfo.instance = instance;
+                vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+                vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+                allocInfo.pVulkanFunctions = &vulkanFunctions;
+                if (vmaCreateAllocator(&allocInfo, &allocator) != VK_SUCCESS) {
+                        allocator = VK_NULL_HANDLE;
+                        return std::unexpected(SLV_ERROR(Errc::vk_out_of_memory, "vmaCreateAllocator failed"));
+                }
+
+                VkCommandPoolCreateInfo poolInfo{};
+                poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+                poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                poolInfo.queueFamilyIndex = graphicsFamily;
+                SLV_VK(vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool), Errc::vk_init_failed);
+
+                ++generation;
+                return {};
+        }
+
+        // Device lost recovery (ROB-35): the real recovery entry point.
+        // The chain's render path calls this after it has released its own
+        // (and its preset's) GPU resources, which the lost device took with
+        // it; this then rebuilds the device itself.
         auto RecoverFromDeviceLost() -> std::expected<void, Error>
         {
-                // For now, a basic recovery implementation
-                // In a full implementation, this would:
-                // 1. Check device lost status with vkGetDeviceQueueStatusEXT
-                // 2. Recreate the command pool if needed
-                // 3. Reset any lost resources
-                // 4. Attempt to restore pipeline state
-                
-                // Reset command pool to clear any pending operations
-                SLV_VK(vkResetCommandPool(device, commandPool, 0), Errc::vk_error);
-                
-                // Note: A full implementation would need to handle:
-                // - Pipeline recreation
-                // - Descriptor set recreation  
-                // - Buffer/image recreation
-                // - Pipeline state restoration
-                // - Proper synchronization
-                
-                return {};
+                if (adopted)
+                        return std::unexpected(SLV_ERROR(Errc::unsupported_feature,
+                            "device lost: the device is host-owned (Device::adopt); "
+                            "the host must recreate the VkDevice itself"));
+                return RecreateDevice();
         }
 };
 

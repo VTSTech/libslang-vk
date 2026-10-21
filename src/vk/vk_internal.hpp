@@ -53,16 +53,29 @@ inline auto MakeError(Errc code, std::string message, const char *file, int line
 
 auto VkResultToString(VkResult result) -> const char *;
 
+// Device loss is not just "another Vulkan error": it invalidates every
+// object in the device, so the runner has to be able to recognise it from
+// the Errc code alone (the chain's recovery path keys off it — ROB-35).
+// Message-string sniffing is deliberately not used: it would miss a device
+// loss that surfaces as a generic VkResult from a driver-specific call.
+inline auto VkErrorCode(VkResult result, Errc fallback) -> Errc
+{
+        return result == VK_ERROR_DEVICE_LOST ? Errc::vk_device_lost : fallback;
+}
+
 #define SLV_ERROR(code, message) ::slv::vk::MakeError(code, message, __FILE__, __LINE__)
 #define SLV_VKERR(result, code, message) \
         ::slv::vk::MakeError(code, std::string(message) + ": VkResult " + ::slv::vk::VkResultToString(result), __FILE__, __LINE__)
 
 // Statement-style check: on failure return unexpected Error from the caller.
+// A VK_ERROR_DEVICE_LOST result is reported as Errc::vk_device_lost whatever
+// `code` the call site asked for.
 #define SLV_VK(expr, code)                                                             \
         do {                                                                           \
                 const VkResult slvVkResult_ = (expr);                                  \
                 if (slvVkResult_ != VK_SUCCESS)                                        \
-                        return std::unexpected(SLV_VKERR(slvVkResult_, code, #expr));  \
+                        return std::unexpected(SLV_VKERR(slvVkResult_,                  \
+                            ::slv::vk::VkErrorCode(slvVkResult_, code), #expr));        \
         } while (false)
 
 // ---------------------------------------------------------------------------

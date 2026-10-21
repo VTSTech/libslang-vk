@@ -95,6 +95,16 @@ if(SLANGVK_ENABLE_VK)
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_pushblock COMMAND test_runner_pushblock)
 
+        # M4.06 async render path (audit ROB-33): render_async() submits a
+        # frame and returns a fence without blocking on the GPU; wait_async()
+        # retires it. The test pins the async/sync pixel equivalence, the
+        # one-in-flight-per-chain rule and wait_async()'s error contract.
+        add_executable(test_runner_async test_runner_async.cpp)
+        target_link_libraries(test_runner_async PRIVATE slangvk)
+        target_compile_definitions(test_runner_async PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_async COMMAND test_runner_async)
+
         # C API smoke: the extern "C" surface (slangvk/c.h) drives the same
         # headless path end-to-end — device create, image create/update,
         # preset load + parameter metadata + live override, identity/gain

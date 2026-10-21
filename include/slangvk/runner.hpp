@@ -135,6 +135,36 @@ public:
         /** @brief Blocks until all work submitted through this Device finishes. */
         SLANGVK_API auto waitIdle() const -> std::expected<void, Error>;
 
+        /**
+         * @brief Rebuilds the Vulkan device after a device-lost event (ROB-35).
+         *
+         * Recreates the VkDevice, its command pool and the library's memory
+         * allocator from the same instance and physical device. Only devices
+         * created by Device::create() can be recovered this way: a device
+         * adopted from a host (Device::adopt) stays the host's to recreate,
+         * and recover() reports that as unsupported_feature.
+         *
+         * Every object the lost device owned is gone after this call: presets
+         * and chains created from it must be rebuilt before they are used
+         * again. Preset::rebuildLuts() and Chain::rebuild() do that; the
+         * chain's render path also performs the rebuild automatically when it
+         * sees a device-lost error.
+         *
+         * Recovery is best-effort: a driver that lost the device may also
+         * refuse to hand out a new one, in which case recover() reports the
+         * failure and the host is expected to re-create the whole Device.
+         */
+        SLANGVK_API auto recover() -> std::expected<void, Error>;
+
+        /**
+         * @brief Monotonic counter bumped by every successful recover().
+         *
+         * Presets and chains remember the generation their GPU resources
+         * were built in; a mismatch means those resources are stale and have
+         * to be rebuilt before use.
+         */
+        SLANGVK_API auto generation() const -> uint64_t;
+
         /** @brief A host-mapped buffer for per-frame CPU->GPU uploads. */
         struct MappedBuffer {
                 VkBuffer buffer = VK_NULL_HANDLE;
@@ -422,7 +452,9 @@ public:
          * @brief Renders one frame: uploads uniforms, binds pipelines/descriptors,
          * draws every pass, writes the final pass into the output target.
          *
-         * Synchronous: records + submits one command buffer and waits.
+         * Synchronous: records + submits one command buffer and waits for the
+         * frame to retire before returning. See render_async() for the
+         * non-blocking variant.
          * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays
          * untouched; an Offscreen target image is left in
          * SHADER_READ_ONLY_OPTIMAL, a SwapchainFrame image in PRESENT_SRC_KHR.
@@ -440,27 +472,35 @@ public:
             -> std::expected<std::pair<uint32_t, uint32_t>, Error>;
 
         /**
-         * @brief Async render: records command buffer and returns fence for external submission.
+         * @brief Renders one frame without waiting for the GPU to finish.
          *
-         * Records the render command buffer but doesn't submit it. Returns a fence that
-         * can be used to track completion when the command buffer is submitted externally.
-         * This enables command buffer batching and custom submission timing.
+         * Records and submits the frame, then returns a fence that signals
+         * when the frame's GPU work has completed. The host may use the time
+         * between this call and wait_async() for its own CPU work, and must
+         * call wait_async() before it consumes the frame's output (presenting
+         * it, reading it back, or overwriting it with the next frame).
          *
-         * The caller is responsible for submitting the command buffer and waiting on the fence.
-         * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays untouched.
+         * The same input/output contract as render() applies: the input image
+         * view must be in SHADER_READ_ONLY_OPTIMAL and stays untouched, and
+         * swapchain frames still wait on the host's acquire semaphore at
+         * COLOR_ATTACHMENT_OUTPUT.
+         *
+         * At most one async frame may be in flight per chain: the frame's
+         * texture bindings are written in place into the chain's shared
+         * descriptor sets, so the next render_async() waits for the previous
+         * frame to retire before recording over them.
          */
         SLANGVK_API auto render_async(const InputFrame &, const OutputTarget &, const FrameInfo &)
             -> std::expected<VkFence, Error>;
 
         /**
-         * @brief Submits a recorded command buffer and waits for completion.
+         * @brief Waits for a frame started by render_async() to complete.
          *
-         * Submits the given command buffer with the specified semaphore and pipeline stage,
-         * then waits for completion. Used in conjunction with render_async().
+         * Blocks until the fence returned by render_async() is signalled, then
+         * releases the frame's fence and command buffer. Must be called before
+         * the frame's output is consumed.
          */
-        SLANGVK_API auto submit_and_wait(VkFence fence, VkSemaphore semaphore = VK_NULL_HANDLE,
-            VkPipelineStageFlags stageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
-            -> std::expected<void, Error>;
+        SLANGVK_API auto wait_async(VkFence fence) -> std::expected<void, Error>;
 
         /// @cond internal
         auto impl() const -> Impl & { return *impl_; }

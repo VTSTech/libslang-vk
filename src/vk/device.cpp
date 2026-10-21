@@ -328,6 +328,10 @@ auto Device::create(const DeviceOptions &options) -> std::expected<Device, Error
         impl.device = device;
         impl.graphicsQueue = queue;
         impl.graphicsFamily = family;
+        // Keep the extension list so recover() can rebuild an equivalent
+        // device (ROB-35).
+        for (const char *name : options.deviceExtensions)
+                impl.deviceExtensions.emplace_back(name != nullptr ? name : "");
         vkGetPhysicalDeviceProperties(physicalDevice, &impl.properties);
         if (!layers.empty())
                 impl.messenger = EnableValidation(instance, impl.validation);
@@ -362,6 +366,15 @@ auto Device::waitIdle() const -> std::expected<void, Error>
         SLV_VK(vkDeviceWaitIdle(impl_->device), Errc::vk_device_lost);
         return {};
 }
+
+auto Device::recover() -> std::expected<void, Error>
+{
+        if (impl_ == nullptr || impl_->device == VK_NULL_HANDLE)
+                return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Device::recover: no device"));
+        return impl_->RecoverFromDeviceLost();
+}
+
+auto Device::generation() const -> uint64_t { return impl_->generation; }
 
 auto Device::createMappedBuffer(VkDeviceSize size) -> std::expected<MappedBuffer, Error>
 {

@@ -95,7 +95,10 @@ jobs:
           fi
 
           if [[ -n "$range" ]]; then
-            if ! git rev-parse --verify --quiet "${{ github.sha }}" >/dev/null; then
+            # `rev-parse --verify <sha>` only checks the NAME format (a
+            # 40-hex string always passes); `cat-file -e <sha>^{commit}`
+            # is what actually proves the object exists.
+            if ! git cat-file -e "${{ github.sha }}^{commit}" 2>/dev/null; then
               echo "Could not resolve ${{ github.sha }} - running CI to be safe."
               echo "should-skip=false" >> "$GITHUB_OUTPUT"
               exit 0
