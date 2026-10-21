@@ -79,23 +79,33 @@ jobs:
           # Handle edge cases for git object references
           if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
             # This is a new branch or push to new branch - check all files in the commit
-            changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD)
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD)
+            else
+              # Initial commit - get all files in the commit
+              changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT /dev/null HEAD)
+            fi
           elif [[ "${{ github.event.before }}" == "${{ github.sha }}" ]]; then
             # No changes detected (empty push or rebase)
             changed_files=""
           else
             # Normal diff between two commits
-            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }})
+            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }} 2>/dev/null || echo "")
           fi
           
           # Check if all changed files are .md files
           md_only=true
-          for file in $changed_files; do
-            if [[ "$file" != *.md ]]; then
-              md_only=false
-              break
-            fi
-          done
+          if [[ -n "$changed_files" ]]; then
+            for file in $changed_files; do
+              if [[ "$file" != *.md ]]; then
+                md_only=false
+                break
+              fi
+            done
+          else
+            # No changed files detected - don't skip CI (run it normally)
+            md_only=false
+          fi
           
           echo "should-skip=$md_only" >> $GITHUB_OUTPUT
           echo "Only .md files changed: $md_only"
