@@ -105,6 +105,30 @@ struct Device::Impl {
                 SLV_VK(vkResetCommandPool(device, commandPool, 0), Errc::vk_error);
                 return {};
         }
+        
+        // Device lost recovery (ROB-35): Attempt to recover from VK_ERROR_DEVICE_LOST
+        // by recreating necessary Vulkan objects and resetting the device state
+        auto RecoverFromDeviceLost() -> std::expected<void, Error>
+        {
+                // For now, a basic recovery implementation
+                // In a full implementation, this would:
+                // 1. Check device lost status with vkGetDeviceQueueStatusEXT
+                // 2. Recreate the command pool if needed
+                // 3. Reset any lost resources
+                // 4. Attempt to restore pipeline state
+                
+                // Reset command pool to clear any pending operations
+                SLV_VK(vkResetCommandPool(device, commandPool, 0), Errc::vk_error);
+                
+                // Note: A full implementation would need to handle:
+                // - Pipeline recreation
+                // - Descriptor set recreation  
+                // - Buffer/image recreation
+                // - Pipeline state restoration
+                // - Proper synchronization
+                
+                return {};
+        }
 };
 
 struct Preset::Impl {

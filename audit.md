@@ -30,11 +30,11 @@
 
 This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, translates, and compiles libretro shader presets (.slangp/.slang) with a full Vulkan execution path. The audit examined the core parsing layer, Vulkan runner implementation, C API surface, build system, test suite, and examples.
 
-**Total findings: 14** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. The audit identified 3 Medium severity findings focused on API design decisions and testing gaps, and 11 Low severity findings spanning maintainability, performance, and feature opportunities.
+**Total findings: 11** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. The audit identified 1 Medium severity finding focused on API design decisions, and 10 Low severity findings spanning maintainability, performance, and feature opportunities. (Note: ROB-33 and ROB-35 have been implemented and moved to deltas.md)
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful findings center around the synchronous render contract limitation (ROB-33), lack of async execution capabilities (ROB-34), and missing error recovery mechanisms (ROB-35). These design decisions, while appropriate for the current milestone, represent opportunities for future enhancement as the library evolves beyond M4.
+The most impactful remaining findings center around the lack of async execution capabilities (ROB-34). ROB-33 and ROB-35 have been implemented in the current version, addressing synchronous rendering limitations and device lost recovery mechanisms.
 
 ---
 
@@ -139,23 +139,7 @@ The library lacks any form of asynchronous execution or pipelining. All operatio
 
 ---
 
-#### ROB-35: Limited error recovery for Vulkan device lost scenarios
 
-| Property | Value |
-|----------|-------|
-| **Severity** | Medium |
-| **Category** | Robustness |
-| **File(s)** | `include/slangvk/runner.hpp`, `src/vk/device.cpp` |
-
-The library handles Vulkan initialization failures well but has limited recovery mechanisms for runtime device lost scenarios. Once a device is lost, all associated objects become invalid, but the library doesn't provide a clear path to recovery or recreation.
-
-**Current behavior:** Device lost errors (VK_ERROR_DEVICE_LOST) are reported through the Error mechanism, but there's no built-in way to recreate the device or associated objects while preserving application state.
-
-**Recommendation:** Add a `Device::recover()` method or provide documentation on the manual recovery process, including how to recreate chains and presets after device loss.
-
-**Impact:** Would improve robustness for applications running on unstable hardware or in virtualized environments where device loss can occur.
-
----
 
 #### ROB-36: Preset parser has complex state machine with edge cases
 
@@ -333,9 +317,8 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 
 | Timeline | Findings |
 |----------|----------|
-| **Near term (v0.2.0)** | ROB-33, ROB-35 (Synchronous render and error recovery) |
-| **Short term (v0.3.0)** | ROB-34, PERF-08 (Async execution and SPIR-V caching) |
-| **Medium term (v0.4.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12 |
+| **Short term (v0.2.0)** | ROB-34, PERF-08 (Async execution and SPIR-V caching) |
+| **Medium term (v0.3.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12 |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience

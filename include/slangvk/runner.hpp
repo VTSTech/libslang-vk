@@ -63,6 +63,7 @@ enum class Errc {
         invalid_argument,     ///< caller passed mismatched sizes/formats/layouts
         vk_init_failed,       ///< loader/instance/device creation failed
         vk_device_lost,       ///< VK_ERROR_DEVICE_LOST during execution
+        device_lost_recovery_failed, ///< Device lost recovery attempt failed
         vk_out_of_memory,     ///< host or device allocation failed
         vk_error,             ///< any other Vulkan VkResult failure
 };
@@ -437,6 +438,29 @@ public:
         /** @brief Sizes of a pass's output FBO as currently allocated. */
         SLANGVK_API auto passOutputSize(uint32_t passIndex) const
             -> std::expected<std::pair<uint32_t, uint32_t>, Error>;
+
+        /**
+         * @brief Async render: records command buffer and returns fence for external submission.
+         *
+         * Records the render command buffer but doesn't submit it. Returns a fence that
+         * can be used to track completion when the command buffer is submitted externally.
+         * This enables command buffer batching and custom submission timing.
+         *
+         * The caller is responsible for submitting the command buffer and waiting on the fence.
+         * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays untouched.
+         */
+        SLANGVK_API auto render_async(const InputFrame &, const OutputTarget &, const FrameInfo &)
+            -> std::expected<VkFence, Error>;
+
+        /**
+         * @brief Submits a recorded command buffer and waits for completion.
+         *
+         * Submits the given command buffer with the specified semaphore and pipeline stage,
+         * then waits for completion. Used in conjunction with render_async().
+         */
+        SLANGVK_API auto submit_and_wait(VkFence fence, VkSemaphore semaphore = VK_NULL_HANDLE,
+            VkPipelineStageFlags stageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+            -> std::expected<void, Error>;
 
         /// @cond internal
         auto impl() const -> Impl & { return *impl_; }

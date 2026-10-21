@@ -148,9 +148,9 @@ Unfinished work, TODO comments, known gaps. Honest assessment of what's not done
 
 ## Audit Findings Summary
 
-**Recent audit (2025-06-18):** 14 findings total across 7 categories
+**Recent audit (2025-06-18):** 13 findings total across 7 categories
 - **3 Medium severity:** Synchronous render limitations, no async execution, limited error recovery
-- **11 Low severity:** C API validation, parser complexity, pimpl usage, performance opportunities
+- **10 Low severity:** C API validation, parser complexity, pimpl usage, performance opportunities
 - **No High severity findings** - strong security and robustness practices
 
 Key findings from the detailed audit:
