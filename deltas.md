@@ -1,6 +1,6 @@
 # Fix Deltas — Closed Findings
 
-**libslang-vk v0.2.0**
+**libslang-vk v0.4.06**
 
 **Repository:** https://github.com/VTSTech/libslang-vk  
 **Baseline audit:** [audit.md](audit.md) @ commit 249734b  
@@ -144,6 +144,9 @@ resources to be per-frame.
   history-ring and feedback cases.
 - ASAN + UBSAN builds are clean; the leak profile is unchanged from the pre-change
   baseline (240 bytes in 3 allocations, the same as the untouched runner tests).
+- **Downstream hosts**: the M4.06 build was exercised against two downstream
+  consumers (Doom and Diablo) — both load presets and render with the shaders
+  working again.
 
 ---
 

@@ -1,6 +1,6 @@
 # PROVENANCE
 
-libslang-vk v0.1.0 — provenance ledger for the M0 port of the reference
+libslang-vk v0.4.06 — provenance ledger for the M0 port of the reference
 host's preset layer and for the M1–M4 runner milestones authored in this
 repository (working milestone numbers; see docs/PLAN.md §11 for the mapping
 onto the plan's milestones).

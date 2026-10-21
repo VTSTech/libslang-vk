@@ -9,7 +9,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(libslang-vk
-    VERSION 0.1.0
+    VERSION 0.4.06
     DESCRIPTION "libretro slang shader preset parsing/compiling with a Vulkan execution path"
     LANGUAGES CXX C)
 

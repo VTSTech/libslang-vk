@@ -1,10 +1,10 @@
 # Improvement & Enhancement Audit
 
-**libslang-vk v0.1.0**
+**libslang-vk v0.4.06**
 
 **Repository:** https://github.com/VTSTech/libslang-vk  
-**Author:** VTSTech | **License:** MIT | **Date:** 2025-06-18  
-**Audit commit:** a1b2c3d (HEAD at refresh) | **Auditor:** Pi — codebase-audit skill v0.2.0  
+**Author:** VTSTech | **License:** MIT | **Date:** 2026-10-21  
+**Audit commit:** 5fd2e72 (HEAD at refresh) | **Auditor:** Pi — codebase-audit skill v0.2.0  
 **Files reviewed:** 47 source files, 15,000+ lines of C++23 code | **Scope:** Core parsing, compilation, Vulkan runner, C API, examples, tests
 
 ---
@@ -277,8 +277,8 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 
 | Timeline | Findings |
 |----------|----------|
-| **Short term (v0.2.0)** | PERF-08 (SPIR-V caching) |
-| **Medium term (v0.3.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, SEC-07, ROB-36, PERF-09, ARCH-04 |
+| **Short term (v0.4.x)** | PERF-08 (SPIR-V caching) |
+| **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, SEC-07, ROB-36, PERF-09, ARCH-04 |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience
