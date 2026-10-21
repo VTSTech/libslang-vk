@@ -148,18 +148,18 @@ Unfinished work, TODO comments, known gaps. Honest assessment of what's not done
 
 ## Audit Findings Summary
 
-**Recent audit (2025-06-18):** 13 findings total across 7 categories
+**Recent audit (2026-10-21):** 13 findings total across 7 categories
 - **3 Medium severity:** Synchronous render limitations, no async execution, limited error recovery
 - **10 Low severity:** C API validation, parser complexity, pimpl usage, performance opportunities
 - **No High severity findings** - strong security and robustness practices
 
 Key findings from the detailed audit:
-- ROB-33: Synchronous render() limits performance and batching
-- ROB-34: No async execution or pipelining support
-- ROB-35: Limited Vulkan device lost recovery
+- ROB-33: Synchronous render() limits performance and batching — **closed** (async `render_async()` / `wait_async()`)
+- ROB-34: No async execution or pipelining support — open
+- ROB-35: Limited Vulkan device lost recovery — **closed** (`Device::recover()`, automatic rebuild)
 - PERF-08: No SPIR-V caching across preset loads
 - FEAT-06: No shader hot-reloading during runtime
-- Complete findings documented in `/workspace/audit.md`
+- Complete findings documented in `audit.md`; closed findings in `deltas.md`
 
 ---
 
