@@ -76,8 +76,17 @@ jobs:
       - name: Check if only .md files changed
         id: check
         run: |
-          # Get list of changed files
-          changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }})
+          # Handle edge cases for git object references
+          if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
+            # This is a new branch or push to new branch - check all files in the commit
+            changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD)
+          elif [[ "${{ github.event.before }}" == "${{ github.sha }}" ]]; then
+            # No changes detected (empty push or rebase)
+            changed_files=""
+          else
+            # Normal diff between two commits
+            changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }})
+          fi
           
           # Check if all changed files are .md files
           md_only=true
