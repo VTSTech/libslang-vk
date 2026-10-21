@@ -134,9 +134,14 @@ Results (`SlangTranslation`):
 
 ```cpp
 bool CompilePass(const SlangTranslation& translation, PassSpirv& out, std::string& error);
+
+/// The content key of a pass's compiled output (M4.07).
+std::string ComputePassCacheKey(const SlangTranslation& translation);
 ```
 
-In-process glslang, Vulkan 1.0 client / SPIR-V 1.0, GLSL 450. `PassSpirv { vertex, fragment }` receives the bytecode. Nothing here touches the filesystem — v1 deliberately has no sidecar/disk cache (PLAN §2 non-goal); compilation happens at every `Preset::load`. Compile errors fail the preset load with the glslang info log in `error`. glslang's frontend is not thread-safe, so every frontend entry point (this compile path and the translator's preprocessing oracle) is serialized by one process-global mutex — concurrent `Preset::load`s are safe (§6).
+In-process glslang, Vulkan 1.0 client / SPIR-V 1.0, GLSL 450. `PassSpirv { vertex, fragment }` receives the bytecode. Nothing here touches the filesystem — v1 deliberately has no sidecar/disk cache (PLAN §2 non-goal); compilation happens at every `Preset::load` unless the host serves the bytes from its own cache (see `PresetLoadOptions::spirvCache`, §5.3). Compile errors fail the preset load with the glslang info log in `error`. glslang's frontend is not thread-safe, so every frontend entry point (this compile path and the translator's preprocessing oracle) is serialized by one process-global mutex — concurrent `Preset::load`s are safe (§6).
+
+**`ComputePassCacheKey`** (M4.07) is a hex SHA-256 digest over *the exact GLSL handed to glslang* plus the compiler's version and target environment. Hashing the compiler's **input** is what makes the key correct by construction: it changes exactly when the compiled output would — so a host caching by it can never serve a stale shader, not even when the preset `#include`s other files (which a host-side hash of the `.slangp` alone would miss). The key is stable across processes and machines, so a host can use it as a file name. The compile environment lives in constants shared by the compile and the key, so the two cannot drift.
 
 ### 4.5 Descriptor conventions (the core ↔ runner contract)
 
@@ -203,11 +208,27 @@ public:
     auto readPixels(VkImage, VkFormat, uint32_t width, uint32_t height, VkImageLayout currentLayout)
         -> std::expected<std::vector<uint8_t>, Error>;
     auto validationErrors() const -> std::vector<std::string>;
+
+    /// A host-mapped buffer for per-frame CPU->GPU uploads.
+    struct MappedBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* mapped = nullptr;   ///< Persistently mapped host pointer.
+        VkDeviceSize size = 0;    ///< Bytes allocated.
+    };
+
+    /// Allocates a persistently mapped host-visible buffer
+    /// (TRANSFER_SRC | TRANSFER_DST).
+    auto createMappedBuffer(VkDeviceSize size) -> std::expected<MappedBuffer, Error>;
+
+    /// Releases a buffer from createMappedBuffer().
+    auto destroyMappedBuffer(MappedBuffer&) -> void;
 };
 ```
 
 - **Adopt mode:** the host keeps owning instance/device/queue; the library records the graphics family and layers its own allocator (VMA) + command machinery on top. The host must keep the instance/device alive for the lifetime of every object created through this `Device`. Surface creation stays host-side (the library is SDL-free); request the surface + swapchain extensions via `instanceExtensions` / `deviceExtensions`.
 - **Create mode:** instance + device created internally (headless/CI). With `validationLayers = true` and the layer present, messenger-based ERROR collection is active **including synchronization validation** (instance-level `VkValidationFeaturesEXT`); collected errors surface via `validationErrors()` — the CI gate treats any entry as failure.
+- **The per-frame upload path** (`createMappedBuffer` / `destroyMappedBuffer`, M4.05): a host that uploads every frame allocates a persistently mapped staging buffer once and memcpys into `mapped` each frame, then passes it as `InputFrame::pixelBuffer` — the chain folds the copy into the frame's own submission instead of paying a separate `Image::update` submit+fence cycle per frame.
 - **`readPixels`:** row-major tightly-packed readback, transition-safe (image moves to `TRANSFER_SRC` and back to `currentLayout`). The headless test/golden vehicle; hosts that composite themselves normally read their own targets.
 - **`recover` / `generation` (M4.06):** the device-lost path — see §5.4. `recover()` releases the objects created on the device (chains, presets, images) *before* swapping the device, so they are destroyed while they still belong to a live device; `generation()` lets those objects notice that the device they were built on is gone.
 - Move-only; owns `Impl` (pimpl — all runner types are move-only, never copyable).
@@ -236,9 +257,26 @@ VMA-backed 2D image + view for hosts/tests without their own allocator: input fr
 ### 5.3 `Preset` — immutable compiled preset
 
 ```cpp
+/// The compiled SPIR-V of one pass — the bytes a host caches.
+struct PassSpirv {
+    std::vector<uint8_t> vertex;   ///< SPIR-V bytecode for the vertex stage.
+    std::vector<uint8_t> fragment; ///< SPIR-V bytecode for the fragment stage.
+};
+
+/// A host's store for compiled SPIR-V (the "cache enabler", M4.07).
+struct SpirvCache {
+    /// Returns the cached SPIR-V for a pass, or nothing if the host has none.
+    std::function<std::optional<PassSpirv>(std::string_view passKey)> load;
+    /// Called with the freshly compiled SPIR-V of a pass.
+    std::function<void(std::string_view passKey, const PassSpirv& spirv)> store;
+};
+
 struct PresetLoadOptions {
     bool strict = false;      ///< Promote translator warnings to load errors
     bool noLutImages = false; ///< Skip LUT upload (headless/compile-only sweeps)
+    /// An optional host SPIR-V cache. Empty (the default) compiles every
+    /// pass, as before.
+    SpirvCache spirvCache;
 };
 
 class Preset {
@@ -267,6 +305,14 @@ public:
 ```
 
 One call runs parse → translate (per pass, with `#pragma name` seeding done for you) → glslang compile of every stage. **Synchronous** — the accepted trade-off of the no-disk-cache decision; glslang frontend calls are serialized by a process-global mutex, so a host may warm several `Preset` objects on worker threads (§4.4, PLAN §5.3). Immutable after load; shareable across `Chain`s on the same device. `strict = true` is the conformance/lint mode (warnings become errors); `noLutImages = true` is what the corpus sweep uses to skip decoding LUT image files it never samples. `rebuildLuts` is the one exception to "immutable": it refreshes the preset's GPU textures after a device loss without touching its pass data (M4.06).
+
+**The host's SPIR-V cache** (`PresetLoadOptions::spirvCache`, M4.07). The library keeps **no disk cache** — that is the host's business, and the reference host already keeps one (`shaders/cache/`); two caches would disagree. What only the library can do is hand the host a **correct key**: `core::ComputePassCacheKey` (§4.4). The flow per pass is:
+
+1. the library computes the key;
+2. `spirvCache.load(key)` is called — a hit means the compile is **skipped**;
+3. on a miss the library compiles and calls `spirvCache.store(key, spirv)`.
+
+The host therefore needs no knowledge of glslang, the translation, or the include graph — only the key and the bytes. The C surface mirrors this (`slangvk_spirv_cache`, §"C ABI" in `c.h`).
 
 `ParameterInfo { name, description, defaultValue, minimum, maximum, step }` is the UI-facing merged view: `#pragma parameter` metadata with preset-file overrides applied to the default.
 
@@ -451,6 +497,9 @@ Layout rules after `render` returns: the input image is untouched (back in `SHAD
 - **Creation order:** `Device` → `Preset` (needs `Device&`) → `Chain` (needs `Device&` + `Preset&`). `Image` needs `Device&`.
 - **Destruction order** is the reverse: `Chain`/`Image` before `Preset` before `Device`. The **`Preset` must outlive every `Chain` created from it** — LUT texture views are borrowed from the preset's uploads (M3). In adopt mode the host's `VkInstance`/`VkDevice` must outlive everything created through the `Device`.
 - **Threading:** one thread per `Chain`; `Preset::load` may run concurrently with other loads on other threads (glslang is process-globally guarded); `SetShaderRootDir` is startup-only; sampler/pipeline caches are per-`Chain` and not shared.
+- **The `Preset` is borrowed, not owned** (M4.06): a `Chain` keeps a reference to the `Preset` it was built from, because a device-lost recovery rebuilds the chain from the preset's pass data and re-uploads the preset's textures. The same rule as above applies: the preset must outlive the chain **and must not be moved while the chain exists** (a move would leave the chain's reference dangling).
+- **The async path borrows its frame's resources** (M4.06): the input image and the output target are borrowed for the duration of the frame, so frames that overlap in time need one input image and one output target each. `wait_async` (or the next `render_async`) releases the frame.
+- **The host's SPIR-V cache callbacks are called on the loading thread** (M4.07), inside `Preset::load`, once per pass. They must not call back into the library.
 - All public types are move-only (`Device`, `Preset`, `Chain`, `Image`); no copies, no `clone()`.
 
 ## 7. Minimal headless walkthrough
@@ -518,7 +567,8 @@ The chain's internal FBOs keep rendering at their preset-derived sizes; only the
 
 The full format-level list is SPEC §6/§7; these affect API consumers directly:
 
-- **Synchronous everything.** `Preset::load` compiles with glslang inline (no disk cache); `Chain::render` fences. Cold-load cost on huge presets is real (hardware worst measured ~4 s) — warm `Preset` objects ahead of need if load-time UX matters.
+- **Synchronous everything.** `Preset::load` compiles with glslang inline; `Chain::render` fences. Cold-load cost on huge presets is real (hardware worst measured ~4 s) — warm `Preset` objects ahead of need if load-time UX matters, or serve the bytes from a host cache (`PresetLoadOptions::spirvCache`, §5.3: the library supplies the key, the host owns the store; the library keeps no disk cache of its own).
+- **The async path is one frame deep by default.** `Chain::render` waits for the frame; `render_async` returns a fence and `wait_async` retires it. `ChainOptions::framesInFlight` (1..8) raises the limit — each extra frame costs a set of framebuffers, uniform buffers and descriptor sets per pass. Frames that overlap in time need one input image and one output target each (the chain borrows both for the frame's duration).
 - **No reload.** Preset switching is replace-and-recreate; no `Preset::reload()` (PLAN §13.2 open question).
 - **Parameters are not preprocessor macros.** `#if`/`#ifdef` on a parameter name is always dead code (SPEC §4.2, M4.03 note) — pack authors porting RetroArch-conditional shaders must define the gate themselves.
 - **Vertex-stage textures, sampler arrays, > 1 UBO per stage, unsized arrays** — hard translate errors; zero corpus exposure (SPEC §7.9).

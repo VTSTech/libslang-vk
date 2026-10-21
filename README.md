@@ -59,10 +59,11 @@ exit gate.
 ## Contents
 
 - [Quickstart](#quickstart)
-  - [Async frames and device-lost recovery](#async-frames-and-device-lost-recovery)
+  - [Async frames, pipelining, device-lost recovery and the SPIR-V cache](#async-frames-pipelining-device-lost-recovery-and-the-spirv-v-cache)
+  - [The SPIR-V cache enabler](#the-spirv-v-cache-enabler)
 - [Shader demo](#shader-demo)
 - [Consuming](#consuming)
-- [Vulkan runner](#vulkan-runner-m1--m2--m3--m4)
+- [Vulkan runner](#vulkan-runner-m1--m407)
 - [C API](#c-api)
 - [Example](#example)
 - [Conformance: golden images + perf budgets](#conformance-golden-images--perf-budgets)
@@ -102,7 +103,7 @@ chain->render(inputFrame, outputTarget, {});   // once per frame
 The same runner speaks C too — [`include/slangvk/c.h`](include/slangvk/c.h)
 is an `extern "C"` mirror of the C++ surface (see [C API](#c-api)).
 
-### Async frames, pipelining and device-lost recovery
+### Async frames, pipelining, device-lost recovery and the SPIR-V cache
 
 `render()` waits for the frame to retire. A host that would rather keep a
 frame in flight can split it:
@@ -134,6 +135,35 @@ the preset's textures and itself, and reports `slv::Errc::vk_device_lost`:
 the host's own images died with the device too, so recreate them and render
 again. Hosts can also drive the recovery themselves with
 `Device::recover()`.
+
+### The SPIR-V cache enabler
+
+The library keeps **no disk cache** — that is the host's business, and the
+reference host already keeps one (`shaders/cache/`); two caches would
+disagree. What only the library can do is hand the host a **correct key**, so
+the host's own cache cannot serve a stale shader:
+
+```cpp
+slv::PresetLoadOptions options;
+options.spirvCache.load = [](std::string_view key) -> std::optional<slv::PassSpirv> {
+        // Your cache lookup, by the library's content key.
+        return myCache.get(std::string(key));
+};
+options.spirvCache.store = [](std::string_view key, const slv::PassSpirv &spirv) {
+        myCache.put(std::string(key), spirv);
+};
+auto preset = slv::Preset::load(*device, "shaders/crt-royale.slangp", options);
+```
+
+The key is a SHA-256 over the exact GLSL handed to glslang plus the
+compiler's version and target — so it changes **exactly** when the compiled
+output would. A host caching by it can never serve a stale shader, not even
+when the preset `#include`s other files (which a host-side hash of the
+`.slangp` alone would miss). The host needs no knowledge of glslang, the
+translation or the include graph — only the key and the bytes.
+
+The C surface mirrors this (`slangvk_spirv_cache`, load/store function
+pointers).
 
 ## Shader demo
 
@@ -248,7 +278,7 @@ previous frame) fail with `unknown texture reference` otherwise.
 the same include semantics as `TranslateSlang`; `Preset::load` does this
 automatically.
 
-## Vulkan runner (M1 + M2 + M3 + M4)
+## Vulkan runner (M1 → M4.07)
 
 The runner executes compiled presets on a Vulkan device. The host either
 adopts its own context or goes headless; errors come back as
@@ -319,6 +349,18 @@ frame — the standalone `Image::update` round-trip's second submit + fence
 drain disappears, along with the per-frame staging alloc/free.
 `Image::update` stays for headless and test use.
 
+M4.06 splits the frame path into record / submit / wait, so a host can keep
+a frame in flight (`Chain::render_async` + `Chain::wait_async`) and several
+frames on the GPU at once (`ChainOptions::framesInFlight`); a lost Vulkan
+device can be rebuilt (`Device::recover()`), with the preset's textures and
+the chain rebuilding themselves.
+
+M4.07 removes the per-frame allocations from the render path — the command
+buffer belongs to the frame slot and is reset, not reallocated; the uniform
+blocks are filled in place in their mapped UBOs; the per-frame vectors are
+chain scratch; the LUT sizes and the merged parameter overrides are cached —
+and adds the SPIR-V cache enabler above.
+
 Vulkan is loaded at runtime through vendored [volk](https://github.com/zeux/volk)
 (no link-time libvulkan); memory comes from vendored
 [VMA](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator).
@@ -352,6 +394,12 @@ slangvk_image_get_handles(img, &in.view, &in.image, &in.format, &in.width, &in.h
 if (slangvk_chain_render_swapchain(chain, &in, &out, &fi) != SLANGVK_OK)
         fprintf(stderr, "render failed: %s\n", slangvk_last_error());
 ```
+
+The C surface also carries the M4.06/M4.07 additions:
+`slangvk_device_recover()` (rebuild a lost device), `slangvk_chain_create_ex()`
+with `slangvk_chain_options` (including `frames_in_flight`), and
+`slangvk_spirv_cache` (the SPIR-V cache enabler, with load/store function
+pointers).
 
 Contracts carry over verbatim (input layout, preset outlives chains,
 single-threaded chains, resize before render after an extent change;
