@@ -71,72 +71,50 @@ jobs:
       should-skip: ${{ steps.check.outputs.should-skip }}
     steps:
       - name: Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-        
+      - uses: ytj/changed-files@v1.0.4
+        id: changed-files
+        with:
+          files: |
+            **/*.md
+            **/*.txt
+            **/*.rst
       - name: Check if only .md files changed
         id: check
         run: |
-          # Debug the commit range first
-          echo "Debug: github.event.before = ${{ github.event.before }}"
-          echo "Debug: github.sha = ${{ github.sha }}"
-          echo "Debug: github.event_name = ${{ github.event_name }}"
-          
-          # Try multiple approaches to get changed files
-          if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
-            echo "New branch detected"
-            # Try to get files from the current commit
-            if git rev-parse HEAD^ >/dev/null 2>&1; then
-              changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD)
-            else
-              # For initial commit, list all tracked files
-              changed_files=$(git ls-tree -r --name-only HEAD | grep -E '\.(md|txt|rst|doc)$' || echo "")
-            fi
-          elif [[ "${{ github.event.before }}" == "${{ github.sha }}" ]]; then
-            echo "Same commit - no changes detected"
-            changed_files=""
-          else
-            echo "Normal commit diff"
-            # Get the actual parent of the current commit
-            parent=$(git rev-parse HEAD~1 2>/dev/null || echo "")
-            echo "Debug: parent commit = $parent"
-            echo "Debug: using git diff: $parent HEAD"
-            changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT $parent HEAD 2>/dev/null || echo "")
-          fi
-          
-          # Additional fallback: check the current commit directly
-          if [[ -z "$changed_files" && "${{ github.event_name }}" == "push" ]]; then
-            echo "Trying fallback: checking current commit files"
-            changed_files=$(git diff --name-only --diff-filter=ACMRT HEAD~1 HEAD 2>/dev/null || echo "")
-          fi
-          
-          # Final debug output
-          echo "Debug: changed_files = '$changed_files'"
-          echo "Debug: changed_files count = $(echo "$changed_files" | wc -l)"
+          echo "All changed files:"
+          echo ${{ steps.changed-files.outputs.all_changed_files }}
+          echo ""
+          echo "Modified files:"
+          echo ${{ steps.changed-files.outputs.modified_files }}
+          echo ""
+          echo "Added files:"
+          echo ${{ steps.changed-files.outputs.added_files }}
           
           # Check if all changed files are .md files
-          md_only=true
-          if [[ -n "$changed_files" ]]; then
-            echo "Analyzing $changed_files"
-            non_md_files=""
-            for file in $changed_files; do
-              echo "Checking file: $file"
+          if [[ -n "${{ steps.changed-files.outputs.all_changed_files }}" ]]; then
+            # Check if any non-.md file was changed
+            non_md=false
+            for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
               if [[ "$file" != *.md ]]; then
-                echo "Non-.md file found: $file"
-                non_md_files="$non_md_files $file"
-                md_only=false
+                echo "Non-.md file changed: $file"
+                non_md=true
+                break
               fi
             done
-            if [[ -n "$non_md_files" ]]; then
-              echo "Non-.md files:$non_md_files"
+            
+            if [[ "$non_md" == true ]]; then
+              echo "Non-.md files detected - running CI"
+              echo "should-skip=false" >> $GITHUB_OUTPUT
+            else
+              echo "Only .md files changed - skipping CI"
+              echo "should-skip=true" >> $GITHUB_OUTPUT
             fi
           else
-            echo "No changed files detected - skipping CI"
-            md_only=true  # No files changed = skip CI (documentation-only update)
+            echo "No files changed - skipping CI"
+            echo "should-skip=true" >> $GITHUB_OUTPUT
           fi
-          
-          echo "should-skip=$md_only" >> $GITHUB_OUTPUT
-          echo "Only .md files changed: $md_only"
-
   linux:
     name: linux-x64 (${{ matrix.build_type }})
     runs-on: ubuntu-latest
