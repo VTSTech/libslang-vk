@@ -13,8 +13,8 @@ Where this file and PROVENANCE.md disagree, PROVENANCE.md is authoritative and t
 
 ## Evidence base (what every status below cites)
 
-**30/30 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19; 26→29 with the M4.06 `runner_async` / `runner_recovery` tests, 26→30 with `runner_pipeline`, 2026-10-21):
-`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `runner_async` · `runner_pipeline` · `runner_recovery` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
+**31/31 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19; 26→29 with the M4.06 `runner_async` / `runner_recovery` tests, 26→30 with `runner_pipeline`, 30→31 with `runner_cache`, 2026-10-21):
+`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `runner_async` · `runner_pipeline` · `runner_cache` · `runner_recovery` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
 Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK=OFF` (14/14), live validation-error gate (proven non-vacuous by a deliberate-error probe collecting 2 VUIDs). 2026-10-18: the suite additionally runs clean **under synchronization validation** (A/B-verified locally on a user-space SwiftShader ICD with user-space Khronos validation layers — no sudo required — after the gate's first live CI run exposed real defects, see the miss list #2 note).
 
 **Post-M4.02 maintenance waves (2026-10-18, per CHANGELOG M4.03/M4.04):**
@@ -136,6 +136,11 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 | The C API validates the required Vulkan handles | ✅ | The input frame's `view`, the swapchain frame's `swapchain_image_view` and the offscreen target's `view` are checked by the C API, and the message names the handle. The optional image handles stay optional |
 | The C API's NULL contract is pinned | ✅ | `test_c_api` calls every entry point with NULL pointers and NULL required views; each must be `SLANGVK_ERR_INVALID_ARGUMENT` with a message, and the handle checks assert the message names the handle |
 | Command-buffer pooling / descriptor-set pooling | ⬜ | Not needed: the descriptor sets are already per-slot (ROB-34) and the command buffer is now reused rather than pooled |
+| The SPIR-V cache enabler | ✅ | `PresetLoadOptions::spirvCache`: the host is asked for a pass's compiled SPIR-V before glslang runs (a hit skips the compile) and is handed the result afterwards. The key is a SHA-256 over the exact GLSL handed to glslang plus the compiler's version and target — it changes exactly when the compiled output would, so a host caching by it cannot serve a stale shader, not even through an `#include` |
+| The key is correct across includes | ✅ | `runner_cache`: the key changes when the shader source changes. The key covers the *translated* GLSL (which already folds in the include resolution and the preset's declared texture names), not the `.slangp` |
+| The compile environment cannot drift from the key | ✅ | The GLSL version, target client and target SPIR-V version moved into constants shared by the compile and the key |
+| A disk cache in the library | ⬜ (deliberate) | The host owns the store (the reference host already has `shaders/cache/`); two caches would disagree. The library keeps none — plan §13 item 3 |
+| The in-process half (the same preset loaded twice) | ⬜ | Still open: `Preset::load` of the same path twice in one process recompiles. Part of PERF-08 |
 
 ---
 

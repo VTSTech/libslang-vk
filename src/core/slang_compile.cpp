@@ -23,8 +23,10 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
+#include <glslang/build_info.h>
 
 #include "compat.hpp"
+#include "sha256.hpp"
 
 namespace slv {
 namespace preset {
@@ -63,6 +65,19 @@ public:
         GlslangRuntime &operator=(const GlslangRuntime &) = delete;
 };
 
+// The glslang version as a string, for the content key.
+#define SLV_STRINGIFY_(x) #x
+#define SLV_STRINGIFY(x) SLV_STRINGIFY_(x)
+#define SLV_GLSLANG_VERSION_STRING SLV_STRINGIFY(GLSLANG_VERSION_MAJOR) "." \
+        SLV_STRINGIFY(GLSLANG_VERSION_MINOR) "." SLV_STRINGIFY(GLSLANG_VERSION_PATCH)
+
+// The compile environment, in one place: the content key below must change
+// whenever this does, so both read the same constants.
+constexpr int kGlslVersion = 450;
+constexpr int kGlslVersionClient = 100;
+constexpr auto kTargetClient = glslang::EShTargetVulkan_1_0;
+constexpr auto kTargetSpv = glslang::EShTargetSpv_1_0;
+
 bool CompileStageToSpv(EShLanguage stage, const std::string &source, std::vector<uint8_t> &out, std::string &error)
 {
         GlslangRuntime::Instance();
@@ -71,11 +86,11 @@ bool CompileStageToSpv(EShLanguage stage, const std::string &source, std::vector
         glslang::TShader shader(stage);
         const char *sourcePtr = source.c_str();
         shader.setStrings(&sourcePtr, 1);
-        shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
-        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
-        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+        shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, kGlslVersionClient);
+        shader.setEnvClient(glslang::EShClientVulkan, kTargetClient);
+        shader.setEnvTarget(glslang::EShTargetSpv, kTargetSpv);
         const EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
-        if (!shader.parse(GetDefaultResources(), 450, false, messages)) {
+        if (!shader.parse(GetDefaultResources(), kGlslVersion, false, messages)) {
                 error = StrCat("glslang parse failed (", stage == EShLangVertex ? "vertex" : "fragment", "): ",
                     shader.getInfoLog());
                 return false;
@@ -101,6 +116,33 @@ void EnsureGlslangRuntime()
         // translate-time preprocessing oracle in slang_translate.cpp both run
         // TShader frontends and hit this same singleton.
         GlslangRuntime::Instance();
+}
+
+auto ComputePassCacheKey(const SlangTranslation &translation) -> std::string
+{
+        // The material is everything that determines the compiled bytes:
+        // the GLSL handed to glslang (which already folds in the include
+        // resolution, the preset's declared texture names and the library's
+        // translation semantics) and the compiler's version and environment.
+        // Hashing the compiler's input is what makes the key correct by
+        // construction — it changes exactly when the output would.
+        std::string material;
+        material.reserve(translation.vertex.glsl.size() + translation.fragment.glsl.size() + 128);
+        material += "libslang-vk-spirv-cache-1";
+        material += '\0';
+        material += "glslang " SLV_GLSLANG_VERSION_STRING;
+        material += '\0';
+        material += "target ";
+        material += std::to_string(static_cast<int>(kTargetClient));
+        material += ' ';
+        material += std::to_string(static_cast<int>(kTargetSpv));
+        material += ' ';
+        material += std::to_string(kGlslVersion);
+        material += '\0';
+        material += translation.vertex.glsl;
+        material += '\0';
+        material += translation.fragment.glsl;
+        return core::Sha256Hex(material);
 }
 
 bool CompilePass(const SlangTranslation &translation, PassSpirv &out, std::string &error)

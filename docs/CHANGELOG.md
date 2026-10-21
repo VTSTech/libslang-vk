@@ -12,7 +12,34 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 
 The first M4.xx iteration after the M4.06 pre-release: the two Low findings
 that the game hosts feel most directly — the per-frame allocation churn in
-the render path and the C API's null-handle contract.
+the render path and the C API's null-handle contract — plus the SPIR-V cache
+enabler, which lets a host's own compile cache be correct by construction.
+
+### Added
+
+- **The SPIR-V cache enabler** (`PresetLoadOptions::spirvCache`) — the
+  library keeps no disk cache (that is the host's business, and the
+  reference host already has one), but it hands the host a **correct** key
+  so the host's own cache cannot serve a stale shader:
+  - the host is asked for a pass's compiled SPIR-V before the library
+    invokes glslang, and is handed the result afterwards; a hit skips the
+    compile;
+  - the key is a SHA-256 over the exact GLSL handed to glslang plus the
+    compiler's version and target environment. Hashing the compiler's
+    *input* makes the key correct by construction — it changes exactly when
+    the compiled output would, so a host caching by it can never serve a
+    stale shader, not even when the preset includes other files (which a
+    host-side hash of the `.slangp` alone would miss);
+  - the compile environment moved into constants shared by the compile and
+    the key, so the two cannot drift;
+  - the C surface mirrors it (`slangvk_spirv_cache`, load/store function
+    pointers);
+  - `src/core/sha256.{hpp,cpp}` — a self-contained SHA-256, so the library
+    gains no dependency for a cache key.
+
+  `test_runner_cache` pins the contract: the host is asked before the
+  compile, a hit skips it, the key is stable across loads, and **the key
+  changes when the shader source changes**.
 
 ### Fixed
 
@@ -39,6 +66,14 @@ the render path and the C API's null-handle contract.
   optional. The test now pins the contract for every entry point: a NULL
   pointer or a NULL required view is `SLANGVK_ERR_INVALID_ARGUMENT` with a
   message.
+
+### Validation
+
+- **Downstream host** — the M4.07 build was smoke-tested on the Diablo
+  implementation: presets load, the shaders work, and the run holds
+  **140+ FPS with FXAA.slangp**. This is the first frame-rate figure from
+  real hardware rather than the software rasterizer, so the allocation work
+  above is confirmed on a real GPU rather than only counted.
 
 ### Audited
 

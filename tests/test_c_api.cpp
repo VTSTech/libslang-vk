@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -381,6 +382,66 @@ int main()
                         Check(false, "resized readback");
                 slangvk_image_destroy(smallInput);
                 slangvk_image_destroy(smallOutput);
+        }
+
+        // --- The SPIR-V cache enabler (C surface) ---------------------------
+        {
+                // A host's cache: the keys it was asked for and the bytes it
+                // holds. The C callbacks are bridged onto the C++ ones by
+                // the adapter.
+                struct HostCache {
+                        std::map<std::string, std::vector<uint8_t>> vertex;
+                        std::map<std::string, std::vector<uint8_t>> fragment;
+                        int loads = 0;
+                        int stores = 0;
+                } hostCache;
+
+                auto loadFn = [](const char *key, slangvk_spirv *out, void *userData) -> int {
+                        auto *self = static_cast<HostCache *>(userData);
+                        self->loads++;
+                        const auto v = self->vertex.find(key);
+                        const auto f = self->fragment.find(key);
+                        if (v == self->vertex.end() || f == self->fragment.end())
+                                return 0;
+                        out->vertex = v->second.data();
+                        out->vertex_size = v->second.size();
+                        out->fragment = f->second.data();
+                        out->fragment_size = f->second.size();
+                        return 1;
+                };
+                auto storeFn = [](const char *key, const slangvk_spirv *spirv, void *userData) {
+                        auto *self = static_cast<HostCache *>(userData);
+                        self->stores++;
+                        self->vertex[key] = std::vector<uint8_t>(spirv->vertex, spirv->vertex + spirv->vertex_size);
+                        self->fragment[key] = std::vector<uint8_t>(
+                                spirv->fragment, spirv->fragment + spirv->fragment_size);
+                };
+
+                slangvk_preset_options presetOptions;
+                std::memset(&presetOptions, 0, sizeof(presetOptions));
+                presetOptions.spirv_cache.load = loadFn;
+                presetOptions.spirv_cache.store = storeFn;
+                presetOptions.spirv_cache.user_data = &hostCache;
+
+                slangvk_preset *cached = nullptr;
+                Check(slangvk_preset_load(device, (dataDir + "/runner/blit.slangp").c_str(), &presetOptions,
+                          &cached)
+                                == SLANGVK_OK,
+                    "the C preset load with a cache succeeds");
+                Check(hostCache.loads > 0, "the C host is asked for a pass's SPIR-V");
+                Check(hostCache.stores > 0, "the C host is handed the compiled SPIR-V");
+                slangvk_preset_destroy(cached);
+
+                // A warm load hits the cache: the host is asked but never
+                // asked to store (the compile was skipped).
+                const int storesAfterCold = hostCache.stores;
+                slangvk_preset *warm = nullptr;
+                Check(slangvk_preset_load(device, (dataDir + "/runner/blit.slangp").c_str(), &presetOptions,
+                          &warm)
+                                == SLANGVK_OK,
+                    "the C warm load succeeds");
+                Check(hostCache.stores == storesAfterCold, "the C cache hit skips the compile");
+                slangvk_preset_destroy(warm);
         }
 
         // --- Error paths -------------------------------------------------------

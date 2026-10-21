@@ -152,11 +152,26 @@ auto Preset::load(Device &device, const std::filesystem::path &slangp, const Pre
                             SLV_ERROR(Errc::shader_compile, "strict load, pass " + std::to_string(index) + ": " + joined));
                 }
 
-                PassSpirv &spirv = impl.spirv[static_cast<size_t>(index)];
+                preset::PassSpirv &spirv = impl.spirv[static_cast<size_t>(index)];
+
+                // The host's SPIR-V cache (the "cache enabler"): the key is
+                // the library's content key, so a hit is guaranteed to be
+                // the same bytes the compile would produce.
+                const std::string cacheKey = core::ComputePassCacheKey(translation);
+                if (options.spirvCache.load) {
+                        if (std::optional<PassSpirv> cached = options.spirvCache.load(cacheKey)) {
+                                spirv.vertex = std::move(cached->vertex);
+                                spirv.fragment = std::move(cached->fragment);
+                                continue;
+                        }
+                }
+
                 std::string compileError;
                 if (!core::CompilePass(translation, spirv, compileError))
                         return std::unexpected(SLV_ERROR(Errc::shader_compile,
                             "pass " + std::to_string(index) + " '" + passDef.shaderPath + "': " + compileError));
+                if (options.spirvCache.store)
+                        options.spirvCache.store(cacheKey, PassSpirv { spirv.vertex, spirv.fragment });
         }
 
         impl.parameters = MergeParameters(impl);

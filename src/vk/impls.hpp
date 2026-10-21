@@ -20,7 +20,6 @@ namespace slv {
 // Core-layer vocabulary + internal Vulkan helpers, unqualified in these TUs.
 using slv::preset::ParamInfo;
 using slv::preset::PassDef;
-using slv::preset::PassSpirv;
 using slv::preset::SlangTranslation;
 using vk::ValidationLog;
 
@@ -380,7 +379,7 @@ struct Preset::Impl {
         Device *device = nullptr; // Borrowed; the host must destroy the Preset before the Device.
         std::vector<PassDef> passDefs;
         std::vector<SlangTranslation> translations;
-        std::vector<PassSpirv> spirv;
+        std::vector<preset::PassSpirv> spirv;
         std::vector<ParameterInfo> parameters;
         std::vector<LutGpu> luts;
         // True when the preset was loaded with noLutImages: the textures were

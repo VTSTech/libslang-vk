@@ -240,9 +240,61 @@ slangvk_result slangvk_image_get_handles(const slangvk_image *image, VkImageView
 
 /* ---- Preset ----------------------------------------------------------------- */
 
+/**
+ * @brief The compiled SPIR-V of one pass — the bytes a host caches.
+ *
+ * The vertex and fragment arrays hold SPIR-V bytecode; the library owns
+ * their format (a SPIR-V module, as produced by glslang).
+ */
+typedef struct slangvk_spirv {
+        const uint8_t *vertex;   /**< Vertex-stage SPIR-V, or NULL. */
+        size_t vertex_size;      /**< Byte length of @p vertex. */
+        const uint8_t *fragment; /**< Fragment-stage SPIR-V, or NULL. */
+        size_t fragment_size;    /**< Byte length of @p fragment. */
+} slangvk_spirv;
+
+/**
+ * @brief A host's store for compiled SPIR-V (the "cache enabler").
+ *
+ * The library keeps no disk cache — that is the host's business. What only
+ * the library can supply is a correct key: a digest of the exact GLSL
+ * handed to glslang plus the compiler's version and target, so the key
+ * changes precisely when the compiled output would. A host that caches by
+ * this key can never serve a stale shader, even when the preset includes
+ * other files.
+ *
+ * The key is a hex digest, stable across processes and machines — a host
+ * can use it as a file name.
+ *
+ * @param key The pass's content key.
+ * @param out Receives the cached SPIR-V; set the sizes to 0 for a miss.
+ * @param user_data Passed back to both callbacks.
+ * @return Non-zero on a hit.
+ */
+typedef int (*slangvk_spirv_cache_load_fn)(const char *key, slangvk_spirv *out, void *user_data);
+
+/**
+ * @brief Called with the freshly compiled SPIR-V of a pass.
+ *
+ * @param key The pass's content key.
+ * @param spirv The compiled SPIR-V.
+ * @param user_data Passed back to both callbacks.
+ */
+typedef void (*slangvk_spirv_cache_store_fn)(const char *key, const slangvk_spirv *spirv, void *user_data);
+
+/**
+ * @brief A host's SPIR-V cache. Both callbacks may be NULL (no cache).
+ */
+typedef struct slangvk_spirv_cache {
+        slangvk_spirv_cache_load_fn load;   /**< Optional. */
+        slangvk_spirv_cache_store_fn store; /**< Optional. */
+        void *user_data;                    /**< Passed back to both callbacks. */
+} slangvk_spirv_cache;
+
 typedef struct slangvk_preset_options {
         uint32_t strict;      /**< Promote translator warnings to load errors. */
         uint32_t no_lut_images; /**< Skip LUT texture upload (compile-only sweeps). */
+        slangvk_spirv_cache spirv_cache; /**< Optional host SPIR-V cache. */
 } slangvk_preset_options;
 
 /** @brief Metadata for one shader parameter (merged preset + pragma view). */

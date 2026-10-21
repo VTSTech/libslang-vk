@@ -116,6 +116,16 @@ if(SLANGVK_ENABLE_VK)
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_pipeline COMMAND test_runner_pipeline)
 
+        # M4.07 SPIR-V cache enabler: the library hands the host a correct
+        # content key so the host's own compile cache can never serve a
+        # stale shader. The test pins the hit/miss behaviour and that the
+        # key changes when the source does.
+        add_executable(test_runner_cache test_runner_cache.cpp)
+        target_link_libraries(test_runner_cache PRIVATE slangvk)
+        target_compile_definitions(test_runner_cache PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_cache COMMAND test_runner_cache)
+
         # M4.06 device-lost recovery (audit ROB-35): Device::recover() replaces
         # the VkDevice, and the chain notices that its resources belong to a
         # replaced device and rebuilds itself before the next frame. The test

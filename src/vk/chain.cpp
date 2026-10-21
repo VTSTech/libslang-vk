@@ -436,7 +436,6 @@ using slv::preset::FilterMode;
 using slv::preset::ParamInfo;
 using slv::preset::ParamOverride;
 using slv::preset::PassDef;
-using slv::preset::PassSpirv;
 using slv::preset::SlangTranslation;
 using slv::preset::ScaleRule;
 using slv::preset::ScaleType;

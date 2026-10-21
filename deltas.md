@@ -240,6 +240,47 @@ stale handles.
 
 ---
 
+### Performance (partial — PERF-08 remains open)
+
+#### M4.07 delivered for PERF-08: the SPIR-V cache enabler
+
+PERF-08 ("no caching of compiled SPIR-V shaders") is **not closed** — the disk
+store and the in-process memo are the host's side of the line — but the part
+that only the library can do is now done.
+
+**What shipped.**
+- `PresetLoadOptions::spirvCache` — the host is asked for a pass's compiled
+  SPIR-V before the library invokes glslang (a hit skips the compile), and
+  is handed the freshly compiled bytes afterwards.
+- The key is a **SHA-256 over the exact GLSL handed to glslang** plus the
+  compiler's version and target environment. Hashing the compiler's *input*
+  is what makes it correct by construction: the key changes exactly when the
+  compiled output would. A host caching by it can never serve a stale
+  shader — not even when the preset includes other files, which a host-side
+  hash of the `.slangp` alone would miss.
+- The compile environment (GLSL version, target client, target SPIR-V
+  version) moved into constants shared by the compile and the key, so the two
+  cannot drift.
+- `src/core/sha256.{hpp,cpp}` — a self-contained SHA-256 (no new
+  dependency), verified against the FIPS 180-4 test vectors.
+- The C surface mirrors it: `slangvk_spirv_cache` with load/store function
+  pointers.
+
+**What stays open.** The disk store stays the host's (the reference host
+already keeps `shaders/cache/`, and a second cache in the library would
+disagree with it), so switching that host over to the library's key is
+host-side work. The in-memory half — the same preset loaded twice in one
+process still recompiles — also remains.
+
+**Verification.** `tests/test_runner_cache.cpp` pins the contract: the host
+is asked before the compile, a hit skips it (the host is never asked to
+store), the key is stable across loads, and **the key changes when the
+shader source changes**. The C test covers the same path, and a chain built
+from a cached preset renders byte-identically to one built from a fresh
+compile.
+
+---
+
 ### Security
 
 #### SEC-07: C API lacks input validation for null handles
@@ -322,5 +363,9 @@ stale handles.
   live-parameter cases that exercise the override cache's invalidation.
 - ASAN + UBSAN builds are clean; the leak profile is unchanged from the
   pre-change baseline (240 bytes in 3 allocations).
+- **Downstream host**: the M4.07 build was smoke-tested on the Diablo
+  implementation — presets load, the shaders work, and the run holds
+  **140+ FPS with FXAA.slangp**. The allocation work is therefore confirmed
+  on a real GPU, not only counted on the software rasterizer.
 
 ---

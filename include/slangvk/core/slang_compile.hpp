@@ -35,5 +35,24 @@ struct PassSpirv {
  */
 SLANGVK_API bool CompilePass(const SlangTranslation &translation, PassSpirv &out, std::string &error);
 
+/**
+ * @brief The content key of a pass's compiled output.
+ *
+ * A stable, hex-encoded digest that identifies the exact SPIR-V
+ * `CompilePass` would produce for this pass. It covers the GLSL handed to
+ * glslang (which already includes the include resolution, the preset's
+ * declared texture names and the library's translation semantics) plus the
+ * compiler's version and target environment.
+ *
+ * Hashing the compiler's *input* is what makes the key correct by
+ * construction: the key changes exactly when the compiled output would
+ * change, so a host that caches by this key can never serve a stale
+ * shader. The key is stable across processes and machines.
+ *
+ * This is the "cache enabler": the library owns the key (only it knows
+ * what determines the output); the host owns the bytes.
+ */
+SLANGVK_API auto ComputePassCacheKey(const SlangTranslation &translation) -> std::string;
+
 } // namespace preset
 } // namespace slv

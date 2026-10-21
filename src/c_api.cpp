@@ -362,6 +362,33 @@ slangvk_result slangvk_preset_load(slangvk_device *device, const char *path,
         if (options != nullptr) {
                 opts.strict = options->strict != 0;
                 opts.noLutImages = options->no_lut_images != 0;
+                // The host's SPIR-V cache (the "cache enabler"): the C
+                // callbacks are bridged onto the C++ ones.
+                if (options->spirv_cache.load != nullptr) {
+                        opts.spirvCache.load = [options](std::string_view key) -> std::optional<slv::PassSpirv> {
+                                const std::string keyString(key);
+                                slangvk_spirv spirv{};
+                                if (options->spirv_cache.load(keyString.c_str(), &spirv, options->spirv_cache.user_data)
+                                    == 0)
+                                        return std::nullopt;
+                                slv::PassSpirv out;
+                                out.vertex.assign(spirv.vertex, spirv.vertex + spirv.vertex_size);
+                                out.fragment.assign(spirv.fragment, spirv.fragment + spirv.fragment_size);
+                                return out;
+                        };
+                }
+                if (options->spirv_cache.store != nullptr) {
+                        opts.spirvCache.store = [options](std::string_view key, const slv::PassSpirv &spirv) {
+                                const std::string keyString(key);
+                                slangvk_spirv bytes{};
+                                bytes.vertex = spirv.vertex.data();
+                                bytes.vertex_size = spirv.vertex.size();
+                                bytes.fragment = spirv.fragment.data();
+                                bytes.fragment_size = spirv.fragment.size();
+                                options->spirv_cache.store(
+                                    keyString.c_str(), &bytes, options->spirv_cache.user_data);
+                        };
+                }
         }
         return AdoptOut(slv::Preset::load(device->device, std::filesystem::path(path), opts), out_preset);
 }

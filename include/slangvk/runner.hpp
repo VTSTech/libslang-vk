@@ -31,7 +31,9 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -266,9 +268,44 @@ private:
         std::unique_ptr<Impl> impl_;
 };
 
+/** @brief The compiled SPIR-V of one pass — the bytes a host caches. */
+struct PassSpirv {
+        std::vector<uint8_t> vertex;   ///< SPIR-V bytecode for the vertex stage.
+        std::vector<uint8_t> fragment; ///< SPIR-V bytecode for the fragment stage.
+};
+
+/**
+ * @brief A host's store for compiled SPIR-V (the "cache enabler").
+ *
+ * The library does not keep a disk cache — that is the host's business (the
+ * reference host already has one, and two caches would disagree). What only
+ * the library can do is hand the host a **correct** key: a digest of the
+ * exact GLSL handed to glslang plus the compiler's version and target, so
+ * the key changes precisely when the compiled output would. A host that
+ * caches by this key can never serve a stale shader, even when the preset
+ * includes other files.
+ *
+ * The host supplies two callbacks:
+ *  - `load` is asked for a pass's compiled SPIR-V before the library
+ *    invokes glslang; returning a value skips the compile for that pass.
+ *  - `store` is handed the freshly compiled SPIR-V of a pass.
+ *
+ * The key is a hex digest, stable across processes and machines — a host
+ * can use it as a file name.
+ */
+struct SpirvCache {
+        /// Returns the cached SPIR-V for a pass, or nothing if the host has none.
+        std::function<std::optional<PassSpirv>(std::string_view passKey)> load;
+        /// Called with the freshly compiled SPIR-V of a pass.
+        std::function<void(std::string_view passKey, const PassSpirv &spirv)> store;
+};
+
 struct PresetLoadOptions {
         bool strict = false;      ///< Promote translator warnings to load errors.
         bool noLutImages = false; ///< Skip LUT texture upload (headless/compile-only sweeps).
+        /// An optional host SPIR-V cache. Empty (the default) compiles every
+        /// pass, as before.
+        SpirvCache spirvCache;
 };
 
 /** @brief Metadata for one shader parameter (merged preset + pragma view). */

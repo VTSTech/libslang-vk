@@ -74,6 +74,7 @@ set(SLANGVK_CORE_SOURCES
     src/core/preset_parser.cpp
     src/core/slang_translate.cpp
     src/core/slang_compile.cpp
+    src/core/sha256.cpp
 )
 
 if(SLANGVK_ENABLE_VK)

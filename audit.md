@@ -34,7 +34,7 @@ This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, tran
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful remaining findings are the missing SPIR-V cache (PERF-08) and the lack of a performance benchmarking framework (TEST-12), which is what would catch the next regression of the kind PERF-09 was.
+The most impactful remaining findings are the SPIR-V cache (PERF-08 — the library now supplies the key, the host-side store and the in-process memo remain) and the lack of a performance benchmarking framework (TEST-12), which is what would catch the next regression of the kind PERF-09 was.
 
 ---
 
@@ -147,6 +147,10 @@ The library compiles shaders to SPIR-V on every preset load but doesn't cache th
 **Current behavior:** Each time a preset is loaded, all its shaders are translated from slang to GLSL, then compiled to SPIR-V by glslang. Even if the same shader file is used by multiple presets, it's recompiled each time.
 
 **Recommendation:** Add an optional SPIR-V cache system that stores compiled shaders to disk or memory. Cache keys could include shader content, glslang version, and target Vulkan version.
+
+**Update (M4.07):** the library now supplies the key — the second half of the recommendation. `PresetLoadOptions::spirvCache` asks the host for a pass's compiled SPIR-V before the library invokes glslang (a hit skips the compile) and hands the freshly compiled bytes back afterwards. The key is a SHA-256 over the exact GLSL handed to glslang plus the compiler's version and target environment, so it changes exactly when the compiled output would: a host caching by it cannot serve a stale shader, not even when the preset includes other files, which a host-side hash of the `.slangp` alone would miss.
+
+The **disk store stays the host's** — the reference host already keeps one (`shaders/cache/`), and a second cache in the library would disagree with it. What remains open: switching the reference host's cache over to the library's key, and the in-memory half of the recommendation (the same preset loaded twice in one process still recompiles).
 
 **Impact:** Would significantly improve performance for applications that use many presets or reload presets frequently.
 
