@@ -171,11 +171,9 @@ struct Device::Impl {
         // are freed individually (never by a pool reset), so an in-flight
         // async frame is never pulled out from under the GPU.
 
-        // Allocates a command buffer from the pool and records into it.
-        // The caller owns the returned buffer until it frees it (or submits
-        // it and lets the chain reclaim it after the fence signals).
-        auto RecordCommandBuffer(const std::function<void(VkCommandBuffer)> &record)
-            -> std::expected<VkCommandBuffer, Error>
+        // Allocates a command buffer from the pool. The caller owns it until
+        // it frees it.
+        auto AllocateCommandBuffer() -> std::expected<VkCommandBuffer, Error>
         {
                 VkCommandBufferAllocateInfo allocInfo{};
                 allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -184,19 +182,58 @@ struct Device::Impl {
                 allocInfo.commandBufferCount = 1;
                 VkCommandBuffer cmd = VK_NULL_HANDLE;
                 SLV_VK(vkAllocateCommandBuffers(device, &allocInfo, &cmd), Errc::vk_error);
+                return cmd;
+        }
 
+        // Returns a command buffer to the pool.
+        auto FreeCommandBuffer(VkCommandBuffer cmd) -> void
+        {
+                if (cmd != VK_NULL_HANDLE)
+                        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+        }
+
+        // Records into a command buffer the caller already owns. The buffer
+        // must be in the initial state — freshly allocated, or reset by
+        // ResetCommandBuffer() once its previous submission has retired.
+        //
+        // Reusing the buffer (rather than freeing and reallocating it every
+        // frame) keeps the per-frame driver work down to a reset: the pool
+        // was created with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT.
+        auto RecordInto(VkCommandBuffer cmd, const std::function<void(VkCommandBuffer)> &record)
+            -> std::expected<void, Error>
+        {
                 VkCommandBufferBeginInfo beginInfo{};
                 beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
                 beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-                if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
-                        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
-                        return std::unexpected(
-                            SLV_ERROR(Errc::vk_error, "vkBeginCommandBuffer failed"));
-                }
+                if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
+                        return std::unexpected(SLV_ERROR(Errc::vk_error, "vkBeginCommandBuffer failed"));
                 record(cmd);
-                if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
-                        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+                if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
                         return std::unexpected(SLV_ERROR(Errc::vk_error, "vkEndCommandBuffer failed"));
+                return {};
+        }
+
+        // Puts a command buffer back into the initial state so it can be
+        // recorded into again.
+        auto ResetCommandBuffer(VkCommandBuffer cmd) -> std::expected<void, Error>
+        {
+                SLV_VK(vkResetCommandBuffer(cmd, 0), Errc::vk_error);
+                return {};
+        }
+
+        // Allocates a command buffer from the pool and records into it.
+        // The caller owns the returned buffer until it frees it (or submits
+        // it and lets the chain reclaim it after the fence signals).
+        auto RecordCommandBuffer(const std::function<void(VkCommandBuffer)> &record)
+            -> std::expected<VkCommandBuffer, Error>
+        {
+                auto cmd = AllocateCommandBuffer();
+                if (!cmd)
+                        return std::unexpected(cmd.error());
+                auto recorded = RecordInto(*cmd, record);
+                if (!recorded) {
+                        FreeCommandBuffer(*cmd);
+                        return std::unexpected(recorded.error());
                 }
                 return cmd;
         }

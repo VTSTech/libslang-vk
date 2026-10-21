@@ -8,6 +8,43 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 `M0` … `M4.06`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [M4.07] — 2026-10-21
+
+The first M4.xx iteration after the M4.06 pre-release: the two Low findings
+that the game hosts feel most directly — the per-frame allocation churn in
+the render path and the C API's null-handle contract.
+
+### Fixed
+
+- **PERF-09 — per-frame allocations in the render path.** The render path no
+  longer allocates per frame:
+  - the command buffer belongs to the frame slot — allocated once and reset
+    per frame, instead of a `vkAllocateCommandBuffers` +
+    `vkFreeCommandBuffers` round-trip per frame;
+  - the uniform block fill writes straight into the mapped UBO (no
+    temporary vector, no copy);
+  - the pass sizes, alias sizes, descriptor write arrays and the pipeline
+    array are chain scratch: cleared and refilled, never reallocated;
+  - the LUT sizes and the merged parameter overrides are cached and only
+    rebuilt when the chain is rebuilt or a parameter is overridden.
+
+  Measured with a malloc counter over the bundled fixtures (184 rendered
+  frames): **130,806 → 129,177** allocations, i.e. **~8.9 fewer heap
+  allocations per frame** in the library's own code.
+
+- **SEC-07 — C API null-handle validation.** The C API checks the required
+  Vulkan handles itself and names the offending one ("input->view is
+  VK_NULL_HANDLE") rather than letting the C++ layer report a generic
+  message. The optional handles (`input->image`, `target->image`) stay
+  optional. The test now pins the contract for every entry point: a NULL
+  pointer or a NULL required view is `SLANGVK_ERR_INVALID_ARGUMENT` with a
+  message.
+
+### Audited
+
+- SEC-07 and PERF-09 are removed from [audit.md](audit.md) and recorded in
+  [deltas.md](deltas.md). 8 findings remain, all Low severity.
+
 ## [M4.06] — 2026-10-21
 
 The robustness wave: the three Medium findings from the codebase audit land as

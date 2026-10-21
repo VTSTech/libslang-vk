@@ -124,6 +124,21 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 
 ---
 
+## M4.07 — per-frame allocations + C API null handles (audit PERF-09 / SEC-07)
+
+| Item | Status | Evidence / gap |
+|---|---|---|
+| The command buffer is owned by the frame slot | ✅ | Allocated once and **reset** per frame, instead of a `vkAllocateCommandBuffers` + `vkFreeCommandBuffers` round-trip per frame. The pool already carries `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT` |
+| The uniform block fill writes into the mapped UBO | ✅ | `FillBlockBytes` takes the caller's buffer; `FillBlockSize` does the overflow check. No temporary vector and no copy per uniform block per frame |
+| The per-frame vectors are chain scratch | ✅ | The pass sizes, alias sizes, descriptor write arrays and the pipeline array are cleared and refilled, never reallocated |
+| The static per-frame data is cached | ✅ | The LUT sizes (each of which cost a `"User<N>"` string) and the merged parameter overrides are cached; invalidated on a rebuild and on `setParameter` |
+| Measured effect | ✅ | A malloc counter over the bundled fixtures (184 rendered frames): **130,806 → 129,177**, i.e. **~8.9 fewer heap allocations per frame** in the library's own code |
+| The C API validates the required Vulkan handles | ✅ | The input frame's `view`, the swapchain frame's `swapchain_image_view` and the offscreen target's `view` are checked by the C API, and the message names the handle. The optional image handles stay optional |
+| The C API's NULL contract is pinned | ✅ | `test_c_api` calls every entry point with NULL pointers and NULL required views; each must be `SLANGVK_ERR_INVALID_ARGUMENT` with a message, and the handle checks assert the message names the handle |
+| Command-buffer pooling / descriptor-set pooling | ⬜ | Not needed: the descriptor sets are already per-slot (ROB-34) and the command buffer is now reused rather than pooled |
+
+---
+
 ## M4.06 — multi-frame pipelining (audit ROB-34)
 
 | Item | Status | Evidence / gap |

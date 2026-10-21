@@ -30,11 +30,11 @@
 
 This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, translates, and compiles libretro shader presets (.slangp/.slang) with a full Vulkan execution path. The audit examined the core parsing layer, Vulkan runner implementation, C API surface, build system, test suite, and examples.
 
-**Total findings: 10** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. All 3 Medium severity findings (ROB-33, ROB-34, ROB-35) have been closed; the 10 remaining findings are Low severity, spanning maintainability, performance, and feature opportunities.
+**Total findings: 8** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. All 3 Medium severity findings (ROB-33, ROB-34, ROB-35) and 2 Low findings (SEC-07, PERF-09) have been closed; the 8 remaining findings are Low severity, spanning maintainability, performance, feature and testing.
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful remaining findings are the per-frame allocation churn in the render path (PERF-09) and the missing SPIR-V cache (PERF-08).
+The most impactful remaining findings are the missing SPIR-V cache (PERF-08) and the lack of a performance benchmarking framework (TEST-12), which is what would catch the next regression of the kind PERF-09 was.
 
 ---
 
@@ -52,12 +52,10 @@ The most impactful remaining findings are the per-frame allocation churn in the 
 
 | ID | Severity | Category | Title |
 |----|----------|----------|-------|
-| SEC-07 | Low | Security | C API lacks input validation for null handles |
 | ROB-36 | Low | Robustness | Preset parser has complex state machine with edge cases |
 | MAINT-22 | Low | Maintainability | Heavy use of pimpl pattern obscures Vulkan implementation details |
 | MAINT-23 | Low | Maintainability | C API and C++ API have different lifetime rules |
 | PERF-08 | Low | Performance | No caching of compiled SPIR-V shaders |
-| PERF-09 | Low | Performance | Per-frame allocations in render path |
 | FEAT-06 | Low | New Features | No shader hot-reloading during runtime |
 | ARCH-04 | Low | Architecture | Single-threaded design limits concurrent use cases |
 | TEST-11 | Low | Testing | Limited integration testing for full pipeline |
@@ -74,29 +72,6 @@ Severity levels:
 
 ### Security
 
-#### SEC-07: C API lacks input validation for null handles
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Low |
-| **Category** | Security |
-| **File(s)** | `include/slangvk/c.h`, `src/c_api.cpp` |
-
-The C API accepts Vulkan handles (VkImage, VkBuffer, VkImageView) as raw pointers but performs minimal validation for null values before passing them to Vulkan calls. While the C++ API uses std::expected for comprehensive error handling, the C API relies on Vulkan's internal validation, which may produce less diagnostic-friendly error messages.
-
-**Current behavior:** The C API functions like `slangvk_chain_render_swapchain()` accept null handles and let Vulkan validate them at call time. This can result in VkResult error codes rather than descriptive error messages through the `slangvk_last_error()` mechanism.
-
-**Recommendation:** Add null pointer checks in C API wrapper functions before calling Vulkan. For example:
-```c
-if (!chain || !in.view || !out.swapchainImageView) {
-    slangvk_set_error("Invalid null handle");
-    return SLANGVK_INVALID_ARGUMENT;
-}
-```
-
-**Impact:** Improves developer experience by catching null handle errors early with descriptive messages rather than relying on Vulkan's generic error codes.
-
----
 
 ### Robustness
 
@@ -177,23 +152,6 @@ The library compiles shaders to SPIR-V on every preset load but doesn't cache th
 
 ---
 
-#### PERF-09: Per-frame allocations in render path
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Low |
-| **Category** | Performance |
-| **File(s)** | `src/vk/chain.cpp` |
-
-The render path performs several allocations per frame, including command buffers, descriptor sets, and temporary buffers. While these are necessary for the current architecture, they could be optimized for high-frequency scenarios.
-
-**Current behavior:** Each render call creates new command buffers and descriptor sets. While Vulkan drivers optimize this pattern, there's still allocation overhead per frame.
-
-**Recommendation:** Consider adding object pooling for frequently allocated objects like command buffers and descriptor sets. For high-performance use cases, provide an API that allows pre-allocation of resources.
-
-**Impact:** Would reduce allocation overhead in performance-critical scenarios and improve frame consistency.
-
----
 
 ### New Features
 
@@ -278,7 +236,7 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 | Timeline | Findings |
 |----------|----------|
 | **Short term (v0.4.x)** | PERF-08 (SPIR-V caching) |
-| **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, SEC-07, ROB-36, PERF-09, ARCH-04 |
+| **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, ROB-36, ARCH-04 |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience

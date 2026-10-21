@@ -17,7 +17,7 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4.06 — async rendering, frame pipelining and device-lost recovery.** All library-side M0–M4
+**Status: M4.07 — async rendering, frame pipelining, device-lost recovery, and an allocation-free render path.** All library-side M0–M4
 gates are green: 30/30 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the

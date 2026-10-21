@@ -200,30 +200,45 @@ auto DeriveViewportSize(uint32_t targetWidth, uint32_t targetHeight, uint32_t ga
 
 namespace {
 
-void WriteFloat(std::vector<uint8_t> &bytes, uint32_t offset, float value)
+void WriteFloat(std::span<uint8_t> bytes, uint32_t offset, float value)
 {
         std::memcpy(bytes.data() + offset, &value, sizeof(float));
 }
 
-void WriteInt(std::vector<uint8_t> &bytes, uint32_t offset, int32_t value)
+void WriteInt(std::span<uint8_t> bytes, uint32_t offset, int32_t value)
 {
         std::memcpy(bytes.data() + offset, &value, sizeof(int32_t));
 }
 
-void WriteUint(std::vector<uint8_t> &bytes, uint32_t offset, uint32_t value)
+void WriteUint(std::span<uint8_t> bytes, uint32_t offset, uint32_t value)
 {
         std::memcpy(bytes.data() + offset, &value, sizeof(uint32_t));
 }
 
 } // namespace
 
-auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const SlangTranslation &translation,
-    const std::vector<ParamOverride> &presetOverrides, const BlockFillContext &ctx) -> std::vector<uint8_t>
+// The number of bytes a block's fill needs.
+auto FillBlockSize(const UniformBlock &block) -> uint32_t
 {
         uint32_t total = 0;
         for (const UniformMember &member : block.members)
                 total = std::max(total, member.offset + member.size);
-        std::vector<uint8_t> out(std::max<uint32_t>(total, 16), 0);
+        return std::max<uint32_t>(total, 16);
+}
+
+// Fills a uniform block into the caller's buffer.
+//
+// The buffer is written in place, so the render path can fill the mapped
+// UBO directly instead of building a temporary vector and copying it —
+// one heap allocation and one copy per uniform block per frame, in a path
+// that runs hundreds of times a second (PERF-09). `out` must be at least
+// FillBlockSize(block) bytes.
+auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const SlangTranslation &translation,
+    const std::vector<ParamOverride> &presetOverrides, const BlockFillContext &ctx, std::span<uint8_t> out)
+{
+        // The padding past the last member is zeroed, as the previous
+        // zero-initialised buffer was.
+        std::fill(out.begin(), out.end(), static_cast<uint8_t>(0));
 
         // Unit-quad -> NDC matrix, column-major (GLSL convention). Vulkan NDC
         // (-1,-1) is top-left, matching texture uv (0,0), so no flip anywhere.
@@ -409,7 +424,6 @@ auto FillBlockBytes(const UniformBlock &block, const PassDef &passDef, const Sla
                             static_cast<int>(found));
                 WriteFloat(out, member.offset, value);
         }
-        return out;
 }
 
 } // namespace slv::vk
@@ -528,6 +542,27 @@ struct Chain::Impl {
         uint32_t framesInFlight = 1;
         // The ring of per-frame resources. Sized framesInFlight.
         std::vector<FrameSlot> frameSlots;
+
+        // --- Per-frame scratch (PERF-09) -------------------------------------
+        //
+        // The render path used to build these vectors from scratch every
+        // frame, which cost a handful of heap allocations per frame in a
+        // path that runs hundreds of times a second. They are chain state
+        // now: cleared and refilled, never reallocated.
+        std::vector<std::pair<uint32_t, uint32_t>> scratchPassSizes;
+        std::vector<vk::BlockFillContext::AliasSize> scratchAliasSizes;
+        std::vector<vk::BlockFillContext::LutSize> scratchLutSizes;
+        std::vector<ParamOverride> scratchOverrides;
+        std::vector<VkDescriptorImageInfo> scratchImageInfos;
+        std::vector<VkWriteDescriptorSet> scratchWrites;
+        std::vector<VkPipeline> scratchFramePipelines;
+        // The LUT sizes and the merged parameter overrides only change when
+        // the chain is rebuilt or a parameter is overridden, so they are
+        // cached rather than rebuilt every frame.
+        std::vector<vk::BlockFillContext::LutSize> cachedLutSizes;
+        bool cachedLutSizesValid = false;
+        std::vector<ParamOverride> cachedOverrides;
+        bool cachedOverridesValid = false;
         // The logical index of the next frame. Every per-frame index (the
         // pass output buffer, the history ring slot) derives from it, so the
         // "N frames ago" semantics stay correct when frames overlap.
@@ -691,11 +726,7 @@ struct Chain::Impl {
                                 continue;
                         vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
                         vkDestroyFence(device->device(), slot.fence, nullptr);
-                        if (slot.commandBuffer != VK_NULL_HANDLE)
-                                vkFreeCommandBuffers(
-                                    device->device(), device->impl().commandPool, 1, &slot.commandBuffer);
                         slot.fence = VK_NULL_HANDLE;
-                        slot.commandBuffer = VK_NULL_HANDLE;
                 }
                 DestroyGpuResources();
         }
@@ -716,11 +747,14 @@ struct Chain::Impl {
                                 continue;
                         vkWaitForFences(dev, 1, &slot.fence, VK_TRUE, UINT64_MAX);
                         vkDestroyFence(dev, slot.fence, nullptr);
-                        if (slot.commandBuffer != VK_NULL_HANDLE)
-                                vkFreeCommandBuffers(
-                                    dev, device->impl().commandPool, 1, &slot.commandBuffer);
                         slot.fence = VK_NULL_HANDLE;
-                        slot.commandBuffer = VK_NULL_HANDLE;
+                }
+                // The slots' command buffers belong to the pool.
+                for (FrameSlot &slot : frameSlots) {
+                        if (slot.commandBuffer != VK_NULL_HANDLE) {
+                                device->impl().FreeCommandBuffer(slot.commandBuffer);
+                                slot.commandBuffer = VK_NULL_HANDLE;
+                        }
                 }
                 for (PassRuntime &pass : passes) {
                         for (auto &entry : pass.pipelines) {
@@ -808,9 +842,13 @@ struct Chain::Impl {
                         for (PassTarget &t : pass.targets)
                                 t = {};
                 }
-                // The per-frame slots own the uniform buffers and the
-                // descriptor sets the frames use.
+                // The per-frame slots own the uniform buffers, the descriptor
+                // sets and the command buffer the frames use. The command
+                // buffer belongs to a device that may be gone, so it is
+                // forgotten here and freed (not forgotten) by
+                // DestroyGpuResources, which runs while the device lives.
                 for (FrameSlot &slot : frameSlots) {
+                        slot.commandBuffer = VK_NULL_HANDLE;
                         for (auto &passSlot : slot.passes) {
                                 for (Ubo &ubo : passSlot.vertexUbos)
                                         ubo = {};
@@ -1636,6 +1674,10 @@ struct Chain::Impl {
                 // Remember which device generation these resources belong to,
                 // so a later device replacement can be noticed (ROB-35).
                 generation = device->generation();
+                // The cached LUT sizes and merged overrides belong to the
+                // resources being (re)built (PERF-09).
+                cachedLutSizesValid = false;
+                cachedOverridesValid = false;
 
         // LUT bindings (M3): views are borrowed from the preset's uploaded
         // images — a Preset must therefore outlive every Chain created from it
@@ -2267,6 +2309,9 @@ auto Chain::setParameter(std::string_view id, float value) -> std::expected<void
 {
         if (id.empty())
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "Chain::setParameter: empty id"));
+        // The merged parameter list is cached across frames; a new override
+        // invalidates it (PERF-09).
+        impl_->cachedOverridesValid = false;
         // Case-insensitive update in place: parameter names arrive in mixed
         // case ("GAIN" vs the parser-lowercased "gain"), and case-variant
         // duplicates in the override map would merge in hash order.
@@ -2461,8 +2506,10 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                 }
         }
 
-        // 4. Per-pass UBO fills.
-        std::vector<std::pair<uint32_t, uint32_t>> passSizes;
+        // 4. Per-pass UBO fills. The scratch buffers are chain state: they
+        // are cleared and refilled, never reallocated (PERF-09).
+        std::vector<std::pair<uint32_t, uint32_t>> &passSizes = impl.scratchPassSizes;
+        passSizes.clear();
         for (const Chain::Impl::PassRuntime &pass : impl.passes)
                 passSizes.emplace_back(pass.outputWidth, pass.outputHeight);
 
@@ -2470,7 +2517,8 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
         // output size (the fill context carries them case-insensitively). M4:
         // the final pass renders at its own FBO size — the present draw
         // letterboxes it — so <alias>Size reflects that actual output.
-        std::vector<vk::BlockFillContext::AliasSize> aliasSizes;
+        std::vector<vk::BlockFillContext::AliasSize> &aliasSizes = impl.scratchAliasSizes;
+        aliasSizes.clear();
         for (size_t j = 0; j < impl.passes.size(); ++j) {
                 const Chain::Impl::PassRuntime &owner = impl.passes[j];
                 if (!owner.def.alias.empty())
@@ -2482,12 +2530,20 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
 
         // LUT sizes (M3): declared names plus User# positional aliases; the
         // fill resolves <Texture>Size members case-insensitively over both.
-        std::vector<vk::BlockFillContext::LutSize> lutSizes;
-        for (size_t l = 0; l < impl.luts.size(); ++l) {
-                if (impl.luts[l].width != 0 || impl.luts[l].height != 0)
-                        lutSizes.push_back({impl.luts[l].name, impl.luts[l].width, impl.luts[l].height});
-                lutSizes.push_back({"User" + std::to_string(l), impl.luts[l].width, impl.luts[l].height});
+        // They only change when the chain is rebuilt, so they are cached
+        // instead of rebuilt (with their "User<N>" strings) every frame.
+        if (!impl.cachedLutSizesValid) {
+                impl.cachedLutSizes.clear();
+                for (size_t l = 0; l < impl.luts.size(); ++l) {
+                        if (impl.luts[l].width != 0 || impl.luts[l].height != 0)
+                                impl.cachedLutSizes.push_back(
+                                        {impl.luts[l].name, impl.luts[l].width, impl.luts[l].height});
+                        impl.cachedLutSizes.push_back(
+                                {"User" + std::to_string(l), impl.luts[l].width, impl.luts[l].height});
+                }
+                impl.cachedLutSizesValid = true;
         }
+        const std::vector<vk::BlockFillContext::LutSize> &lutSizes = impl.cachedLutSizes;
 
         // 4b. Ring / mip-copy (re)allocation happens before recording so the
         // error paths stay outside the command lambda.
@@ -2524,18 +2580,24 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
         // Effective parameter values: .slangp overrides, then setParameter()
         // runtime overrides on top (matching is case-insensitive in the fill,
         // consistent with the translator's member whitelist).
-        std::vector<ParamOverride> effectiveOverrides = impl.presetParameterOverrides;
-        for (const auto &[name, value] : impl.paramOverrides) {
-                bool found = false;
-                for (ParamOverride &override : effectiveOverrides)
-                        if (vk::CaseInsensitiveEqual(override.name, name)) {
-                                override.value = value;
-                                found = true;
-                                break;
-                        }
-                if (!found)
-                        effectiveOverrides.push_back({name, value});
+        // The merge only changes when a parameter is overridden, so it is
+        // cached (PERF-09).
+        if (!impl.cachedOverridesValid) {
+                impl.cachedOverrides = impl.presetParameterOverrides;
+                for (const auto &[name, value] : impl.paramOverrides) {
+                        bool found = false;
+                        for (ParamOverride &override : impl.cachedOverrides)
+                                if (vk::CaseInsensitiveEqual(override.name, name)) {
+                                        override.value = value;
+                                        found = true;
+                                        break;
+                                }
+                        if (!found)
+                                impl.cachedOverrides.push_back({name, value});
+                }
+                impl.cachedOverridesValid = true;
         }
+        const std::vector<ParamOverride> &effectiveOverrides = impl.cachedOverrides;
 
         uint32_t inputW = input.width;
         uint32_t inputH = input.height;
@@ -2567,13 +2629,15 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                                 if (block.binding >= 2)
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument,
                                             "vertex uniform block binding out of range: " + block.instanceName));
-                                const std::vector<uint8_t> bytes = vk::FillBlockBytes(
-                                    block, pass.def, pass.translation, effectiveOverrides, ctx);
                                 const Chain::Impl::Ubo &ubo = slot.passes[i].vertexUbos[block.binding];
-                                if (bytes.size() > static_cast<size_t>(ubo.size))
+                                // The fill writes straight into the mapped
+                                // UBO: no temporary buffer, no copy (PERF-09).
+                                const uint32_t needed = vk::FillBlockSize(block);
+                                if (needed > static_cast<uint32_t>(ubo.size))
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument, "vertex UBO overflow"));
                                 if (ubo.mapped != nullptr)
-                                        std::memcpy(ubo.mapped, bytes.data(), bytes.size());
+                                        vk::FillBlockBytes(block, pass.def, pass.translation, effectiveOverrides, ctx,
+                                            std::span<uint8_t>(ubo.mapped, needed));
                         }
                 }
                 if (!pass.translation.fragment.uniformBlocks.empty()) {
@@ -2582,13 +2646,13 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                                 if (block.binding >= 2)
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument,
                                             "fragment uniform block binding out of range: " + block.instanceName));
-                                const std::vector<uint8_t> bytes = vk::FillBlockBytes(
-                                    block, pass.def, pass.translation, effectiveOverrides, ctx);
                                 const Chain::Impl::Ubo &ubo = slot.passes[i].fragmentUbos[block.binding];
-                                if (bytes.size() > static_cast<size_t>(ubo.size))
+                                const uint32_t needed = vk::FillBlockSize(block);
+                                if (needed > static_cast<uint32_t>(ubo.size))
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument, "fragment UBO overflow"));
                                 if (ubo.mapped != nullptr)
-                                        std::memcpy(ubo.mapped, bytes.data(), bytes.size());
+                                        vk::FillBlockBytes(block, pass.def, pass.translation, effectiveOverrides, ctx,
+                                            std::span<uint8_t>(ubo.mapped, needed));
                         }
                 }
                 inputW = pass.outputWidth;
@@ -2611,8 +2675,13 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         fallbackSource = prev.targets[Chain::Impl::WriteIndexFor(prev, impl.currentFrameIndex)]
                                             .img.view;
                 }
-                std::vector<VkDescriptorImageInfo> imageInfos(textureCount);
-                std::vector<VkWriteDescriptorSet> writes(textureCount);
+                // The scratch buffers are reused across passes and frames
+                // (PERF-09): the writes are consumed by vkUpdateDescriptorSets
+                // before the next pass fills them again.
+                std::vector<VkDescriptorImageInfo> &imageInfos = impl.scratchImageInfos;
+                std::vector<VkWriteDescriptorSet> &writes = impl.scratchWrites;
+                imageInfos.assign(textureCount, VkDescriptorImageInfo{});
+                writes.assign(textureCount, VkWriteDescriptorSet{});
                 for (size_t t = 0; t < textureCount; ++t) {
                         const TextureRef &ref = pass.translation.fragment.textures[t];
                         VkImageView view = VK_NULL_HANDLE;
@@ -2756,7 +2825,8 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
 
         // Pipelines for this frame's render modes, fetched before recording so
         // lazy per-format creation errors stay on the error path.
-        std::vector<VkPipeline> framePipelines(impl.passes.size());
+        std::vector<VkPipeline> &framePipelines = impl.scratchFramePipelines;
+        framePipelines.assign(impl.passes.size(), VK_NULL_HANDLE);
         for (size_t i = 0; i < impl.passes.size(); ++i) {
                 Chain::Impl::PassRuntime &pass = impl.passes[i];
                 const bool isLast = i + 1 == impl.passes.size();
@@ -2770,7 +2840,19 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
         // 6. Record. Swapchain frames wait the host's acquire semaphore at
         // COLOR_ATTACHMENT_OUTPUT; the submit fence makes the image
         // present-ready once the frame's work completes.
-        auto recorded = impl.device->impl().RecordCommandBuffer([&](VkCommandBuffer cmd) {
+        // The slot's command buffer: allocated once, reset for each frame.
+        if (slot.commandBuffer == VK_NULL_HANDLE) {
+                auto allocated = impl.device->impl().AllocateCommandBuffer();
+                if (!allocated)
+                        return std::unexpected(allocated.error());
+                slot.commandBuffer = *allocated;
+        } else {
+                auto reset = impl.device->impl().ResetCommandBuffer(slot.commandBuffer);
+                if (!reset)
+                        return std::unexpected(reset.error());
+        }
+
+        auto recorded = impl.device->impl().RecordInto(slot.commandBuffer, [&](VkCommandBuffer cmd) {
                 // (0) Host staging upload (single-submit path): the frame's pixel
                 // buffer is copied into the input image BEFORE the history blits
                 // or passes touch it. The image rests in SHADER_READ_ONLY_OPTIMAL
@@ -3005,17 +3087,15 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
         VkFence fence = VK_NULL_HANDLE;
         SLV_VK(vkCreateFence(impl.device->device(), &fenceInfo, nullptr, &fence), Errc::vk_error);
 
-        auto submitted = impl.device->impl().SubmitRecorded(*recorded,
+        auto submitted = impl.device->impl().SubmitRecorded(slot.commandBuffer,
             swapchainTarget ? swap->acquireSemaphore : VK_NULL_HANDLE,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, fence);
         if (!submitted) {
                 vkDestroyFence(impl.device->device(), fence, nullptr);
-                vkFreeCommandBuffers(impl.device->device(), impl.device->impl().commandPool, 1, &recorded.value());
                 return std::unexpected(submitted.error());
         }
 
         slot.fence = fence;
-        slot.commandBuffer = *recorded;
         // The next frame gets the next logical index: the output buffer it
         // writes and the history slot it fills are derived from it.
         ++impl.frameIndex;

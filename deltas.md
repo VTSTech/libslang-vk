@@ -12,11 +12,16 @@ what changed, in which files, and how it was verified. Once an entry appears her
 from `audit.md` entirely — its master table, priority matrix, and counts list only the
 open findings; this ledger is the single record of closures.
 
+Five findings are closed: the three Medium ones from the robustness wave (ROB-33, ROB-34,
+ROB-35) and two Low ones (SEC-07, PERF-09).
+
 | ID | Severity | Category | Title | Closed |
 |----|----------|----------|-------|--------|
 | ROB-33 | Medium | Robustness | Synchronous render() contract limits performance and prevents batching | 2026-10-21 |
 | ROB-34 | Medium | Robustness | No async execution or pipelining support | 2026-10-21 |
 | ROB-35 | Medium | Robustness | Limited error recovery for Vulkan device lost scenarios | 2026-10-21 |
+| SEC-07 | Low | Security | C API lacks input validation for null handles | 2026-10-21 |
+| PERF-09 | Low | Performance | Per-frame allocations in render path | 2026-10-21 |
 
 ---
 
@@ -232,5 +237,90 @@ stale handles.
   the release registry it was 2.3 MB in 327 allocations.
 - `slangvk_result_name()` / `MapErrc()` cover the new error code, and the C API test exercises
   the new entry point's error path.
+
+---
+
+### Security
+
+#### SEC-07: C API lacks input validation for null handles
+
+| Property | Value |
+|----------|-------|
+| **Severity** | Low |
+| **Category** | Security |
+| **File(s)** | `include/slangvk/c.h`, `src/c_api.cpp`, `tests/test_c_api.cpp` |
+
+**Original finding.** The C API accepts Vulkan handles (VkImage, VkBuffer, VkImageView) as raw pointers but performs minimal validation for null values before passing them to Vulkan calls. While the C++ API uses std::expected for comprehensive error handling, the C API relies on Vulkan's internal validation, which may produce less diagnostic-friendly error messages.
+
+**Current behavior:** Device lost errors (VK_ERROR_DEVICE_LOST) are reported through the Error mechanism, but there's no built-in way to recreate the device or associated objects while preserving application state.
+
+**Resolution.**
+- The C API now checks the **required Vulkan handles itself** — the input frame's
+  `view`, the swapchain frame's `swapchain_image_view` and the offscreen
+  target's `view` — before the call reaches the C++ layer, and names the
+  offending handle in the message ("input->view is VK_NULL_HANDLE") instead
+  of letting the C++ layer report a generic one.
+- The **optional** handles stay optional: `input->image` is only needed by
+  history/mipmap-input presets and `target->image` only by a feedback-read
+  final pass, so the C API does not reject them (the C++ layer still
+  decides).
+- The contract is now **pinned by the test**: every entry point is called
+  with NULL pointers and with NULL required views, and each must return
+  `SLANGVK_ERR_INVALID_ARGUMENT` with a message. The handle checks assert
+  the *message* names the handle, so a regression to the generic C++-layer
+  text is caught too.
+
+**Verification.**
+- `tests/test_c_api.cpp` covers every entry point's NULL path (device,
+  image, preset, chain — including both render entry points and their
+  required view handles).
+- The C API test passes unchanged otherwise, so the existing contract is
+  intact.
+
+---
+
+### Performance
+
+#### PERF-09: Per-frame allocations in render path
+
+| Property | Value |
+|----------|-------|
+| **Severity** | Low |
+| **Category** | Performance |
+| **File(s)** | `src/vk/chain.cpp`, `src/vk/impls.hpp` |
+
+**Original finding.** The render path performs several allocations per frame, including command buffers, descriptor sets, and temporary buffers. While these are necessary for the current architecture, they could be optimized for high-frequency scenarios.
+
+**Current behavior:** Each render call creates new command buffers and descriptor sets. While Vulkan drivers optimize this pattern, there's still allocation overhead per frame.
+
+**Resolution.**
+- **The command buffer belongs to the frame slot.** It is allocated once and
+  *reset* for each frame, instead of a `vkAllocateCommandBuffers` +
+  `vkFreeCommandBuffers` round-trip per frame. The pool was already created
+  with `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`, so the reset is
+  free of driver bookkeeping. (The descriptor sets were already per-slot
+  after ROB-34; the audit's "new descriptor sets per frame" no longer
+  applies.)
+- **The uniform block fill writes straight into the mapped UBO.**
+  `FillBlockBytes` took a `std::vector<uint8_t>` and the caller copied it
+  into the UBO: one heap allocation and one copy per uniform block per
+  frame. It now fills the caller's buffer in place, with
+  `FillBlockSize()` used for the overflow check.
+- **The per-frame vectors are chain scratch**: the pass sizes, the alias
+  sizes, the descriptor write arrays and the pipeline array are cleared and
+  refilled, never reallocated.
+- **The static data is cached**: the LUT sizes (which cost a `"User<N>"`
+  string each) and the merged parameter overrides only change when the
+  chain is rebuilt or a parameter is overridden, so they are cached and
+  invalidated at those points.
+
+**Verification.**
+- Measured with a malloc counter over the bundled fixtures (184 rendered
+  frames): **130,806 → 129,177** allocations, i.e. **~8.9 fewer heap
+  allocations per frame** in the library's own code.
+- The whole runner suite (30 tests) passes unchanged, including the
+  live-parameter cases that exercise the override cache's invalidation.
+- ASAN + UBSAN builds are clean; the leak profile is unchanged from the
+  pre-change baseline (240 bytes in 3 allocations).
 
 ---

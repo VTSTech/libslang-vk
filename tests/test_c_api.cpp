@@ -384,6 +384,127 @@ int main()
         }
 
         // --- Error paths -------------------------------------------------------
+        //
+        // Every entry point must reject a NULL handle with
+        // SLANGVK_ERR_INVALID_ARGUMENT and a message, rather than letting it
+        // reach Vulkan (SEC-07). The contract is what a C host can rely on.
+        {
+                slangvk_device_info info;
+                slangvk_image_options imageOptions;
+                std::memset(&imageOptions, 0, sizeof(imageOptions));
+                slangvk_chain_options chainOptions;
+                std::memset(&chainOptions, 0, sizeof(chainOptions));
+                slangvk_parameter parameter;
+                std::memset(&parameter, 0, sizeof(parameter));
+                slangvk_frame_info frameInfo;
+                std::memset(&frameInfo, 0, sizeof(frameInfo));
+                slangvk_input_frame inputFrame;
+                std::memset(&inputFrame, 0, sizeof(inputFrame));
+                slangvk_swapchain_frame swapchainFrame;
+                std::memset(&swapchainFrame, 0, sizeof(swapchainFrame));
+                slangvk_offscreen offscreenTarget;
+                std::memset(&offscreenTarget, 0, sizeof(offscreenTarget));
+                uint32_t u32 = 0;
+                VkImageView view = VK_NULL_HANDLE;
+                VkImage image = VK_NULL_HANDLE;
+                VkFormat format = kFormat;
+                uint32_t w = 0, h = 0;
+                void *pixels = nullptr;
+                size_t pixelBytes = 0;
+
+                // Device.
+                Check(slangvk_device_get_info(nullptr, &info) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_get_info rejects a NULL device");
+                Check(slangvk_device_get_handles(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_get_handles rejects a NULL device");
+                Check(slangvk_device_wait_idle(nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_wait_idle rejects a NULL device");
+                Check(slangvk_device_recover(nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_recover rejects a NULL device");
+                Check(slangvk_device_read_pixels(nullptr, VK_NULL_HANDLE, kFormat, 0, 0,
+                        VK_IMAGE_LAYOUT_UNDEFINED, nullptr, 0) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_read_pixels rejects NULL arguments");
+                Check(slangvk_device_create(nullptr, nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "device_create rejects NULL arguments");
+
+                // Image.
+                Check(slangvk_image_create(nullptr, &imageOptions, nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "image_create rejects a NULL device");
+                Check(slangvk_image_create(device, &imageOptions, nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "image_create rejects a NULL out pointer");
+                Check(slangvk_image_update(nullptr, nullptr, 0) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "image_update rejects a NULL image");
+                Check(slangvk_image_get_handles(nullptr, &view, &image, &format, &w, &h)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "image_get_handles rejects a NULL image");
+
+                // Preset.
+                Check(slangvk_preset_load(nullptr, "x.slangp", nullptr, nullptr)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "preset_load rejects a NULL device");
+                Check(slangvk_preset_load(device, nullptr, nullptr, nullptr) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "preset_load rejects a NULL path");
+                Check(slangvk_preset_pass_count(nullptr, &u32) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "preset_pass_count rejects a NULL preset");
+                Check(slangvk_preset_parameter_count(nullptr, &u32) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "preset_parameter_count rejects a NULL preset");
+                Check(slangvk_preset_parameter(nullptr, 0, &parameter) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "preset_parameter rejects a NULL preset");
+
+                // Chain.
+                Check(slangvk_chain_create(nullptr, nullptr, 0, 0, kFormat, nullptr)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_create rejects NULL arguments");
+                Check(slangvk_chain_create_ex(device, nullptr, &chainOptions, nullptr)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_create_ex rejects a NULL preset");
+                Check(slangvk_chain_resize(nullptr, 0, 0) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_resize rejects a NULL chain");
+                Check(slangvk_chain_set_parameter(nullptr, "x", 0.F) == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_set_parameter rejects a NULL chain");
+                Check(slangvk_chain_pass_output_size(nullptr, 0, &u32, &u32)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_pass_output_size rejects a NULL chain");
+                Check(slangvk_chain_render_swapchain(nullptr, &inputFrame, &swapchainFrame, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_render_swapchain rejects a NULL chain");
+                Check(slangvk_chain_render_swapchain(blitChain, nullptr, &swapchainFrame, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_render_swapchain rejects a NULL input");
+                Check(slangvk_chain_render_swapchain(blitChain, &inputFrame, nullptr, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_render_swapchain rejects a NULL target");
+                Check(slangvk_chain_render_offscreen(nullptr, &inputFrame, &offscreenTarget, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_render_offscreen rejects a NULL chain");
+                Check(slangvk_chain_render_offscreen(blitChain, &inputFrame, nullptr, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT,
+                    "chain_render_offscreen rejects a NULL target");
+                // The required view handles (SEC-07): the image handles are
+                // optional (only some presets need them).
+                Check(slangvk_chain_render_offscreen(blitChain, &inputFrame, &offscreenTarget, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT
+                    && std::strstr(slangvk_last_error(), "input->view") != nullptr,
+                    "chain_render_offscreen rejects a NULL input view, and says which handle");
+                // A valid input view, so the target's handle is the one
+                // reported.
+                slangvk_input_frame goodInput;
+                std::memset(&goodInput, 0, sizeof(goodInput));
+                goodInput.view = inputView;
+                goodInput.format = kFormat;
+                goodInput.width = kWidth;
+                goodInput.height = kHeight;
+                Check(slangvk_chain_render_offscreen(blitChain, &goodInput, &offscreenTarget, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT
+                    && std::strstr(slangvk_last_error(), "target->view") != nullptr,
+                    "chain_render_offscreen rejects a NULL target view, and says which handle");
+                Check(slangvk_chain_render_swapchain(blitChain, &goodInput, &swapchainFrame, &frameInfo)
+                        == SLANGVK_ERR_INVALID_ARGUMENT
+                    && std::strstr(slangvk_last_error(), "swapchain_image_view") != nullptr,
+                    "chain_render_swapchain rejects a NULL swapchain view, and says which handle");
+        }
+
         slangvk_preset *missing = nullptr;
         const slangvk_result missingResult =
             slangvk_preset_load(device, (dataDir + "/runner/missing.slangp").c_str(), nullptr, &missing);

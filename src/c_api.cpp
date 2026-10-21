@@ -462,6 +462,10 @@ slangvk_result slangvk_chain_render_swapchain(slangvk_chain *chain, const slangv
 {
         if (chain == nullptr || input == nullptr || target == nullptr)
                 return SetInvalid("chain, input and target must be non-NULL");
+        if (input->view == VK_NULL_HANDLE)
+                return SetInvalid("input->view is VK_NULL_HANDLE");
+        if (target->swapchain_image_view == VK_NULL_HANDLE)
+                return SetInvalid("target->swapchain_image_view is VK_NULL_HANDLE");
         if (input->rotation > SLANGVK_ROTATION_CW270)
                 return SetInvalid("rotation must be a SLANGVK_ROTATION_* value");
         slv::SwapchainFrame frame;
@@ -480,6 +484,10 @@ slangvk_result slangvk_chain_render_offscreen(slangvk_chain *chain, const slangv
 {
         if (chain == nullptr || input == nullptr || target == nullptr)
                 return SetInvalid("chain, input and target must be non-NULL");
+        if (input->view == VK_NULL_HANDLE)
+                return SetInvalid("input->view is VK_NULL_HANDLE");
+        if (target->view == VK_NULL_HANDLE)
+                return SetInvalid("target->view is VK_NULL_HANDLE");
         if (input->rotation > SLANGVK_ROTATION_CW270)
                 return SetInvalid("rotation must be a SLANGVK_ROTATION_* value");
         slv::Offscreen offscreen;
