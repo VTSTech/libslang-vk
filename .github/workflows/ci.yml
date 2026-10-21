@@ -58,6 +58,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # Skip CI if the commit only contains .md files
 jobs:
   check-only-md:
@@ -98,12 +102,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [Release, Debug]
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
   linux:
     name: linux-x64 (${{ matrix.build_type }})
     runs-on: ubuntu-latest
