@@ -252,7 +252,7 @@ this table:
 | M2 chain semantics | ✅ done | Field canaries pass on the Vulkan runner (`test_runner_m2`) |
 | M3 conformance + perf | ✅ done (2026-10-18) | LUT upload + `corpus_sweep` tool (repo "M3"); full-corpus nightly ledger gate ON (miss #5 — pinned baseline, 2,637 LOAD / 21 FAIL after M4.03); golden-image suite + perf budgets shipped as the `conformance` tool (M4.04); §11's fixed reference-GPU fps numbers retired in favor of the per-host budget workflow |
 | M4 DevilutionX spike | 🔶 in progress | Presentation half done — plan §8 mode (a) shipped as repo "M4" (`SwapchainFrame`, letterbox, rotation); adapter spike underway on fork branch `libslang-vk`, hardware field sweep is the exit gate |
-| M5 1.0 release | 🔶 in progress | API freeze, packaging; `docs/API.md` drafted early (2026-10-19); freeze review executed + 4 maintainer decisions applied 2026-10-19 ([API-freeze-review.md](API-freeze-review.md)) — the surface grew after that review (M4.06: async render, frame pipelining, device-lost recovery), so the freeze needs a re-check against the current headers; freeze stamp + packaging + tagged release remain |
+| M5 1.0 release | 🔶 in progress | API freeze, packaging; `docs/API.md` drafted early (2026-10-19); freeze review executed + 4 maintainer decisions applied 2026-10-19 ([API-freeze-review.md](API-freeze-review.md)) — **the freeze is not imminent: M4.xx keeps iterating until the surface is ready, and the review will be redone against the then-current headers**; freeze stamp + packaging + tagged release remain |
 
 Where a working milestone label and this table disagree on scope,
 PROVENANCE.md's per-milestone sections are authoritative.

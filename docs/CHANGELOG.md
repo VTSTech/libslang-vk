@@ -127,7 +127,7 @@ device can be rebuilt — together with the presets and chains that lived on it
   frame's descriptor writes agree on which buffer holds frame T-N.
 - `Chain::create` documents that the preset it borrows must outlive the
   chain and must not be moved while the chain exists.
-- Version bumped to 0.2.0.
+- Version bumped to 0.4.06 (major 0, minor 4, patch 6).
 
 ### Fixed
 
@@ -146,6 +146,13 @@ device can be rebuilt — together with the presets and chains that lived on it
   notice. The chain now also counts the sets it allocates and refuses to
   exceed the pool's budget, so a mis-sizing fails the same way on every
   driver.
+
+### Validation
+
+- **Downstream hosts** — the M4.06 build was exercised against two downstream
+  consumers (Doom and Diablo): both load presets and render with the shaders
+  working again. The descriptor pool budget fix below was found through the
+  first of those runs.
 
 ### Tests
 

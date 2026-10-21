@@ -527,7 +527,7 @@ The full format-level list is SPEC §6/§7; these affect API consumers directly:
 
 ## 10. Versioning and the M5 freeze
 
-`SLANGVK_VERSION_MAJOR/MINOR/PATCH` (0.1.0 pre-freeze). The M5 gate (PLAN §11) commits to: API freeze against this document, CMake package config + pkg-config, a tagged release and the example app. Until that tag, minor-version bumps may change names/signatures; afterwards, semver. Freeze-review checklist for maintainers:
+`SLANGVK_VERSION_MAJOR/MINOR/PATCH` (0.4.06 pre-freeze). The freeze is not imminent: M4.xx keeps iterating until the surface is ready, so names and signatures may still change between minor versions. When a freeze is in scope, the M5 gate (PLAN §11) commits to: API freeze against this document, CMake package config + pkg-config, a tagged release and the example app — and from that tag, semver. Freeze-review checklist for maintainers:
 
 1. Every public name in `include/slangvk/` is documented here (audit the headers against §4/§5).
 2. Every documented lifetime/threading rule (§6) has a test or PROVENANCE note.
