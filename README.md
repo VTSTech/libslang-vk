@@ -17,7 +17,7 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4.05 — library milestones complete.** All library-side M0–M4
+**Status: M4.06 — async rendering and device recovery in progress.** All library-side M0–M4
 gates are green: 26/26 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
@@ -29,9 +29,10 @@ acquired swapchain image with the letterbox rect and orientation handled by
 the library (plan §8 output mode (a)). M4.05 adds the pure-C API
 ([`include/slangvk/c.h`](include/slangvk/c.h) — [C API](#c-api)) and the
 single-submit per-frame upload path (`Device::createMappedBuffer` +
-`InputFrame::pixelBuffer`). Per-item implementation status, audited against
-the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md); notable changes per
-milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
+`InputFrame::pixelBuffer`). M4.06 introduces async rendering support with
+`render_async()`/`submit_and_wait()` methods and automatic device lost recovery.
+Per-item implementation status, audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md);
+notable changes per milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 **Corpus verdict (M4.03):** the full libretro preset corpus — all 2,658
 presets, pinned to the revision recorded in the ledger header — is swept

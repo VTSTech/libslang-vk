@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.04 (2026-10-19). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
+| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.06 (2026-06-18). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
 | **Audience** | Host-application authors consuming libslang-vk; maintainers reviewing the M5 freeze. |
 | **Companion docs** | [SPEC.md](SPEC.md) (preset-format contract) · [PLAN.md](PLAN.md) (design rationale, §6 sketch → this document) · [CHECKLIST.md](CHECKLIST.md) (implementation status) · [CHANGELOG.md](CHANGELOG.md) |
 | **Header of record** | Everything here is generated from the headers under `include/slangvk/`; if code and this file disagree, the headers win and this file gets fixed. |
@@ -52,6 +52,7 @@ enum class Errc {
     invalid_argument,    ///< caller passed mismatched sizes/formats/layouts
     vk_init_failed,      ///< loader/instance/device creation failed
     vk_device_lost,      ///< VK_ERROR_DEVICE_LOST during execution
+    device_lost_recovery_failed, ///< Device lost recovery attempt failed
     vk_out_of_memory,    ///< host or device allocation failed
     vk_error,            ///< any other Vulkan VkResult failure
 };
@@ -253,6 +254,30 @@ public:
         -> std::expected<void, Error>;               // applied to the params UBO on the next render
     auto render(const InputFrame&, const OutputTarget&, const FrameInfo&)
         -> std::expected<void, Error>;
+    
+    /**
+     * @brief Async render: records command buffer and returns fence for external submission.
+     *
+     * Records the render command buffer but doesn't submit it. Returns a fence that
+     * can be used to track completion when the command buffer is submitted externally.
+     * This enables command buffer batching and custom submission timing.
+     *
+     * The caller is responsible for submitting the command buffer and waiting on the fence.
+     * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays untouched.
+     */
+    auto render_async(const InputFrame&, const OutputTarget&, const FrameInfo&)
+        -> std::expected<VkFence, Error>;
+    
+    /**
+     * @brief Submits a recorded command buffer and waits for completion.
+     *
+     * Submits the given command buffer with the specified semaphore and pipeline stage,
+     * then waits for completion. Used in conjunction with render_async().
+     */
+    auto submit_and_wait(VkFence fence, VkSemaphore semaphore = VK_NULL_HANDLE,
+        VkPipelineStageFlags stageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+        -> std::expected<void, Error>;
+    
     auto passOutputSize(uint32_t passIndex) const
         -> std::expected<std::pair<uint32_t, uint32_t>, Error>;
 };
@@ -262,6 +287,38 @@ public:
 - **`render` is synchronous:** records + submits one command buffer and waits on a fence. Simple to integrate, no frame-in-flight management for the host; async execution is a recorded post-1.0 lever. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
 - `setParameter` matches case-insensitively; an empty id is an `invalid_argument` error. A value whose id matches no `#pragma parameter` is stored but **inert** (mirrors RetroArch's tolerance of unknown overlay keys) — the runner applies only ids that exist in the preset's parameter universe; values are written as given (no clamping). There is no getter in v1 — `setParameter` is write-only by design; UI-facing hosts track the merged view themselves (start from `Preset::parameterInfo()`, then mirror their own `setParameter` calls).
 - `resize` stores a new output target size (zero width/height is an `invalid_argument`) and touches no GPU resources. Render reacts to size drift lazily: pass FBO sizes derive from the per-frame `InputFrame` size plus the stored target, and pass targets, the history ring and the mip copy are (re)created at render when the allocated sizes no longer match. A swapchain extent change must be followed by `resize()` with the new extent before the next render (§8).
+
+### Async Rendering (M4.06)
+
+The Chain class provides both synchronous and asynchronous rendering APIs:
+
+- **Synchronous (`render`)**: Records, submits, and waits for completion. Simple integration with deterministic behavior.
+- **Asynchronous (`render_async` + `submit_and_wait`)**: Records command buffers without immediate submission, enabling batching and custom timing.
+
+The async API enables:
+- Command buffer batching for improved GPU utilization
+- Custom frame pacing and timing systems  
+- Integration with advanced Vulkan features like timeline semaphores
+- Overlapping CPU preparation with GPU execution
+
+**Usage Pattern:**
+```cpp
+// Record command buffer (returns fence for tracking)
+auto fence = chain.render_async(input, target, frame);
+// Submit with custom timing and wait for completion
+chain.submit_and_wait(fence, acquireSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+```
+
+### Device Lost Recovery (M4.06)
+
+The library now provides automatic recovery from Vulkan device lost scenarios:
+
+- **Detection**: `render()` automatically detects `VK_ERROR_DEVICE_LOST` during submission
+- **Recovery**: Attempts to reset command pools and clear pending operations
+- **Retry**: Automatically retries submission after successful recovery
+- **Error Handling**: Provides `Errc::device_lost_recovery_failed` for recovery failures
+
+This mechanism handles device loss due to driver crashes, GPU resets, or hardware failures while maintaining application state where possible.
 - `passOutputSize` exposes the currently-allocated FBO geometry of a pass (host OSD/debugging; also what `Offscreen` target sizing should match for a byte-exact final blit).
 
 ### 5.5 Frame types

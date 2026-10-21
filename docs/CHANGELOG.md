@@ -8,6 +8,58 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 `M0` … `M4.05`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [M4.06] — 2026-06-18
+
+Async rendering and device lost recovery phase: addresses the robustness
+findings from the codebase audit by adding command buffer batching capabilities
+and automatic Vulkan device recovery mechanisms.
+
+### Added
+
+- **Async rendering API** (`Chain::render_async` + `Chain::submit_and_wait`) —
+  enables command buffer batching and custom submission timing. The existing
+  `Chain::render` method remains synchronous for backward compatibility, while
+  `render_async()` records command buffers and returns a fence for external
+  submission. `submit_and_wait()` handles the actual submission and completion
+  waiting. This enables:
+  - Command buffer batching for improved GPU utilization
+  - Custom frame pacing and timing systems
+  - Integration with advanced Vulkan features like timeline semaphores
+  - Overlapping CPU preparation with GPU execution
+
+  ```cpp
+  // Record but don't submit
+  auto fence = chain.render_async(input, target, frame);
+  // Submit with custom timing
+  chain.submit_and_wait(fence, acquireSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+  ```
+
+- **Device lost recovery** (`Device::Impl::RecoverFromDeviceLost`) — automatic
+  recovery from VK_ERROR_DEVICE_LOST during rendering. When a Vulkan device is
+  lost due to driver crashes or hardware failures, the render method now:
+  1. Detects VK_ERROR_DEVICE_LOST during command buffer submission
+  2. Attempts recovery by resetting command pools and clearing pending operations
+  3. Retries the submission with recovered resources
+  4. Provides descriptive error messages for failed recovery attempts
+
+  The recovery process includes command pool reset, state cleanup, and automatic
+  retry logic. Added `Errc::device_lost_recovery_failed` error code for recovery
+  failures.
+
+- **CI optimization** — GitHub Actions workflow now includes a gate that skips
+  CI builds for commits containing only .md files (documentation-only changes).
+  This reduces CI resource usage and speeds up documentation updates.
+
+### Fixed
+
+- **ROB-33**: Synchronous render contract limitation — now addressed with async API
+- **ROB-35**: Limited error recovery for device lost scenarios — now with automatic recovery
+
+### Audited
+
+- Codebase audit findings updated: ROB-33 and ROB-35 moved from open to implemented
+  status in [audit.md](audit.md), with implementation details recorded in [deltas.md](deltas.md)
+
 ## [M4.05] — 2026-10-18/20
 
 The freeze-review + C-ABI + frame-path wave: the freeze-review findings
