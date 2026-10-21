@@ -323,6 +323,45 @@ int main()
                 }
         }
 
+        // --- A multi-pass chain with several frame slots --------------------
+        //
+        // The descriptor pool is sized for the chain's per-frame resources
+        // (three sets per pass per slot, plus the empty and present sets).
+        // A mis-sizing only shows up once the pool budget is exhausted, and
+        // the last allocation to fail is the present set — so this case
+        // exists to keep the budget honest for more than one pass.
+        {
+                auto multiPreset = slv::Preset::load(*device, dataDir + "/runner/twopass.slangp");
+                Check(multiPreset.has_value(), "the two-pass preset loads");
+                if (multiPreset) {
+                        for (uint32_t frames : {1u, 3u, 8u}) {
+                                slv::ChainOptions chainOptions;
+                                chainOptions.outputWidth = kWidth;
+                                chainOptions.outputHeight = kHeight;
+                                chainOptions.framesInFlight = frames;
+                                auto chain = slv::Chain::create(*device, *multiPreset, chainOptions);
+                                Check(chain.has_value(),
+                                        "a two-pass chain with " + std::to_string(frames) + " slot(s) creates");
+                                if (!chain)
+                                        continue;
+                                const auto rendered = chain->render(makeInput(0), makeOutput(0), slv::FrameInfo{});
+                                Check(rendered.has_value(),
+                                        "a two-pass chain with " + std::to_string(frames) + " slot(s) renders");
+                                if (rendered) {
+                                        // The two-pass preset is not an identity
+                                        // blit, so the pixels are not checked
+                                        // here; the point of this case is that
+                                        // the chain's descriptor pool budget
+                                        // covers its per-frame resources.
+                                        auto pixels = device->readPixels(outputs[0].image(),
+                                            VK_FORMAT_R8G8B8A8_UNORM, kWidth, kHeight,
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                        Check(pixels.has_value(), "the two-pass chain's readback");
+                                }
+                        }
+                }
+        }
+
         // --- The history and feedback rings under pipelining ----------------
         //
         // These are the cases where the per-frame index matters: the history

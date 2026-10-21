@@ -574,6 +574,13 @@ struct Chain::Impl {
         std::unordered_map<std::string, float> paramOverrides; // setParameter() runtime overrides.
         VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSet emptySet = VK_NULL_HANDLE;
+        // The pool's set budget and how much of it is used. The chain
+        // refuses to allocate beyond the budget instead of relying on the
+        // driver to fail the allocation: a driver that hands out more sets
+        // than maxSets (lavapipe does) would otherwise hide a mis-sizing
+        // until it runs on a stricter driver.
+        uint32_t descriptorPoolMaxSets = 0;
+        uint32_t descriptorSetsAllocated = 0;
         VkDescriptorSetLayout emptyLayout = VK_NULL_HANDLE;
         std::unordered_map<size_t, VkDescriptorSetLayout> set2Layouts; // Binding count -> layout
         VkDescriptorSetLayout set1Layout = VK_NULL_HANDLE;
@@ -1504,6 +1511,8 @@ struct Chain::Impl {
 
         auto AllocateSet(VkDescriptorSetLayout layout) -> VkDescriptorSet
         {
+                if (descriptorSetsAllocated >= descriptorPoolMaxSets)
+                        return VK_NULL_HANDLE; // The pool is sized wrong; the caller reports it.
                 VkDescriptorSetAllocateInfo info{};
                 info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
                 info.descriptorPool = descriptorPool;
@@ -1512,6 +1521,7 @@ struct Chain::Impl {
                 VkDescriptorSet set = VK_NULL_HANDLE;
                 if (vkAllocateDescriptorSets(device->device(), &info, &set) != VK_SUCCESS)
                         return VK_NULL_HANDLE;
+                ++descriptorSetsAllocated;
                 return set;
         }
 
@@ -1697,10 +1707,18 @@ struct Chain::Impl {
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = static_cast<uint32_t>(3 * slots * passCount) + slots;
+        // The sets the chain allocates: one shared empty set, three per pass
+        // per frame slot (set1/set2/set3) and one present set per frame slot.
+        // The empty set is easy to forget — a driver that enforces maxSets
+        // strictly then fails the present-set allocation with
+        // "present descriptor set allocation failed" (the last allocation),
+        // while a lenient driver (lavapipe) hands out the set anyway.
+        poolInfo.maxSets = 1u + slots * (3u * static_cast<uint32_t>(passCount) + 1u);
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = poolSizes;
         SLV_VK(vkCreateDescriptorPool(device->device(), &poolInfo, nullptr, &descriptorPool), Errc::vk_error);
+        descriptorPoolMaxSets = poolInfo.maxSets;
+        descriptorSetsAllocated = 0;
         emptySet = AllocateSet(emptyLayout);
         if (emptySet == VK_NULL_HANDLE)
                 return std::unexpected(SLV_ERROR(Errc::vk_error, "empty descriptor set allocation failed"));
