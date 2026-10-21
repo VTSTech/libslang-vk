@@ -4,6 +4,10 @@
 
 # libslang-vk CI — tests on lavapipe + per-toolchain library artifacts.
 #
+# Added CI gate to skip on .md-only commits (documentation-only changes)
+# The check-only-md job examines changed files and skips CI if only .md files
+# were modified, reducing CI resource usage for documentation updates.
+#
 # Lineage: this repo has had a ci.yml since the M0 scaffolding commit
 # (workflow history: `25ce03d` M0 -> `f1bd2b8`/`aed9cef` M1 -> `b7c6583` M3).
 # The 2026-10-18 extension added what it never had: artifact uploads — the
@@ -53,6 +57,47 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+
+# Skip CI if the commit only contains .md files
+jobs:
+  check-only-md:
+    name: Check for .md-only changes
+    runs-on: ubuntu-latest
+    outputs:
+      should-skip: ${{ steps.check.outputs.should-skip }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Check if only .md files changed
+        id: check
+        run: |
+          # Get list of changed files
+          changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }})
+          
+          # Check if all changed files are .md files
+          md_only=true
+          for file in $changed_files; do
+            if [[ "$file" != *.md ]]; then
+              md_only=false
+              break
+            fi
+          done
+          
+          echo "should-skip=$md_only" >> $GITHUB_OUTPUT
+          echo "Only .md files changed: $md_only"
+          echo "Changed files:"
+          echo "$changed_files"
+
+  linux:
+    name: linux-x64 (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    needs: check-only-md
+    if: needs.check-only-md.outputs.should-skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -197,6 +242,8 @@ jobs:
   linux-asan:
     name: linux-x64 (asan+ubsan test build)
     runs-on: ubuntu-latest
+    needs: check-only-md
+    if: needs.check-only-md.outputs.should-skip != 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -223,6 +270,8 @@ jobs:
   windows-mingw:
     name: win64-mingw (dll/a artifacts)
     runs-on: windows-latest
+    needs: check-only-md
+    if: needs.check-only-md.outputs.should-skip != 'true'
     defaults:
       run:
         shell: msys2 {0}
@@ -371,6 +420,8 @@ jobs:
   provenance:
     name: provenance (clean-room gate)
     runs-on: ubuntu-latest
+    needs: check-only-md
+    if: needs.check-only-md.outputs.should-skip != 'true'
     steps:
       - uses: actions/checkout@v4
 

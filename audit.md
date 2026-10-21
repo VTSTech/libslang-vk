@@ -30,11 +30,11 @@
 
 This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, translates, and compiles libretro shader presets (.slangp/.slang) with a full Vulkan execution path. The audit examined the core parsing layer, Vulkan runner implementation, C API surface, build system, test suite, and examples.
 
-**Total findings: 11** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. The audit identified 1 Medium severity finding focused on API design decisions, and 10 Low severity findings spanning maintainability, performance, and feature opportunities. (Note: ROB-33 and ROB-35 have been implemented and moved to deltas.md)
+**Total findings: 11** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. The audit identified 1 Medium severity finding focused on API design decisions, and 10 Low severity findings spanning maintainability, performance, and feature opportunities.
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful remaining findings center around the lack of async execution capabilities (ROB-34). ROB-33 and ROB-35 have been implemented in the current version, addressing synchronous rendering limitations and device lost recovery mechanisms.
+The most impactful remaining finding centers around the lack of async execution capabilities (ROB-34).
 
 ---
 
@@ -52,9 +52,7 @@ The most impactful remaining findings center around the lack of async execution 
 
 | ID | Severity | Category | Title |
 |----|----------|----------|-------|
-| ROB-33 | Medium | Robustness | Synchronous render() contract limits performance and prevents batching |
 | ROB-34 | Medium | Robustness | No async execution or pipelining support |
-| ROB-35 | Medium | Robustness | Limited error recovery for Vulkan device lost scenarios |
 | SEC-07 | Low | Security | C API lacks input validation for null handles |
 | ROB-36 | Low | Robustness | Preset parser has complex state machine with edge cases |
 | MAINT-22 | Low | Maintainability | Heavy use of pimpl pattern obscures Vulkan implementation details |
@@ -102,24 +100,6 @@ if (!chain || !in.view || !out.swapchainImageView) {
 ---
 
 ### Robustness
-
-#### ROB-33: Synchronous render() contract limits performance and prevents batching
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Medium |
-| **Category** | Robustness |
-| **File(s)** | `include/slangvk/runner.hpp`, `src/vk/chain.cpp` |
-
-The `Chain::render()` method is strictly synchronous — it records, submits, and fences a single command buffer per frame. While this simplifies memory management and ensures deterministic behavior, it prevents performance optimizations like command buffer batching, timeline semaphores, or parallel execution of multiple chains.
-
-**Current behavior:** Each render call creates a new command buffer, submits it, and waits for completion before returning. This creates a submit-wait-submit-wait pattern that underutilizes the GPU and limits throughput.
-
-**Recommendation:** Add an async API variant that returns command buffers or fences for external management, while keeping the synchronous version for backward compatibility. Consider adding a `render_async()` method that returns a fence or future object.
-
-**Impact:** Enables higher throughput scenarios and better GPU utilization while maintaining the simple synchronous API for most use cases.
-
----
 
 #### ROB-34: No async execution or pipelining support
 
