@@ -332,6 +332,18 @@ struct ChainOptions {
         uint32_t outputWidth = 0;  ///< Final output target size (offscreen/swapchain rect).
         uint32_t outputHeight = 0;
         VkFormat outputFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        /**
+         * @brief How many frames the chain may have in flight at once.
+         *
+         * 1 (the default) is the historical behaviour: render_async() waits
+         * for the previous frame before recording the next. Higher values let
+         * the host keep several frames on the GPU at once, so the GPU is not
+         * idle while the host prepares the next frame.
+         *
+         * Each additional frame costs one more set of framebuffers, uniform
+         * buffers and descriptor sets per pass. Values above 8 are clamped.
+         */
+        uint32_t framesInFlight = 1;
 };
 
 /** @brief Per-frame inputs (values written into the params UBO). */
@@ -482,6 +494,9 @@ public:
          * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays
          * untouched; an Offscreen target image is left in
          * SHADER_READ_ONLY_OPTIMAL, a SwapchainFrame image in PRESENT_SRC_KHR.
+         * The chain borrows the input image and the output target for the
+         * duration of the frame, so frames that overlap in time need one
+         * input image and one output target each (see render_async()).
          *
          * Rotation (M4): the chain renders the input in its source orientation
          * (shaders read the `Rotation` uniform 0..3); the presentation draw
@@ -522,10 +537,16 @@ public:
          * swapchain frames still wait on the host's acquire semaphore at
          * COLOR_ATTACHMENT_OUTPUT.
          *
-         * At most one async frame may be in flight per chain: the frame's
-         * texture bindings are written in place into the chain's shared
-         * descriptor sets, so the next render_async() waits for the previous
-         * frame to retire before recording over them.
+         * At most ChainOptions::framesInFlight async frames may be in flight
+         * per chain. Each of them has its own uniform buffers and descriptor
+         * sets, so their parameters and texture bindings never overwrite each
+         * other.
+         *
+         * The host must give every in-flight frame its own input image and
+         * its own output target: the chain borrows both for the duration of
+         * the frame, so two frames sharing one image would race on its
+         * content. With framesInFlight == 1 a single image and target are
+         * enough, as before.
          */
         SLANGVK_API auto render_async(const InputFrame &, const OutputTarget &, const FrameInfo &)
             -> std::expected<VkFence, Error>;

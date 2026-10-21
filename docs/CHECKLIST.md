@@ -13,8 +13,8 @@ Where this file and PROVENANCE.md disagree, PROVENANCE.md is authoritative and t
 
 ## Evidence base (what every status below cites)
 
-**29/29 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19; 26→29 with the M4.06 `runner_async` / `runner_recovery` tests, 2026-10-21):
-`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `runner_async` · `runner_recovery` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
+**30/30 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19; 26→29 with the M4.06 `runner_async` / `runner_recovery` tests, 26→30 with `runner_pipeline`, 2026-10-21):
+`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `runner_async` · `runner_pipeline` · `runner_recovery` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
 Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK=OFF` (14/14), live validation-error gate (proven non-vacuous by a deliberate-error probe collecting 2 VUIDs). 2026-10-18: the suite additionally runs clean **under synchronization validation** (A/B-verified locally on a user-space SwiftShader ICD with user-space Khronos validation layers — no sudo required — after the gate's first live CI run exposed real defects, see the miss list #2 note).
 
 **Post-M4.02 maintenance waves (2026-10-18, per CHANGELOG M4.03/M4.04):**
@@ -121,6 +121,21 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 | C surface | ✅ | `slangvk_device_recover()`; `SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED` keeps `slangvk_result` aligned with `slv::Errc` code-for-code |
 | Recovery is best-effort | ✅ (documented limit) | A driver that lost the device may also refuse to hand out a new one; `recover()` then reports the failure and the host is expected to re-create the whole `Device` |
 | A real `VK_ERROR_DEVICE_LOST` cannot be provoked in a test | 🔶 (test limitation, stated) | `runner_recovery` drives the recovery machinery through the same path a device loss takes (the device is replaced, so every object on it is gone). The driver-fault case itself is not exercised |
+
+---
+
+## M4.06 — multi-frame pipelining (audit ROB-34)
+
+| Item | Status | Evidence / gap |
+|---|---|---|
+| `ChainOptions::framesInFlight` (1..8) | ✅ | A chain configured for N frames in flight keeps N frames outstanding on the GPU at once. `runner_pipeline`: four frames recorded back to back without waiting; the chain's slot-reuse wait is the backpressure |
+| Per-frame resource slots | ✅ | The uniform buffers, the three descriptor sets per pass and the present set moved into a `Chain::Impl::FrameSlot` — one per frame in flight — so concurrent frames never overwrite each other's parameters or texture bindings |
+| Logical frame index for the history ring and the feedback buffers | ✅ | The output buffer a frame writes and the history slot it fills derive from a monotonically increasing frame index, not from a toggled write index, so `OriginalHistoryN` and the feedback reader stay correct when frames overlap. The history ring holds `depth + framesInFlight` slots |
+| Overlapped frames render the same pixels | ✅ | `runner_pipeline`: the pipelined chain produces exactly the pixels a serial render of the same chain produces — for the history and feedback presets (the two cases where the ring indexing matters), frame for frame |
+| Host contract: one input image and one output target per in-flight frame | ✅ (documented limit) | The chain borrows both for the frame's duration, so overlapping frames need one of each; the library cannot check it. Documented in `runner.hpp`, `docs/API.md` and the README |
+| Frames are submitted to the device's single graphics queue | ✅ (implicit safety) | The queue's submission order is what makes a frame's read of the previous frame's output (the feedback reader) safe |
+| Timeline semaphores / per-frame command buffer pools | ⬜ | Not implemented; recorded in the CHANGELOG's unreleased roadmap rather than claimed |
+| Frames in flight across different chains | ⬜ | Not implemented — the per-frame state is per chain |
 
 ---
 

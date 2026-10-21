@@ -30,11 +30,11 @@
 
 This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, translates, and compiles libretro shader presets (.slangp/.slang) with a full Vulkan execution path. The audit examined the core parsing layer, Vulkan runner implementation, C API surface, build system, test suite, and examples.
 
-**Total findings: 11** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. The audit identified 1 Medium severity finding focused on API design decisions, and 10 Low severity findings spanning maintainability, performance, and feature opportunities.
+**Total findings: 10** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. All 3 Medium severity findings (ROB-33, ROB-34, ROB-35) have been closed; the 10 remaining findings are Low severity, spanning maintainability, performance, and feature opportunities.
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful remaining finding centers around the lack of async execution capabilities (ROB-34).
+The most impactful remaining findings are the per-frame allocation churn in the render path (PERF-09) and the missing SPIR-V cache (PERF-08).
 
 ---
 
@@ -52,7 +52,6 @@ The most impactful remaining finding centers around the lack of async execution 
 
 | ID | Severity | Category | Title |
 |----|----------|----------|-------|
-| ROB-34 | Medium | Robustness | No async execution or pipelining support |
 | SEC-07 | Low | Security | C API lacks input validation for null handles |
 | ROB-36 | Low | Robustness | Preset parser has complex state machine with edge cases |
 | MAINT-22 | Low | Maintainability | Heavy use of pimpl pattern obscures Vulkan implementation details |
@@ -100,25 +99,6 @@ if (!chain || !in.view || !out.swapchainImageView) {
 ---
 
 ### Robustness
-
-#### ROB-34: No async execution or pipelining support
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Medium |
-| **Category** | Robustness |
-| **File(s)** | `include/slangvk/runner.hpp`, `src/vk/chain.cpp` |
-
-The library lacks any form of asynchronous execution or pipelining. All operations are blocking, which prevents overlapping CPU and GPU work and limits performance in scenarios where multiple frames could be in flight simultaneously.
-
-**Current behavior:** The render pipeline is strictly linear: input → uniform fill → pass execution → output. There's no way to pipeline multiple frames or overlap CPU preparation with GPU execution.
-
-**Recommendation:** Consider adding a `begin_render()`, `submit_render()`, `wait_render()` pattern for async workflows, or extend the Device API to support multiple in-flight frames with proper synchronization.
-
-**Impact:** Would enable better performance for applications that can benefit from frame pipelining, such as real-time graphics applications or game engines.
-
----
-
 
 
 #### ROB-36: Preset parser has complex state machine with edge cases
@@ -297,8 +277,8 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 
 | Timeline | Findings |
 |----------|----------|
-| **Short term (v0.2.0)** | ROB-34, PERF-08 (Async execution and SPIR-V caching) |
-| **Medium term (v0.3.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12 |
+| **Short term (v0.2.0)** | PERF-08 (SPIR-V caching) |
+| **Medium term (v0.3.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, SEC-07, ROB-36, PERF-09, ARCH-04 |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience

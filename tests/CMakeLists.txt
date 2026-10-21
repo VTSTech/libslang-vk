@@ -105,6 +105,17 @@ if(SLANGVK_ENABLE_VK)
             SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
         add_test(NAME runner_async COMMAND test_runner_async)
 
+        # M4.06 multi-frame pipelining (audit ROB-34): a chain configured
+        # for N frames in flight keeps N frames outstanding on the GPU at
+        # once, each with its own uniform buffers and descriptor sets. The
+        # test pins that the overlapped frames render the same pixels as a
+        # serial render.
+        add_executable(test_runner_pipeline test_runner_pipeline.cpp)
+        target_link_libraries(test_runner_pipeline PRIVATE slangvk)
+        target_compile_definitions(test_runner_pipeline PRIVATE
+            SLANGVK_TESTS_DATA_DIR="${SLANGVK_TESTS_DATA_DIR}")
+        add_test(NAME runner_pipeline COMMAND test_runner_pipeline)
+
         # M4.06 device-lost recovery (audit ROB-35): Device::recover() replaces
         # the VkDevice, and the chain notices that its resources belong to a
         # replaced device and rebuilds itself before the next frame. The test

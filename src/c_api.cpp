@@ -424,6 +424,20 @@ slangvk_result slangvk_chain_create(slangvk_device *device, const slangvk_preset
         return AdoptOut(slv::Chain::create(device->device, preset->preset, opts), out_chain);
 }
 
+slangvk_result slangvk_chain_create_ex(slangvk_device *device, const slangvk_preset *preset,
+    const slangvk_chain_options *options, slangvk_chain **out_chain)
+{
+        if (device == nullptr || preset == nullptr || options == nullptr || out_chain == nullptr)
+                return SetInvalid("device, preset, options and out_chain must be non-NULL");
+        slv::ChainOptions opts;
+        opts.outputWidth = options->output_width;
+        opts.outputHeight = options->output_height;
+        opts.outputFormat = options->output_format != VK_FORMAT_UNDEFINED ? options->output_format
+                                                                          : VK_FORMAT_R8G8B8A8_UNORM;
+        opts.framesInFlight = options->frames_in_flight;
+        return AdoptOut(slv::Chain::create(device->device, preset->preset, opts), out_chain);
+}
+
 void slangvk_chain_destroy(slangvk_chain *chain)
 {
         delete chain;

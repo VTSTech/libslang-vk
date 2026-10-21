@@ -39,7 +39,31 @@ presets and chains that lived on it — instead of ending the process.
   At most **one async frame may be in flight per chain**: the frame's texture
   bindings are written in place into the chain's shared descriptor sets, so a
   second frame cannot be recorded while the first is still executing.
-  `render_async()` drains the previous frame first.
+  `render_async()` drains the previous frame first. (ROB-34, below, lifts this
+  limit.)
+
+- **Multi-frame pipelining** (`ChainOptions::framesInFlight`, up to 8) — a chain
+  configured for N frames in flight keeps N frames outstanding on the GPU at
+  once, so the GPU is not idle while the host prepares the next frame.
+
+  - The chain's mutable per-frame state (the uniform buffers, the three
+    descriptor sets per pass, and the present draw's descriptor set) moved into
+    a per-frame slot, so concurrent frames never overwrite each other's
+    parameters or texture bindings.
+  - The output buffer a frame writes and the history ring slot it fills are
+    derived from a logical frame index rather than a toggled write index, which
+    keeps the `OriginalHistoryN` and feedback semantics correct when frames
+    overlap. The history ring grows by one slot per in-flight frame so an
+    in-flight frame cannot overwrite the slot another in-flight frame reads.
+  - The in-flight frame's fence and command buffer live in the slot that owns
+    it; a slot is reused only after its previous occupant retired, which is
+    where the backpressure lives.
+  - **Host contract:** a frame borrows its input image and its output target
+    for the frame's duration, so frames that overlap in time need one input
+    image and one output target each. With `framesInFlight == 1` one of each is
+    enough, as before.
+  - C API: `slangvk_chain_options` + `slangvk_chain_create_ex()` expose
+    `frames_in_flight`; `slangvk_chain_create()` is unchanged.
 
 - **Device-lost recovery** (`Device::recover`, `Device::generation`) — a lost
   Vulkan device can be rebuilt. `recover()` recreates the `VkDevice`, its
@@ -99,6 +123,8 @@ presets and chains that lived on it — instead of ending the process.
 
 - **ROB-33** — synchronous render contract limitation: closed by the async
   render path.
+- **ROB-34** — no async execution or pipelining support: closed by
+  `ChainOptions::framesInFlight` and the per-frame resource slots.
 - **ROB-35** — limited error recovery for device-lost scenarios: closed by
   `Device::recover()` and the automatic rebuild.
 
@@ -107,6 +133,10 @@ presets and chains that lived on it — instead of ending the process.
 - `tests/test_runner_async.cpp` — the async path: byte-identical output
   against the synchronous render, four back-to-back async frames, and
   `wait_async()`'s error contract.
+- `tests/test_runner_pipeline.cpp` — the pipelining path: several frames
+  outstanding on the GPU at once, overlapped frames producing byte-identical
+  output to a serial render, and the history and feedback presets producing
+  the same pixels pipelined as they do serially.
 - `tests/test_runner_recovery.cpp` — the recovery path: device replacement,
   the chain rebuilding itself, byte-identical output afterwards, further
   recoveries, and the release of stale objects.
@@ -246,9 +276,9 @@ the public header's only external dependency on the Vulkan headers.
 - M5 (1.0): API freeze, packaging, `docs/API.md`.
 - The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
   no library action planned; they stay pinned as FAIL in the baseline.
-- Command-buffer pooling and more than one async frame in flight per chain
-  (the descriptor sets are currently written in place, which limits the async
-  path to a single frame at a time).
+- Command-buffer pooling and timeline semaphores for the async path (the
+  per-frame resource slots and `framesInFlight` are in; the pool and the
+  timeline semaphores are not).
 
 ## [M4.04] — 2026-10-18/19
 

@@ -15,6 +15,7 @@ open findings; this ledger is the single record of closures.
 | ID | Severity | Category | Title | Closed |
 |----|----------|----------|-------|--------|
 | ROB-33 | Medium | Robustness | Synchronous render() contract limits performance and prevents batching | 2026-10-21 |
+| ROB-34 | Medium | Robustness | No async execution or pipelining support | 2026-10-21 |
 | ROB-35 | Medium | Robustness | Limited error recovery for Vulkan device lost scenarios | 2026-10-21 |
 
 ---
@@ -58,23 +59,83 @@ flight while it does its own CPU work.
 
 **Contract and limits (stated rather than glossed over).**
 
-- At most **one async frame may be in flight per chain**. The frame's texture bindings are
-  written in place into the chain's shared descriptor sets, so a second frame cannot be
-  recorded while the first is still executing. `render_async()` drains the previous frame
-  first; the host still gets real CPU/GPU overlap between `render_async()` and `wait_async()`.
-- **Not implemented** (and therefore not claimed): command-buffer pooling, timeline semaphores,
-  multiple frames in flight per chain, and cross-chain pipelining. Those remain future work and
-  are still covered by the open findings.
+- At most **one async frame may be in flight per chain** — the frame's texture bindings
+  are written in place into the chain's shared descriptor sets, so a second frame cannot
+  be recorded while the first is still executing. `render_async()` drains the previous
+  frame first; the host still gets real CPU/GPU overlap between the two calls.
+  **This limit was lifted later the same milestone by ROB-34** (per-frame resource slots
+  and `ChainOptions::framesInFlight`), which is the follow-on finding this entry
+  pointed at.
+- **Not implemented** (and therefore not claimed): command-buffer pooling, timeline
+  semaphores, and cross-chain pipelining.
+
+---
+
+#### ROB-34: No async execution or pipelining support
+
+| Property | Value |
+|----------|-------|
+| **Severity** | Medium |
+| **Category** | Robustness |
+| **File(s)** | `include/slangvk/runner.hpp`, `include/slangvk/c.h`, `src/vk/chain.cpp`, `src/c_api.cpp`, `tests/test_runner_pipeline.cpp` |
+
+**Original finding.** The library lacks any form of asynchronous execution or pipelining. All operations are blocking, which prevents overlapping CPU and GPU work and limits performance in scenarios where multiple frames could be in flight simultaneously.
+
+**Current behavior:** The render pipeline is strictly linear: input → uniform fill → pass execution → output. There's no way to pipeline multiple frames or overlap CPU preparation with GPU execution.
+
+**Resolution.**
+
+ROB-33's async path could only keep **one** frame in flight per chain: the frame's
+parameter values and texture bindings live in uniform buffers and descriptor sets that
+the next frame overwrites in place. Multi-frame pipelining therefore needed those
+resources to be per-frame.
+
+- **`ChainOptions::framesInFlight`** (1..8, default 1) — how many frames the chain may
+  have in flight at once. Each additional frame costs one more set of framebuffers,
+  uniform buffers and descriptor sets per pass.
+- **Per-frame resources** — the chain's mutable per-frame state (the uniform buffers, the
+  three descriptor sets per pass, and the present draw's descriptor set) moved into a
+  `Chain::Impl::FrameSlot`; one slot per frame in flight. A frame's parameters and
+  texture bindings are therefore private to it, and concurrent frames never overwrite
+  each other.
+- **A logical frame index** — the output buffer a frame writes and the history ring slot
+  it fills are derived from a monotonically increasing frame index instead of a toggled
+  write index. That keeps the "N frames ago" semantics of `OriginalHistoryN` and the
+  feedback reader correct when frames overlap: a feedback reader samples the previous
+  frame's output, and the buffer it reads is not the one the current frame writes.
+- **The history ring grows with the overlap** — it holds `depth + framesInFlight` slots,
+  so an in-flight frame cannot overwrite the slot another in-flight frame is reading.
+- **Slot ownership** — the in-flight frame's fence and command buffer live in the slot
+  that owns it. A slot is reused only after its previous occupant retired, which is
+  where the backpressure lives: the chain waits there when the host runs ahead.
+- **C API** — `slangvk_chain_options` + `slangvk_chain_create_ex()` expose
+  `frames_in_flight`; `slangvk_chain_create()` is unchanged (one frame in flight).
+
+**Contract and limits (stated rather than glossed over).**
+
+- **A frame borrows its input image and its output target for the frame's duration.**
+  Frames that overlap in time therefore need one input image and one output target
+  each — the next frame's upload would otherwise overwrite the previous frame's input
+  while the GPU is still reading it. With `framesInFlight == 1` one of each is enough,
+  as before. This is the one requirement the host has to meet; the chain cannot check it.
+- The frames are submitted to the device's single graphics queue, whose submission
+  order is what makes a frame's read of the previous frame's output safe.
+- **Not implemented** (and therefore not claimed): timeline semaphores, per-frame
+  command buffer pools, and frames in flight across *different* chains.
 
 **Verification.**
 
-- `tests/test_runner_async.cpp` (new, 22 assertions) drives the real path on lavapipe:
-  - an async frame produces **byte-identical** output to the synchronous `render()`;
-  - four back-to-back async frames succeed (the second `render_async()` drains the first);
-  - `wait_async()` rejects a null fence and a fence that is not the chain's pending frame.
+- `tests/test_runner_pipeline.cpp` (new) drives the real path on lavapipe:
+  - a chain with N frames in flight keeps N frames outstanding on the GPU at once;
+  - an overlapped frame produces **byte-identical** output to a serial render;
+  - the history and feedback presets — the two cases where the ring indexing matters —
+    produce the **same pixels** pipelined as they do serially, frame for frame;
+  - the host-side input/output requirement is exercised with one image and one target
+    per in-flight frame.
 - The pre-existing runner suite (26 tests) still passes unchanged, including the
-  feedback double-buffering and history-ring cases that depend on the `writeIndex` flip.
-- ASAN + UBSAN builds are clean; the leak profile is unchanged from the pre-change baseline.
+  history-ring and feedback cases.
+- ASAN + UBSAN builds are clean; the leak profile is unchanged from the pre-change
+  baseline (240 bytes in 3 allocations, the same as the untouched runner tests).
 
 ---
 

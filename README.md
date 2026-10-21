@@ -101,7 +101,7 @@ chain->render(inputFrame, outputTarget, {});   // once per frame
 The same runner speaks C too — [`include/slangvk/c.h`](include/slangvk/c.h)
 is an `extern "C"` mirror of the C++ surface (see [C API](#c-api)).
 
-### Async frames and device-lost recovery
+### Async frames, pipelining and device-lost recovery
 
 `render()` waits for the frame to retire. A host that would rather keep a
 frame in flight can split it:
@@ -112,9 +112,21 @@ auto fence = chain->render_async(inputFrame, outputTarget, {});  // returns imme
 chain->wait_async(*fence);                                       // before the output is used
 ```
 
-At most one async frame may be in flight per chain — the frame's texture
-bindings live in the chain's shared descriptor sets — but the host still gets
-real CPU/GPU overlap between the two calls.
+`ChainOptions::framesInFlight` (1..8) says how many frames the chain may
+have on the GPU at once. With more than one, each frame gets its own uniform
+buffers and descriptor sets, so the frames never overwrite each other's
+parameters or texture bindings, and the host's CPU work overlaps the GPU's:
+
+```cpp
+slv::ChainOptions options{.outputWidth = 1280, .outputHeight = 720, .framesInFlight = 3};
+auto chain = slv::Chain::create(*device, *preset, options);
+// ... record frame N+1 while frame N is still on the GPU ...
+```
+
+**One host-side rule:** a frame borrows its input image and its output target
+for the frame's duration, so frames that overlap in time need one input image
+and one output target each. With `framesInFlight == 1` one of each is enough,
+as before.
 
 If the Vulkan device is lost (driver crash, GPU reset), the chain rebuilds it,
 the preset's textures and itself, and reports `slv::Errc::vk_device_lost`:

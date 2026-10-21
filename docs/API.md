@@ -276,6 +276,18 @@ One call runs parse → translate (per pass, with `#pragma name` seeding done fo
 struct ChainOptions {
     uint32_t outputWidth = 0, outputHeight = 0;      // final output target size
     VkFormat outputFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    /**
+     * @brief How many frames the chain may have in flight at once (1..8).
+     *
+     * 1 (the default) is the historical behaviour: render_async() waits for the
+     * previous frame before recording the next. Higher values let the host keep
+     * several frames on the GPU at once, so the GPU is not idle while the host
+     * prepares the next frame.
+     *
+     * Each additional frame costs one more set of framebuffers, uniform buffers
+     * and descriptor sets per pass. Values above 8 are clamped.
+     */
+    uint32_t framesInFlight = 1;
 };
 
 class Chain {
@@ -304,10 +316,20 @@ public:
      * frames still wait on the host's acquire semaphore at
      * COLOR_ATTACHMENT_OUTPUT.
      *
-     * At most one async frame may be in flight per chain: the frame's texture
-     * bindings are written in place into the chain's shared descriptor sets, so
-     * the next render_async() waits for the previous frame to retire before
-     * recording over them.
+     * At most ChainOptions::framesInFlight async frames may be in flight per
+     * chain. Each of them has its own uniform buffers and descriptor sets, so
+     * their parameters and texture bindings never overwrite each other. A slot
+     * is reused only after its previous occupant retired, so the chain waits
+     * there when the host runs ahead.
+     *
+     * The host must give every in-flight frame its own input image and its own
+     * output target: the chain borrows both for the duration of the frame, so
+     * two frames sharing one image would race on its content. With
+     * framesInFlight == 1 a single image and target are enough, as before.
+     *
+     * The frames are submitted to the device's single graphics queue; that
+     * queue's submission order is what makes a frame's read of the previous
+     * frame's output (the feedback reader) safe.
      */
     auto render_async(const InputFrame&, const OutputTarget&, const FrameInfo&)
         -> std::expected<VkFence, Error>;
@@ -343,6 +365,7 @@ public:
 - **`render` is synchronous:** records + submits one command buffer and waits for the frame to retire. It is implemented as `render_async()` + `wait_async()`, so both entry points share one recording implementation. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
 - **`render`/`render_async` take the preset's chain by reference:** the chain borrows its preset (a `Preset` must outlive every `Chain` made from it, and must not be moved while the chain exists) so a device-lost recovery can rebuild the chain from the preset's pass data and re-upload the preset's textures.
 - `setParameter` matches case-insensitively; an empty id is an `invalid_argument` error. A value whose id matches no `#pragma parameter` is stored but **inert** (mirrors RetroArch's tolerance of unknown overlay keys) — the runner applies only ids that exist in the preset's parameter universe; values are written as given (no clamping). There is no getter in v1 — `setParameter` is write-only by design; UI-facing hosts track the merged view themselves (start from `Preset::parameterInfo()`, then mirror their own `setParameter` calls).
+- **The history ring and the feedback buffers are indexed by a logical frame index**, not by the completion order, so `OriginalHistoryN` and the feedback reader stay correct when frames overlap. The history ring holds `depth + framesInFlight` slots.
 - `resize` stores a new output target size (zero width/height is an `invalid_argument`) and touches no GPU resources. Render reacts to size drift lazily: pass FBO sizes derive from the per-frame `InputFrame` size plus the stored target, and pass targets, the history ring and the mip copy are (re)created at render when the allocated sizes no longer match. A swapchain extent change must be followed by `resize()` with the new extent before the next render (§8).
 
 ### Async rendering (M4.06)
@@ -358,7 +381,7 @@ auto fence = chain.render_async(input, target, frame);   // does not block on th
 chain.wait_async(*fence);                                  // before the output is consumed
 ```
 
-**Limits.** At most one async frame may be in flight per chain: the frame's texture bindings are written in place into the chain's shared descriptor sets, so a second frame cannot be recorded while the first is still executing. `render_async()` drains the previous frame first; the host still gets real CPU/GPU overlap between the two calls. Command-buffer pooling, timeline semaphores and multiple frames in flight per chain are **not** implemented.
+**Limits.** The number of frames in flight is `ChainOptions::framesInFlight` (1..8, default 1). With 1 the chain drains the previous frame first, so the host still gets real CPU/GPU overlap between the two calls; with more, several frames are outstanding on the GPU at once and each has its own uniform buffers and descriptor sets. Command-buffer pooling and timeline semaphores are **not** implemented.
 
 ### Device-lost recovery (M4.06)
 

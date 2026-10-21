@@ -445,9 +445,9 @@ struct Chain::Impl {
                 VkDeviceSize size = 0;
         };
 
-        // One pass output allocation. Double-buffered passes (read through
-        // PassFeedback# / <name>Feedback) own two; readers always bind the
-        // buffer NOT being written this frame (SPEC 5.3).
+        // One pass output allocation. Feedback passes own several (one per
+        // in-flight frame plus one); readers always bind the buffer NOT
+        // being written this frame (SPEC 5.3).
         struct PassTarget {
                 VkImageWithView img;                     // img.view samples the full mip chain.
                 VkImageView renderView = VK_NULL_HANDLE; // Level-0-only view for the framebuffer (aliases img.view at 1 mip).
@@ -471,21 +471,49 @@ struct Chain::Impl {
                 uint32_t allocatedHeight = 0;
                 VkFormat targetFormat = VK_FORMAT_R8G8B8A8_UNORM;
                 bool feedbackRead = false;     // A pass samples this output's previous-frame buffer.
-                uint32_t targetCount = 1;      // 2 when feedbackRead.
-                uint32_t writeIndex = 0;       // Buffer written this frame; feedback readers use 1 - writeIndex.
+                // Number of output buffers: 1 for a plain pass, framesInFlight
+                // + 1 for a feedback pass (the extra one is the previous
+                // frame's output the reader samples).
+                uint32_t targetCount = 1;
                 bool nextPassReadsMips = false; // The NEXT pass reads this output with mipmap_input (F1).
                 uint32_t mipLevels = 1;        // Resolved at allocation time from nextPassReadsMips.
-                std::array<PassTarget, 2> targets;
-                // Up to two UBOs per stage: the translator assigns plain UBOs
-                // dense bindings 0..1 and re-homes the push-constant block to
-                // binding 1 when a plain UBO is present. The pipeline layout
-                // (and the field canary, tests/test_runner_pushblock.cpp)
-                // requires both bindings to exist.
-                std::array<Ubo, 2> vertexUbos{};
-                std::array<Ubo, 2> fragmentUbos{};
-                VkDescriptorSet set1 = VK_NULL_HANDLE;
-                VkDescriptorSet set2 = VK_NULL_HANDLE;
-                VkDescriptorSet set3 = VK_NULL_HANDLE;
+                // The descriptor set layouts this pass's sets are allocated
+                // from. Remembered so the per-frame slots (built after the
+                // per-pass loop) can allocate the same sets for every pass.
+                bool hasVertexUbo = false;
+                bool hasFragmentUbo = false;
+                VkDescriptorSetLayout set2Layout = VK_NULL_HANDLE;
+                // The output buffers, indexed by the frame's write index
+                // (frame index % targetCount).
+                std::vector<PassTarget> targets;
+        };
+
+        // One frame's worth of the state that changes every frame. Several
+        // slots exist so that frames in flight at the same time never alias:
+        // each has its own uniform buffers and descriptor sets, so a frame's
+        // parameter values and texture bindings are not overwritten by the
+        // frame recorded after it (M4.06 / audit ROB-34).
+        struct FrameSlot {
+                struct PassSlot {
+                        // Up to two UBOs per stage: the translator assigns plain
+                        // UBOs dense bindings 0..1 and re-homes the push-constant
+                        // block to binding 1 when a plain UBO is present. The
+                        // pipeline layout (and the field canary,
+                        // tests/test_runner_pushblock.cpp) requires both bindings
+                        // to exist.
+                        std::array<Ubo, 2> vertexUbos{};
+                        std::array<Ubo, 2> fragmentUbos{};
+                        VkDescriptorSet set1 = VK_NULL_HANDLE;
+                        VkDescriptorSet set2 = VK_NULL_HANDLE;
+                        VkDescriptorSet set3 = VK_NULL_HANDLE;
+                };
+                std::vector<PassSlot> passes;
+                VkDescriptorSet presentSet = VK_NULL_HANDLE;
+                // The frame currently occupying this slot: its fence and the
+                // command buffer recorded for it. Both are released when the
+                // frame retires.
+                VkFence fence = VK_NULL_HANDLE;
+                VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         };
 
         Device *device = nullptr;
@@ -493,6 +521,32 @@ struct Chain::Impl {
         // mismatch means the device was replaced (a device-lost recovery)
         // and the chain has to rebuild itself (ROB-35).
         uint64_t generation = 0;
+        // How many frames may be in flight at once (audit ROB-34). Each
+        // frame gets its own uniform buffers and descriptor sets (a
+        // FrameSlot), so concurrent frames never overwrite each other's
+        // parameters or texture bindings.
+        uint32_t framesInFlight = 1;
+        // The ring of per-frame resources. Sized framesInFlight.
+        std::vector<FrameSlot> frameSlots;
+        // The logical index of the next frame. Every per-frame index (the
+        // pass output buffer, the history ring slot) derives from it, so the
+        // "N frames ago" semantics stay correct when frames overlap.
+        uint64_t frameIndex = 0;
+        // The logical index of the frame currently being prepared. The
+        // texture resolver reads it to pick the right output buffers.
+        uint64_t currentFrameIndex = 0;
+        // The output buffer the current frame writes, and the history ring
+        // slot it writes. Derived from currentFrameIndex.
+        uint32_t currentWriteIndex = 0;
+        uint32_t currentHistorySlot = 0;
+
+        // The output buffer a pass writes in the given frame. A plain pass
+        // has one buffer; a feedback pass has one per in-flight frame plus
+        // one, and cycles through them.
+        static auto WriteIndexFor(const PassRuntime &pass, uint64_t frameIndex) -> uint32_t
+        {
+                return pass.targetCount > 1 ? static_cast<uint32_t>(frameIndex % pass.targetCount) : 0u;
+        }
         // Token of this chain's entry in the device's release registry: the
         // device calls it before it replaces itself, so the chain's
         // resources are destroyed while they still belong to a live device.
@@ -543,7 +597,6 @@ struct Chain::Impl {
         VkPipelineLayout presentPipelineLayout = VK_NULL_HANDLE;
         std::unordered_map<VkFormat, VkPipeline> presentPipelines;
         VkDescriptorSetLayout presentSetLayout = VK_NULL_HANDLE;
-        VkDescriptorSet presentSet = VK_NULL_HANDLE;
         VkSampler presentSampler = VK_NULL_HANDLE;
         VkBuffer presentVertexBuffer = VK_NULL_HANDLE;
         VmaAllocation presentVertexAllocation = VK_NULL_HANDLE;
@@ -623,17 +676,19 @@ struct Chain::Impl {
                         ReleaseGpuHandles();
                         return;
                 }
-                // An async frame may still be in flight: wait for it and
-                // release its fence and command buffer before the device
-                // objects the frame references are destroyed.
-                if (pendingFrame.fence != VK_NULL_HANDLE) {
-                        vkWaitForFences(
-                            device->device(), 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
-                        vkDestroyFence(device->device(), pendingFrame.fence, nullptr);
-                        if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
-                                vkFreeCommandBuffers(device->device(), device->impl().commandPool, 1,
-                                    &pendingFrame.commandBuffer);
-                        pendingFrame = {};
+                // Async frames may still be in flight: wait for them and
+                // release their fences and command buffers before the device
+                // objects the frames reference are destroyed.
+                for (FrameSlot &slot : frameSlots) {
+                        if (slot.fence == VK_NULL_HANDLE)
+                                continue;
+                        vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
+                        vkDestroyFence(device->device(), slot.fence, nullptr);
+                        if (slot.commandBuffer != VK_NULL_HANDLE)
+                                vkFreeCommandBuffers(
+                                    device->device(), device->impl().commandPool, 1, &slot.commandBuffer);
+                        slot.fence = VK_NULL_HANDLE;
+                        slot.commandBuffer = VK_NULL_HANDLE;
                 }
                 DestroyGpuResources();
         }
@@ -646,16 +701,19 @@ struct Chain::Impl {
                 if (device == nullptr)
                         return;
                 VkDevice dev = device->device();
-                // An async frame may still be in flight: wait for it and
-                // release its fence and command buffer before the device
-                // objects the frame references are destroyed.
-                if (pendingFrame.fence != VK_NULL_HANDLE) {
-                        vkWaitForFences(dev, 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
-                        vkDestroyFence(dev, pendingFrame.fence, nullptr);
-                        if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
+                // Async frames may still be in flight: wait for them and
+                // release their fences and command buffers before the device
+                // objects the frames reference are destroyed.
+                for (FrameSlot &slot : frameSlots) {
+                        if (slot.fence == VK_NULL_HANDLE)
+                                continue;
+                        vkWaitForFences(dev, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+                        vkDestroyFence(dev, slot.fence, nullptr);
+                        if (slot.commandBuffer != VK_NULL_HANDLE)
                                 vkFreeCommandBuffers(
-                                    dev, device->impl().commandPool, 1, &pendingFrame.commandBuffer);
-                        pendingFrame = {};
+                                    dev, device->impl().commandPool, 1, &slot.commandBuffer);
+                        slot.fence = VK_NULL_HANDLE;
+                        slot.commandBuffer = VK_NULL_HANDLE;
                 }
                 for (PassRuntime &pass : passes) {
                         for (auto &entry : pass.pipelines) {
@@ -669,10 +727,15 @@ struct Chain::Impl {
                                 vkDestroyShaderModule(dev, pass.fragmentModule, nullptr);
                         for (PassTarget &t : pass.targets)
                                 DestroyPassTarget(t);
-                        for (Ubo &ubo : pass.vertexUbos)
-                                DestroyUbo(ubo);
-                        for (Ubo &ubo : pass.fragmentUbos)
-                                DestroyUbo(ubo);
+                }
+                // The per-frame uniform buffers belong to the frame slots.
+                for (FrameSlot &slot : frameSlots) {
+                        for (auto &passSlot : slot.passes) {
+                                for (Ubo &ubo : passSlot.vertexUbos)
+                                        DestroyUbo(ubo);
+                                for (Ubo &ubo : passSlot.fragmentUbos)
+                                        DestroyUbo(ubo);
+                        }
                 }
                 DestroyHistory();
                 DestroySourceMipCopy();
@@ -733,17 +796,25 @@ struct Chain::Impl {
                         pass.pipelineLayout = VK_NULL_HANDLE;
                         pass.vertexModule = VK_NULL_HANDLE;
                         pass.fragmentModule = VK_NULL_HANDLE;
-                        pass.set1 = VK_NULL_HANDLE;
-                        pass.set2 = VK_NULL_HANDLE;
-                        pass.set3 = VK_NULL_HANDLE;
-                        // The pass targets and UBOs own images/views/buffers;
-                        // forget them without destroying (see above).
+                        // The pass targets own images/views; forget them
+                        // without destroying (see above).
                         for (PassTarget &t : pass.targets)
                                 t = {};
-                        for (Ubo &ubo : pass.vertexUbos)
-                                ubo = {};
-                        for (Ubo &ubo : pass.fragmentUbos)
-                                ubo = {};
+                }
+                // The per-frame slots own the uniform buffers and the
+                // descriptor sets the frames use.
+                for (FrameSlot &slot : frameSlots) {
+                        for (auto &passSlot : slot.passes) {
+                                for (Ubo &ubo : passSlot.vertexUbos)
+                                        ubo = {};
+                                for (Ubo &ubo : passSlot.fragmentUbos)
+                                        ubo = {};
+                                passSlot.set1 = VK_NULL_HANDLE;
+                                passSlot.set2 = VK_NULL_HANDLE;
+                                passSlot.set3 = VK_NULL_HANDLE;
+                        }
+                        slot.presentSet = VK_NULL_HANDLE;
+                        slot.fence = VK_NULL_HANDLE;
                 }
                 // The history ring and the pass-0 mip copy own images too.
                 history.slots.clear();
@@ -771,7 +842,6 @@ struct Chain::Impl {
                 presentFragmentModule = VK_NULL_HANDLE;
                 presentPipelineLayout = VK_NULL_HANDLE;
                 presentSetLayout = VK_NULL_HANDLE;
-                presentSet = VK_NULL_HANDLE;
                 presentSampler = VK_NULL_HANDLE;
                 presentVertexBuffer = VK_NULL_HANDLE;
                 presentVertexAllocation = VK_NULL_HANDLE;
@@ -960,7 +1030,11 @@ struct Chain::Impl {
         auto MakeHistorySlots(uint32_t width, uint32_t height) -> std::expected<void, Error>
         {
                 DestroyHistory();
-                const uint32_t count = historyDepth + 1;
+                // The ring holds the referenced history plus one slot per
+                // frame in flight: a frame reads the slot N frames back, and
+                // the frames in flight must not overwrite it before it is
+                // read (audit ROB-34).
+                const uint32_t count = historyDepth + std::max(framesInFlight, 1u);
                 history.slots.resize(count);
                 for (uint32_t i = 0; i < count; ++i) {
                         VkImageWithView &s = history.slots[i];
@@ -1441,15 +1515,6 @@ struct Chain::Impl {
                 return set;
         }
 
-        // The single async frame that may be in flight (ROB-33). The chain
-        // owns the fence and the recorded command buffer until the frame
-        // retires; wait_async() (or the next render_async()) reclaims both.
-        struct PendingFrame {
-                VkFence fence = VK_NULL_HANDLE;
-                VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        };
-        PendingFrame pendingFrame;
-
         // Rebuilds the device, the preset's LUT textures and this chain's
         // resources after a device loss (ROB-35).
         //
@@ -1519,28 +1584,30 @@ struct Chain::Impl {
                 return {};
         }
 
-        // Waits for the in-flight async frame (if any) and reclaims its
-        // fence and command buffer. Called at the start of every
-        // render_async() so a chain never has two frames recording into the
-        // same descriptor sets at once.
-        auto WaitPendingFrame() -> std::expected<void, Error>
+        // Waits for the frame occupying a slot to retire and reclaims its
+        // fence and command buffer. A slot is reused only after its previous
+        // occupant finished, so the frame's uniform buffers and descriptor
+        // sets are never overwritten while the GPU is still reading them.
+        auto WaitSlotFrame(FrameSlot &slot) -> std::expected<void, Error>
         {
-                if (pendingFrame.fence == VK_NULL_HANDLE)
+                if (slot.fence == VK_NULL_HANDLE)
                         return {};
-                const VkResult waited = vkWaitForFences(
-                    device->device(), 1, &pendingFrame.fence, VK_TRUE, UINT64_MAX);
+                const VkResult waited
+                    = vkWaitForFences(device->device(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
                 if (waited != VK_SUCCESS) {
                         // The device may be gone; the objects are dead either
                         // way, so drop them without further Vulkan calls.
-                        pendingFrame = {};
+                        slot.fence = VK_NULL_HANDLE;
+                        slot.commandBuffer = VK_NULL_HANDLE;
                         return std::unexpected(SLV_VKERR(waited,
                             ::slv::vk::VkErrorCode(waited, Errc::vk_error), "vkWaitForFences"));
                 }
-                vkDestroyFence(device->device(), pendingFrame.fence, nullptr);
-                if (pendingFrame.commandBuffer != VK_NULL_HANDLE)
+                vkDestroyFence(device->device(), slot.fence, nullptr);
+                slot.fence = VK_NULL_HANDLE;
+                if (slot.commandBuffer != VK_NULL_HANDLE)
                         vkFreeCommandBuffers(
-                            device->device(), device->impl().commandPool, 1, &pendingFrame.commandBuffer);
-                pendingFrame = {};
+                            device->device(), device->impl().commandPool, 1, &slot.commandBuffer);
+                slot.commandBuffer = VK_NULL_HANDLE;
                 return {};
         }
 
@@ -1613,20 +1680,24 @@ struct Chain::Impl {
         set3Info.pBindings = set3Bindings;
         SLV_VK(vkCreateDescriptorSetLayout(device->device(), &set3Info, nullptr, &set3Layout), Errc::vk_error);
 
-        // Descriptor pool: worst case 4 sets per pass + uniform/sampler counts,
-        // plus the M4 present set.
+        // Descriptor pool: every frame slot needs its own descriptor sets
+        // (3 per pass + 1 for the M4 present draw), so the pool is sized for
+        // framesInFlight slots.
         VkDescriptorPoolSize poolSizes[2]{};
         // Worst case 2 UBOs x 2 stages per pass (bindings 0 and 1; the
-        // push-constant re-home can occupy binding 1 of either set).
-        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(4 * passCount)};
+        // push-constant re-home can occupy binding 1 of either set), per
+        // frame slot.
+        const uint32_t slots = std::max(framesInFlight, 1u);
+        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(4 * slots * passCount)};
         uint32_t samplerCount = 0;
         for (const SlangTranslation &translation : presetTranslations)
                 samplerCount += static_cast<uint32_t>(translation.fragment.textures.size());
-        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(samplerCount, 1u) + 1};
+        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                          std::max(samplerCount, 1u) * slots + slots};
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = static_cast<uint32_t>(4 * passCount) + 1;
+        poolInfo.maxSets = static_cast<uint32_t>(3 * slots * passCount) + slots;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = poolSizes;
         SLV_VK(vkCreateDescriptorPool(device->device(), &poolInfo, nullptr, &descriptorPool), Errc::vk_error);
@@ -1663,8 +1734,15 @@ struct Chain::Impl {
                         }
                 }
         }
-        for (size_t i = 0; i < passCount; ++i)
-                passes[i].targetCount = passes[i].feedbackRead ? 2u : 1u;
+        // A feedback pass needs one output buffer per in-flight frame plus
+        // one: the reader samples the previous frame's output, which must not
+        // be the buffer the current frame writes.
+        for (size_t i = 0; i < passCount; ++i) {
+                passes[i].targetCount = passes[i].feedbackRead ? framesInFlight + 1u : 1u;
+                // The output buffers are allocated lazily (their size depends
+                // on the resolved pass output size).
+                passes[i].targets.resize(passes[i].targetCount);
+        }
         for (const SlangTranslation &translation : presetTranslations)
                 for (const TextureRef &ref : translation.fragment.textures)
                         if (ref.name.size() > 15 && ref.name.compare(0, 15, "OriginalHistory") == 0) {
@@ -1698,6 +1776,9 @@ struct Chain::Impl {
                 const VkDescriptorSetLayout set2Layout = GetSet2Layout(textureCount);
                 if (set2Layout == VK_NULL_HANDLE)
                         return std::unexpected(SLV_ERROR(Errc::vk_error, "set2 layout creation failed"));
+                pass.hasVertexUbo = hasVertexUbo;
+                pass.hasFragmentUbo = hasFragmentUbo;
+                pass.set2Layout = set2Layout;
                 std::array<VkDescriptorSetLayout, 4> setLayouts = {emptyLayout,
                     hasVertexUbo ? set1Layout : emptyLayout, set2Layout,
                     hasFragmentUbo ? set3Layout : emptyLayout};
@@ -1721,58 +1802,75 @@ struct Chain::Impl {
                 if (!madePipeline)
                         return std::unexpected(madePipeline.error());
 
-                // Descriptor sets (empty slots bound as real empty sets).
-                pass.set1 = AllocateSet(hasVertexUbo ? set1Layout : emptyLayout);
-                pass.set2 = AllocateSet(set2Layout);
-                pass.set3 = AllocateSet(hasFragmentUbo ? set3Layout : emptyLayout);
-                if (pass.set1 == VK_NULL_HANDLE || pass.set2 == VK_NULL_HANDLE || pass.set3 == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "descriptor set allocation failed"));
-
-                // UBOs sized by the reflected blocks; UBO descriptors written
-                // once, at each block's own binding (0 = plain UBO, 1 = second
-                // plain UBO or the re-homed push-constant block).
-                for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
-                        if (block.binding >= 2)
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                                    "vertex uniform block binding out of range: " + block.instanceName));
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = MakeUbo(bytes, pass.vertexUbos[block.binding]);
-                        if (!made)
-                                return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.vertexUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set1;
-                        write.dstBinding = block.binding;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
-                }
-                for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
-                        if (block.binding >= 2)
-                                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                                    "fragment uniform block binding out of range: " + block.instanceName));
-                        uint32_t bytes = 16;
-                        for (const UniformMember &member : block.members)
-                                bytes = std::max(bytes, member.offset + member.size);
-                        auto made = MakeUbo(bytes, pass.fragmentUbos[block.binding]);
-                        if (!made)
-                                return std::unexpected(made.error());
-                        VkDescriptorBufferInfo bufferInfo{pass.fragmentUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = pass.set3;
-                        write.dstBinding = block.binding;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfo;
-                        vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
-                }
         }
 
+        // Per-frame resources. Each frame slot gets its own descriptor sets
+        // (empty slots bound as real empty sets) and its own uniform buffers,
+        // so frames in flight at the same time never overwrite each other's
+        // parameter values (audit ROB-34).
+        frameSlots.resize(slots);
+        for (uint32_t slotIndex = 0; slotIndex < slots; ++slotIndex) {
+                FrameSlot &slot = frameSlots[slotIndex];
+                slot.passes.resize(passCount);
+                for (size_t i = 0; i < passCount; ++i) {
+                        Chain::Impl::PassRuntime &pass = passes[i];
+                        FrameSlot::PassSlot &passSlot = slot.passes[i];
+
+                        passSlot.set1 = AllocateSet(pass.hasVertexUbo ? set1Layout : emptyLayout);
+                        passSlot.set2 = AllocateSet(pass.set2Layout);
+                        passSlot.set3 = AllocateSet(pass.hasFragmentUbo ? set3Layout : emptyLayout);
+                        if (passSlot.set1 == VK_NULL_HANDLE || passSlot.set2 == VK_NULL_HANDLE
+                            || passSlot.set3 == VK_NULL_HANDLE)
+                                return std::unexpected(SLV_ERROR(Errc::vk_error, "descriptor set allocation failed"));
+
+                        // UBOs sized by the reflected blocks; UBO descriptors
+                        // written once, at each block's own binding (0 = plain
+                        // UBO, 1 = second plain UBO or the re-homed push-constant
+                        // block).
+                        for (const UniformBlock &block : pass.translation.vertex.uniformBlocks) {
+                                if (block.binding >= 2)
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            "vertex uniform block binding out of range: " + block.instanceName));
+                                uint32_t bytes = 16;
+                                for (const UniformMember &member : block.members)
+                                        bytes = std::max(bytes, member.offset + member.size);
+                                auto made = MakeUbo(bytes, passSlot.vertexUbos[block.binding]);
+                                if (!made)
+                                        return std::unexpected(made.error());
+                                VkDescriptorBufferInfo bufferInfo{
+                                    passSlot.vertexUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
+                                VkWriteDescriptorSet write{};
+                                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                write.dstSet = passSlot.set1;
+                                write.dstBinding = block.binding;
+                                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                                write.descriptorCount = 1;
+                                write.pBufferInfo = &bufferInfo;
+                                vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
+                        }
+                        for (const UniformBlock &block : pass.translation.fragment.uniformBlocks) {
+                                if (block.binding >= 2)
+                                        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+                                            "fragment uniform block binding out of range: " + block.instanceName));
+                                uint32_t bytes = 16;
+                                for (const UniformMember &member : block.members)
+                                        bytes = std::max(bytes, member.offset + member.size);
+                                auto made = MakeUbo(bytes, passSlot.fragmentUbos[block.binding]);
+                                if (!made)
+                                        return std::unexpected(made.error());
+                                VkDescriptorBufferInfo bufferInfo{
+                                    passSlot.fragmentUbos[block.binding].buffer, 0, VK_WHOLE_SIZE};
+                                VkWriteDescriptorSet write{};
+                                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                write.dstSet = passSlot.set3;
+                                write.dstBinding = block.binding;
+                                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                                write.descriptorCount = 1;
+                                write.pBufferInfo = &bufferInfo;
+                                vkUpdateDescriptorSets(device->device(), 1, &write, 0, nullptr);
+                        }
+                }
+        }
         // Fullscreen unit quad: positions in [0,1], uv = position (Vulkan-native
         // orientation; see the MVP comment at the top of this file).
         static constexpr float kQuad[4][6] = {
@@ -1848,9 +1946,14 @@ struct Chain::Impl {
                 SLV_VK(vkCreatePipelineLayout(device->device(), &presentPipelineLayoutInfo, nullptr,
                     &presentPipelineLayout), Errc::vk_error);
 
-                presentSet = AllocateSet(presentSetLayout);
-                if (presentSet == VK_NULL_HANDLE)
-                        return std::unexpected(SLV_ERROR(Errc::vk_error, "present descriptor set allocation failed"));
+                // One present set per frame slot: the present draw samples the
+                // final pass's output, which differs per frame (audit ROB-34).
+                for (FrameSlot &slot : frameSlots) {
+                        slot.presentSet = AllocateSet(presentSetLayout);
+                        if (slot.presentSet == VK_NULL_HANDLE)
+                                return std::unexpected(
+                                    SLV_ERROR(Errc::vk_error, "present descriptor set allocation failed"));
+                }
 
                 // Linear + clamp-to-edge: the reference host's present blit
                 // filtering (letterbox edges never wrap; sampling stays inside
@@ -1950,7 +2053,12 @@ auto ResolveTexture(const std::string &name, size_t passIndex, Chain::Impl &impl
         };
         const auto passOutputView = [&](size_t idx, bool previousFrame) -> VkImageView {
                 const Chain::Impl::PassRuntime &owner = impl.passes[idx];
-                const uint32_t buffer = previousFrame ? 1u - owner.writeIndex : owner.writeIndex;
+                const uint32_t write = Chain::Impl::WriteIndexFor(owner, impl.currentFrameIndex);
+                // A feedback reader samples the PREVIOUS frame's output: the
+                // buffer before the one this frame writes.
+                const uint32_t buffer = previousFrame
+                                                ? (write + owner.targetCount - 1) % owner.targetCount
+                                                : write;
                 return owner.targets[buffer].img.view;
         };
 
@@ -2104,6 +2212,10 @@ auto Chain::create(Device &device, const Preset &preset, const ChainOptions &opt
         impl.targetWidth = options.outputWidth;
         impl.targetHeight = options.outputHeight;
         impl.targetFormat = options.outputFormat;
+        // How many frames may be in flight at once (audit ROB-34). Clamped to
+        // a sane range: each frame costs a set of framebuffers, uniform
+        // buffers and descriptor sets per pass.
+        impl.framesInFlight = std::clamp(options.framesInFlight, 1u, 8u);
         // The preset is borrowed, not owned: a rebuild after a device-lost
         // recovery re-reads the preset's pass data and LUT images.
         impl.preset = &preset;
@@ -2180,16 +2292,6 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
 {
         Impl &impl = *impl_;
 
-        // At most one async frame may be in flight per chain: the frame's
-        // descriptor writes (set2 texture bindings, the present sampler) are
-        // updated in place on the chain's shared descriptor sets, so a second
-        // frame cannot be recorded while the first is still executing. Drain
-        // the previous frame first; the host still gets real overlap between
-        // render_async() and wait_async().
-        auto drained = impl.WaitPendingFrame();
-        if (!drained)
-                return std::unexpected(drained.error());
-
         // The device may have been replaced since the last frame (the host
         // called Device::recover(), or an earlier frame triggered a
         // recovery). The chain's resources belong to the old device, so they
@@ -2199,6 +2301,31 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                 if (!refreshed)
                         return std::unexpected(refreshed.error());
         }
+
+        // Acquire the frame slot for this frame. The slot owns the uniform
+        // buffers and descriptor sets the frame uses, so frames in flight at
+        // the same time never overwrite each other's parameter values or
+        // texture bindings (audit ROB-34).
+        //
+        // When the slot is still occupied by an earlier frame, that frame
+        // has to retire first: its slot would otherwise be overwritten while
+        // it is still executing. Waiting here is the backpressure that caps
+        // the overlap at the configured number of frames in flight.
+        if (impl.frameSlots.empty())
+                return std::unexpected(SLV_ERROR(Errc::vk_error, "render: the chain has no frame slots"));
+        const uint32_t slotIndex = static_cast<uint32_t>(impl.frameIndex % impl.frameSlots.size());
+        Chain::Impl::FrameSlot &slot = impl.frameSlots[slotIndex];
+        // The slot's previous occupant has to retire before the slot is
+        // reused: its uniform buffers and descriptor sets are about to be
+        // overwritten. Waiting here is the backpressure that caps the
+        // overlap at the configured number of frames in flight.
+        auto drained = impl.WaitSlotFrame(slot);
+        if (!drained)
+                return std::unexpected(drained.error());
+        impl.currentFrameIndex = impl.frameIndex;
+        // The output buffer the final pass writes in this frame.
+        const uint32_t lastWriteIndex
+            = Chain::Impl::WriteIndexFor(impl.passes.back(), impl.currentFrameIndex);
         if (input.view == VK_NULL_HANDLE || input.width == 0 || input.height == 0)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "render: invalid input frame"));
         if (input.pixelBuffer != VK_NULL_HANDLE && input.image == VK_NULL_HANDLE)
@@ -2282,8 +2409,10 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         auto made = impl.MakePassTarget(pass, 0, pass.outputWidth, pass.outputHeight, false);
                         if (!made)
                                 return std::unexpected(made.error());
-                        if (pass.targetCount == 2) {
-                                made = impl.MakePassTarget(pass, 1, pass.outputWidth, pass.outputHeight, true);
+                        // The remaining buffers are cleared to black so a
+                        // first-frame feedback sample is defined (SPEC 5.3).
+                        for (uint32_t t = 1; t < pass.targetCount; ++t) {
+                                made = impl.MakePassTarget(pass, t, pass.outputWidth, pass.outputHeight, true);
                                 if (!made)
                                         return std::unexpected(made.error());
                         }
@@ -2366,7 +2495,11 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         impl.history.slot = 0;
                         impl.history.seeded = true;
                 } else {
-                        impl.history.slot = (impl.history.slot + 1) % impl.history.slots.size();
+                        // The slot a frame fills follows the frame's logical
+                        // index, so the "N frames ago" lookup stays correct
+                        // when frames overlap.
+                        impl.history.slot = static_cast<uint32_t>(
+                            impl.currentFrameIndex % impl.history.slots.size());
                 }
         }
 
@@ -2418,7 +2551,7 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                                             "vertex uniform block binding out of range: " + block.instanceName));
                                 const std::vector<uint8_t> bytes = vk::FillBlockBytes(
                                     block, pass.def, pass.translation, effectiveOverrides, ctx);
-                                const Chain::Impl::Ubo &ubo = pass.vertexUbos[block.binding];
+                                const Chain::Impl::Ubo &ubo = slot.passes[i].vertexUbos[block.binding];
                                 if (bytes.size() > static_cast<size_t>(ubo.size))
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument, "vertex UBO overflow"));
                                 if (ubo.mapped != nullptr)
@@ -2433,7 +2566,7 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                                             "fragment uniform block binding out of range: " + block.instanceName));
                                 const std::vector<uint8_t> bytes = vk::FillBlockBytes(
                                     block, pass.def, pass.translation, effectiveOverrides, ctx);
-                                const Chain::Impl::Ubo &ubo = pass.fragmentUbos[block.binding];
+                                const Chain::Impl::Ubo &ubo = slot.passes[i].fragmentUbos[block.binding];
                                 if (bytes.size() > static_cast<size_t>(ubo.size))
                                         return std::unexpected(SLV_ERROR(Errc::invalid_argument, "fragment UBO overflow"));
                                 if (ubo.mapped != nullptr)
@@ -2457,7 +2590,8 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         fallbackSource = impl.useSourceMipCopy ? impl.sourceMipCopy.view : input.view;
                 else {
                         const Chain::Impl::PassRuntime &prev = impl.passes[i - 1];
-                        fallbackSource = prev.targets[prev.writeIndex].img.view;
+                        fallbackSource = prev.targets[Chain::Impl::WriteIndexFor(prev, impl.currentFrameIndex)]
+                                            .img.view;
                 }
                 std::vector<VkDescriptorImageInfo> imageInfos(textureCount);
                 std::vector<VkWriteDescriptorSet> writes(textureCount);
@@ -2469,7 +2603,7 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         if (!resolved)
                                 return std::unexpected(resolved.error());
                         imageInfos[t] = {sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-                        writes[t] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, pass.set2,
+                        writes[t] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.passes[i].set2,
                             static_cast<uint32_t>(t), 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                             &imageInfos[t], nullptr, nullptr};
                 }
@@ -2559,10 +2693,10 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
 
                 // Present descriptor: the final pass's freshly written buffer
                 // (SHADER_READ_ONLY after its render pass).
-                const VkImageView presentSrcView = lastPass.targets[lastPass.writeIndex].img.view;
+                const VkImageView presentSrcView = lastPass.targets[lastWriteIndex].img.view;
                 VkDescriptorImageInfo presentImage{
                     impl.presentSampler, presentSrcView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-                VkWriteDescriptorSet presentWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, impl.presentSet,
+                VkWriteDescriptorSet presentWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.presentSet,
                     0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &presentImage, nullptr, nullptr};
                 vkUpdateDescriptorSets(impl.device->device(), 1, &presentWrite, 0, nullptr);
 
@@ -2735,14 +2869,15 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                 restoreInput();
 
                 // (c) Passes. A mip-reading pass gets its input pass's mip
-                // chain refilled right before it binds (F1); double-buffered
-                // passes write targets[writeIndex] while feedback readers
-                // sample targets[1 - writeIndex] (SPEC 5.3).
+                // chain refilled right before it binds (F1); feedback passes
+                // write the output buffer this frame owns while feedback
+                // readers sample the previous frame's buffer (SPEC 5.3).
                 for (size_t i = 0; i < impl.passes.size(); ++i) {
                         Chain::Impl::PassRuntime &pass = impl.passes[i];
                         if (i > 0 && pass.def.mipmapInput) {
                                 Chain::Impl::PassRuntime &src = impl.passes[i - 1];
-                                RecordMipChain(cmd, src.targets[src.writeIndex].img.image, src.mipLevels,
+                                const uint32_t srcWrite = Chain::Impl::WriteIndexFor(src, impl.currentFrameIndex);
+                                RecordMipChain(cmd, src.targets[srcWrite].img.image, src.mipLevels,
                                     src.allocatedWidth, src.allocatedHeight, false);
                         }
                         const bool isLast = i + 1 == impl.passes.size();
@@ -2754,8 +2889,9 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         VkRenderPassBeginInfo beginInfo{};
                         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
                         beginInfo.renderPass = impl.GetRenderPass(rendersToHost ? impl.targetFormat : pass.targetFormat);
+                        const uint32_t passWrite = Chain::Impl::WriteIndexFor(pass, impl.currentFrameIndex);
                         beginInfo.framebuffer = rendersToHost ? outputFramebuffer
-                                                              : pass.targets[pass.writeIndex].framebuffer;
+                                                              : pass.targets[passWrite].framebuffer;
                         beginInfo.renderArea = {{0, 0}, {outW, outH}};
                         std::array<float, 4> black = {0.F, 0.F, 0.F, 1.F};
                         beginInfo.clearValueCount = 1;
@@ -2768,7 +2904,8 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, passPipeline);
-                        std::array<VkDescriptorSet, 4> sets = {impl.emptySet, pass.set1, pass.set2, pass.set3};
+                        std::array<VkDescriptorSet, 4> sets = {impl.emptySet, slot.passes[i].set1,
+                            slot.passes[i].set2, slot.passes[i].set3};
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass.pipelineLayout, 0,
                             static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
                         const VkDeviceSize offset = 0;
@@ -2801,7 +2938,7 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
 
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, presentPipeline);
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, impl.presentPipelineLayout, 0,
-                            1, &impl.presentSet, 0, nullptr);
+                            1, &slot.presentSet, 0, nullptr);
                         const VkDeviceSize presentOffset = 0;
                         vkCmdBindVertexBuffers(cmd, 0, 1, &impl.presentVertexBuffer, &presentOffset);
                         vkCmdDraw(cmd, 4, 1, 0, 0);
@@ -2814,7 +2951,7 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                 // image (nearest — sizes are equal).
                 if (feedbackDirectResolve) {
                         Chain::Impl::PassRuntime &lastPass = impl.passes.back();
-                        const VkImage srcImage = lastPass.targets[lastPass.writeIndex].img.image;
+                        const VkImage srcImage = lastPass.targets[lastWriteIndex].img.image;
                         BarrierMipLevel(cmd, srcImage, 0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -2859,16 +2996,11 @@ auto Chain::render_async(const InputFrame &input, const OutputTarget &target, co
                 return std::unexpected(submitted.error());
         }
 
-        // Double-buffered passes flip AFTER the frame is recorded (SPEC 5.3):
-        // this frame's write buffer becomes the next frame's feedback source.
-        // The flip happens at record time (not at wait time) so the recorded
-        // commands and the next frame's descriptor writes agree on which
-        // buffer holds frame T-N.
-        for (Chain::Impl::PassRuntime &pass : impl.passes)
-                if (pass.targetCount == 2)
-                        pass.writeIndex ^= 1u;
-
-        impl.pendingFrame = Chain::Impl::PendingFrame{fence, *recorded};
+        slot.fence = fence;
+        slot.commandBuffer = *recorded;
+        // The next frame gets the next logical index: the output buffer it
+        // writes and the history slot it fills are derived from it.
+        ++impl.frameIndex;
         return fence;
 }
 
@@ -2908,10 +3040,12 @@ auto Chain::wait_async(VkFence fence) -> std::expected<void, Error>
         Impl &impl = *impl_;
         if (fence == VK_NULL_HANDLE)
                 return std::unexpected(SLV_ERROR(Errc::invalid_argument, "wait_async: null fence"));
-        if (impl.pendingFrame.fence != fence)
-                return std::unexpected(SLV_ERROR(Errc::invalid_argument,
-                    "wait_async: fence does not belong to this chain's pending frame"));
-        return impl.WaitPendingFrame();
+        for (Chain::Impl::FrameSlot &slot : impl.frameSlots) {
+                if (slot.fence == fence)
+                        return impl.WaitSlotFrame(slot);
+        }
+        return std::unexpected(SLV_ERROR(Errc::invalid_argument,
+            "wait_async: the fence is not one of this chain's frames in flight"));
 }
 
 } // namespace slv

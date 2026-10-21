@@ -339,6 +339,34 @@ typedef struct slangvk_offscreen {
 slangvk_result slangvk_chain_create(slangvk_device *device, const slangvk_preset *preset,
     uint32_t output_width, uint32_t output_height, VkFormat output_format, slangvk_chain **out_chain);
 
+/**
+ * @brief Options for a render chain (mirrors slv::ChainOptions).
+ */
+typedef struct slangvk_chain_options {
+        uint32_t output_width;   /**< Final output target size. */
+        uint32_t output_height;  /**< Final output target size. */
+        VkFormat output_format;  /**< 0 = VK_FORMAT_R8G8B8A8_UNORM. */
+        /**
+         * @brief How many frames the chain may have in flight at once.
+         *
+         * 1 (the default) is the historical behaviour: the next frame waits
+         * for the previous one. Higher values let the host keep several
+         * frames on the GPU at once, at the cost of that many sets of
+         * framebuffers, uniform buffers and descriptor sets per pass. Values
+         * above 8 are clamped.
+         */
+        uint32_t frames_in_flight; /**< 0 = 1. */
+} slangvk_chain_options;
+
+/**
+ * @brief Creates a render chain with explicit options.
+ *
+ * The same contract as slangvk_chain_create(), plus the number of frames
+ * the chain may have in flight at once.
+ */
+slangvk_result slangvk_chain_create_ex(slangvk_device *device, const slangvk_preset *preset,
+    const slangvk_chain_options *options, slangvk_chain **out_chain);
+
 void slangvk_chain_destroy(slangvk_chain *chain);
 
 /**
