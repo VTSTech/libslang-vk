@@ -13,8 +13,8 @@ Where this file and PROVENANCE.md disagree, PROVENANCE.md is authoritative and t
 
 ## Evidence base (what every status below cites)
 
-**26/26 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19):
-`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
+**29/29 ctest** (lavapipe-class software rasterizer, Release GCC 14.2 — PROVENANCE M4 exit + the maintainer's `runner_pushblock` field canary, 2026-10-18; 25→26 with `example_conformance_drill`, 2026-10-19; 26→29 with the M4.06 `runner_async` / `runner_recovery` tests, 2026-10-21):
+`preset_parser` · `slang_translate` · `slang_compile` · `field_round1..4` · `history_ring` · `mipmap_plan` · `uniform_names` · `viewport_derive` · `rotation_format` · `runner_headless` · `runner_m2` · `runner_m3` · `runner_m4` · `runner_pushblock` · `runner_async` · `runner_recovery` · `example_conformance_golden` · `example_conformance_perf` · `example_conformance_drill` · `example_preset_info_demo-bright` · `example_preset_info_demo-glow` · `example_corpus_sweep_smoke` · `example_shader_demo_list` · `example_shader_demo_headless` · `example_shader_demo_headless_pattern`.
 Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK=OFF` (14/14), live validation-error gate (proven non-vacuous by a deliberate-error probe collecting 2 VUIDs). 2026-10-18: the suite additionally runs clean **under synchronization validation** (A/B-verified locally on a user-space SwiftShader ICD with user-space Khronos validation layers — no sudo required — after the gate's first live CI run exposed real defects, see the miss list #2 note).
 
 **Post-M4.02 maintenance waves (2026-10-18, per CHANGELOG M4.03/M4.04):**
@@ -104,6 +104,26 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 
 ---
 
+## M4.06 — async frames + device-lost recovery (audit ROB-33 / ROB-35)
+
+| Item | Status | Evidence / gap |
+|---|---|---|
+| Async frame path (`render_async` + `wait_async`) | ✅ | `runner_async`: an async frame is **byte-identical** to the synchronous `render()`; four back-to-back async frames succeed; `wait_async()` rejects a null and a foreign fence. `render()` is now `render_async()` + `wait_async()` (one recording implementation) — the pre-existing runner suite is unchanged and green |
+| Record / submit / wait split | ✅ | `Device::Impl::RecordCommandBuffer()` + `SubmitRecorded()`; `SubmitAndWait()` frees its own command buffer instead of `vkResetCommandPool` (a pool-wide reset would free a command buffer still in flight on an async submission) |
+| Feedback double-buffer flip vs. record time | ✅ | Moved from "after the frame completed" to "after the frame was recorded", so the recorded commands and the next frame's descriptor writes agree on which buffer holds frame T-N; the `runner_m2` feedback cases stay green |
+| One async frame in flight per chain | ✅ (documented limit) | The frame's texture bindings are written in place into the chain's shared descriptor sets, so `render_async()` drains the previous frame first. Command-buffer pooling, timeline semaphores and multiple in-flight frames per chain are **not** implemented — recorded as future work, not claimed |
+| Device-lost detection is precise | ✅ | `vk::VkErrorCode()` maps `VK_ERROR_DEVICE_LOST` to `Errc::vk_device_lost` at every call site; the previous message-string sniff is gone. New `Errc::device_lost_recovery_failed` |
+| `Device::recover()` + `generation()` | ✅ | Rebuilds the `VkDevice`, its command pool and the allocator from the same instance + physical device; `generation()` is bumped per recovery. An adopted device is reported `unsupported_feature` (it stays the host's to recreate) |
+| Preset / chain rebuild | ✅ | `Preset::rebuildLuts()` (const — the preset's pass data survives a device loss) and `Chain::rebuild()`; `Chain::create` was split into `Chain::Impl::BuildAll` so it can be re-run |
+| Automatic recovery in `render()` | ✅ | Detects the loss, rebuilds the device, the preset's textures and the chain, then reports `vk_device_lost` **without retrying the frame** — the host's own images died with the device and the library cannot recreate them, so the host recreates them and renders again |
+| Release before the device is replaced | ✅ | The device keeps a registry of the objects created on it (chains, presets, images) and releases them before swapping the device, so they are destroyed while they still belong to a live device. Without it, objects that were merely dropped leaked (a destroyed device does not reliably reclaim its objects' memory) and destroying the VMA allocator with live allocations aborts in VMA's assertion |
+| Stale-object release is safe | ✅ | `Image`/`Chain`/`Preset` remember the generation they were created on and forget their handles rather than destroying them through the new device; `Image::update()` reports `vk_device_lost` instead of using stale handles |
+| C surface | ✅ | `slangvk_device_recover()`; `SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED` keeps `slangvk_result` aligned with `slv::Errc` code-for-code |
+| Recovery is best-effort | ✅ (documented limit) | A driver that lost the device may also refuse to hand out a new one; `recover()` then reports the failure and the host is expected to re-create the whole `Device` |
+| A real `VK_ERROR_DEVICE_LOST` cannot be provoked in a test | 🔶 (test limitation, stated) | `runner_recovery` drives the recovery machinery through the same path a device loss takes (the device is replaced, so every object on it is gone). The driver-fault case itself is not exercised |
+
+---
+
 ## Cross-cutting contract claims (§2 goals, §8 design, §4 policy)
 
 | Claim | Status | Note |
@@ -117,7 +137,7 @@ Also verified per milestone exit: ASan/UBSan build, core-only `SLANGVK_ENABLE_VK
 | Goal 6: dual distribution | ✅ | Now distributed per toolchain by CI artifacts (same-toolchain ABI documented, `export.h`) |
 | §8: VMA-backed allocation, stage-masked barriers | ✅ | PROVENANCE M1/M2 |
 | §8: sampler cache bounded+keyed / `trim()` hook | ✅ (divergence) | Sampler cache in; **`trim()` hook moved to the post-1.0 lever list** (miss list #8, 2026-10-18): PROVENANCE divergence #6 + plan §13 item 7 — v1 caches are per-`Chain` and freed wholesale, so no incremental trim surface exists to expose |
-| §8: timeline semaphores | ✅ | Explicitly "reserved for future async-upload path" — not a gap |
+| §8: timeline semaphores | ✅ | Explicitly "reserved for future async-upload path" — not a gap. The M4.06 async path (`render_async`/`wait_async`) deliberately does **not** use them: it is fence-based and limited to one frame in flight per chain (see the M4.06 section) |
 | §4: `scan_codefindings.py` provenance CI gate before every release | ✅ | `tools/scan_codefindings.py` + `provenance` CI job (2026-10-18, miss list #9 — runs every push, stricter than the release-only plan) |
 | §5.1 module map (`src/interop/`, `corpus/`, `tools/`) | ✅ | Map corrected 2026-10-18 (miss list #13): interop types → `runner.hpp`, corpus fixtures → `tests/data/`, `tools/` now real (scanner) |
 | Risk 3 levers: `SLANGVK_SYSTEM_GLSLANG`, LTO/`-Oz` | ✅ | Implemented as opt-in CMake options 2026-10-18 (miss list #13): `SLANGVK_SYSTEM_GLSLANG` (find_package CONFIG vs pinned FetchContent), `SLANGVK_LTO` (IPO + `-Oz` release codegen, configure-time capability check); default build unchanged |

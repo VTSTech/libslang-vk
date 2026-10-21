@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.06 (2026-06-18). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
+| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.06 (2026-10-21). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
 | **Audience** | Host-application authors consuming libslang-vk; maintainers reviewing the M5 freeze. |
 | **Companion docs** | [SPEC.md](SPEC.md) (preset-format contract) · [PLAN.md](PLAN.md) (design rationale, §6 sketch → this document) · [CHECKLIST.md](CHECKLIST.md) (implementation status) · [CHANGELOG.md](CHANGELOG.md) |
 | **Header of record** | Everything here is generated from the headers under `include/slangvk/`; if code and this file disagree, the headers win and this file gets fixed. |
@@ -65,7 +65,7 @@ struct Error {
 };
 ```
 
-Failure contract, inherited verbatim from the reference host: **any** load or run error comes back as the error channel — the host owns degradation (in DevilutionX: fall back to the stock renderer, never `app_fatal`). A failed `Preset::load` leaves no partial state; a failed `Chain::render` leaves the chain reusable for the next frame unless the error is `vk_device_lost` (then the device is gone and the host must recreate).
+Failure contract, inherited verbatim from the reference host: **any** load or run error comes back as the error channel — the host owns degradation (in DevilutionX: fall back to the stock renderer, never `app_fatal`). A failed `Preset::load` leaves no partial state; a failed `Chain::render` leaves the chain reusable for the next frame. The one exception is `vk_device_lost`: the device is gone, so the chain rebuilds the device, the preset's textures and itself (M4.06) and then reports the error — the host must recreate its own images before rendering again.
 
 ## 4. Core layer (`slv::preset`) — GPU-agnostic
 
@@ -181,6 +181,25 @@ public:
     auto graphicsFamily() const -> uint32_t;
     auto properties() const -> const VkPhysicalDeviceProperties&;
     auto waitIdle() const -> std::expected<void, Error>;
+
+    /**
+     * @brief Rebuilds the Vulkan device after a device-lost event (M4.06).
+     *
+     * Recreates the VkDevice, its command pool and the library's memory
+     * allocator from the same instance and physical device. Only devices
+     * created by Device::create() can be recovered this way: a device
+     * adopted from a host (Device::adopt) stays the host's to recreate, and
+     * recover() reports that as unsupported_feature.
+     *
+     * Every object the lost device owned is gone after this call: images,
+     * presets and chains created from it must be recreated (presets and
+     * chains rebuild themselves on the next use) before they are used again.
+     */
+    auto recover() -> std::expected<void, Error>;
+
+    /** @brief Monotonic counter bumped by every successful recover(). */
+    auto generation() const -> uint64_t;
+
     auto readPixels(VkImage, VkFormat, uint32_t width, uint32_t height, VkImageLayout currentLayout)
         -> std::expected<std::vector<uint8_t>, Error>;
     auto validationErrors() const -> std::vector<std::string>;
@@ -190,6 +209,7 @@ public:
 - **Adopt mode:** the host keeps owning instance/device/queue; the library records the graphics family and layers its own allocator (VMA) + command machinery on top. The host must keep the instance/device alive for the lifetime of every object created through this `Device`. Surface creation stays host-side (the library is SDL-free); request the surface + swapchain extensions via `instanceExtensions` / `deviceExtensions`.
 - **Create mode:** instance + device created internally (headless/CI). With `validationLayers = true` and the layer present, messenger-based ERROR collection is active **including synchronization validation** (instance-level `VkValidationFeaturesEXT`); collected errors surface via `validationErrors()` — the CI gate treats any entry as failure.
 - **`readPixels`:** row-major tightly-packed readback, transition-safe (image moves to `TRANSFER_SRC` and back to `currentLayout`). The headless test/golden vehicle; hosts that composite themselves normally read their own targets.
+- **`recover` / `generation` (M4.06):** the device-lost path — see §5.4. `recover()` releases the objects created on the device (chains, presets, images) *before* swapping the device, so they are destroyed while they still belong to a live device; `generation()` lets those objects notice that the device they were built on is gone.
 - Move-only; owns `Impl` (pimpl — all runner types are move-only, never copyable).
 
 ### 5.2 `Image` — convenience owning image + view
@@ -228,10 +248,25 @@ public:
         -> std::expected<Preset, Error>;
     auto passCount() const -> uint32_t;
     auto parameterInfo() const -> std::span<const ParameterInfo>; // pragma defaults merged with preset overrides
+
+    /**
+     * @brief Re-uploads the preset's LUT textures (M4.06).
+     *
+     * The textures a preset owns live on the Vulkan device. After a
+     * device-lost recovery the device is a new one and the old textures are
+     * gone, so they have to be uploaded again before any chain that uses
+     * them can render. The preset's CPU-side data (pass definitions,
+     * translations, SPIR-V) survives a device loss and is not reloaded.
+     *
+     * Call this after Device::recover() and before using the preset's
+     * chains. A preset loaded with noLutImages has no textures to
+     * re-upload and the call is a no-op.
+     */
+    auto rebuildLuts(Device& device) const -> std::expected<void, Error>;
 };
 ```
 
-One call runs parse → translate (per pass, with `#pragma name` seeding done for you) → glslang compile of every stage. **Synchronous** — the accepted trade-off of the no-disk-cache decision; glslang frontend calls are serialized by a process-global mutex, so a host may warm several `Preset` objects on worker threads (§4.4, PLAN §5.3). Immutable after load; shareable across `Chain`s on the same device. `strict = true` is the conformance/lint mode (warnings become errors); `noLutImages = true` is what the corpus sweep uses to skip decoding LUT image files it never samples.
+One call runs parse → translate (per pass, with `#pragma name` seeding done for you) → glslang compile of every stage. **Synchronous** — the accepted trade-off of the no-disk-cache decision; glslang frontend calls are serialized by a process-global mutex, so a host may warm several `Preset` objects on worker threads (§4.4, PLAN §5.3). Immutable after load; shareable across `Chain`s on the same device. `strict = true` is the conformance/lint mode (warnings become errors); `noLutImages = true` is what the corpus sweep uses to skip decoding LUT image files it never samples. `rebuildLuts` is the one exception to "immutable": it refreshes the preset's GPU textures after a device loss without touching its pass data (M4.06).
 
 `ParameterInfo { name, description, defaultValue, minimum, maximum, step }` is the UI-facing merged view: `#pragma parameter` metadata with preset-file overrides applied to the default.
 
@@ -256,27 +291,48 @@ public:
         -> std::expected<void, Error>;
     
     /**
-     * @brief Async render: records command buffer and returns fence for external submission.
+     * @brief Renders one frame without waiting for the GPU to finish.
      *
-     * Records the render command buffer but doesn't submit it. Returns a fence that
-     * can be used to track completion when the command buffer is submitted externally.
-     * This enables command buffer batching and custom submission timing.
+     * Records and submits the frame, then returns a fence that signals when the
+     * frame's GPU work has completed. The host may use the time between this
+     * call and wait_async() for its own CPU work, and must call wait_async()
+     * before it consumes the frame's output (presenting it, reading it back, or
+     * overwriting it with the next frame).
      *
-     * The caller is responsible for submitting the command buffer and waiting on the fence.
-     * The input image view must be in SHADER_READ_ONLY_OPTIMAL and stays untouched.
+     * The same input/output contract as render() applies: the input image view
+     * must be in SHADER_READ_ONLY_OPTIMAL and stays untouched, and swapchain
+     * frames still wait on the host's acquire semaphore at
+     * COLOR_ATTACHMENT_OUTPUT.
+     *
+     * At most one async frame may be in flight per chain: the frame's texture
+     * bindings are written in place into the chain's shared descriptor sets, so
+     * the next render_async() waits for the previous frame to retire before
+     * recording over them.
      */
     auto render_async(const InputFrame&, const OutputTarget&, const FrameInfo&)
         -> std::expected<VkFence, Error>;
-    
+
     /**
-     * @brief Submits a recorded command buffer and waits for completion.
+     * @brief Waits for a frame started by render_async() to complete.
      *
-     * Submits the given command buffer with the specified semaphore and pipeline stage,
-     * then waits for completion. Used in conjunction with render_async().
+     * Blocks until the fence returned by render_async() is signalled, then
+     * releases the frame's fence and command buffer. Must be called before the
+     * frame's output is consumed.
      */
-    auto submit_and_wait(VkFence fence, VkSemaphore semaphore = VK_NULL_HANDLE,
-        VkPipelineStageFlags stageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
-        -> std::expected<void, Error>;
+    auto wait_async(VkFence fence) -> std::expected<void, Error>;
+
+    /**
+     * @brief Rebuilds the chain's GPU resources (ROB-35).
+     *
+     * Releases the chain's pipelines, render passes, framebuffers, descriptor
+     * sets, UBOs and pass targets, then creates them again from the preset the
+     * chain was built from. Used after a device-lost recovery: the lost device
+     * took all of those objects with it.
+     *
+     * The preset's LUT textures must have been re-uploaded first (see
+     * Preset::rebuildLuts) — the chain borrows them.
+     */
+    auto rebuild() -> std::expected<void, Error>;
     
     auto passOutputSize(uint32_t passIndex) const
         -> std::expected<std::pair<uint32_t, uint32_t>, Error>;
@@ -284,41 +340,38 @@ public:
 ```
 
 - Owns pipelines (cached per format), FBOs, sampler cache (2 filters × 3 wraps × 2 mip modes, lazily created), history rings, feedback double-buffers, descriptor sets and per-pass UBOs.
-- **`render` is synchronous:** records + submits one command buffer and waits on a fence. Simple to integrate, no frame-in-flight management for the host; async execution is a recorded post-1.0 lever. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
+- **`render` is synchronous:** records + submits one command buffer and waits for the frame to retire. It is implemented as `render_async()` + `wait_async()`, so both entry points share one recording implementation. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
+- **`render`/`render_async` take the preset's chain by reference:** the chain borrows its preset (a `Preset` must outlive every `Chain` made from it, and must not be moved while the chain exists) so a device-lost recovery can rebuild the chain from the preset's pass data and re-upload the preset's textures.
 - `setParameter` matches case-insensitively; an empty id is an `invalid_argument` error. A value whose id matches no `#pragma parameter` is stored but **inert** (mirrors RetroArch's tolerance of unknown overlay keys) — the runner applies only ids that exist in the preset's parameter universe; values are written as given (no clamping). There is no getter in v1 — `setParameter` is write-only by design; UI-facing hosts track the merged view themselves (start from `Preset::parameterInfo()`, then mirror their own `setParameter` calls).
 - `resize` stores a new output target size (zero width/height is an `invalid_argument`) and touches no GPU resources. Render reacts to size drift lazily: pass FBO sizes derive from the per-frame `InputFrame` size plus the stored target, and pass targets, the history ring and the mip copy are (re)created at render when the allocated sizes no longer match. A swapchain extent change must be followed by `resize()` with the new extent before the next render (§8).
 
-### Async Rendering (M4.06)
+### Async rendering (M4.06)
 
-The Chain class provides both synchronous and asynchronous rendering APIs:
+The chain offers a synchronous and an asynchronous entry point:
 
-- **Synchronous (`render`)**: Records, submits, and waits for completion. Simple integration with deterministic behavior.
-- **Asynchronous (`render_async` + `submit_and_wait`)**: Records command buffers without immediate submission, enabling batching and custom timing.
+- **Synchronous (`render`)** — records, submits, and waits for the frame to retire.
+- **Asynchronous (`render_async` + `wait_async`)** — records and submits the frame, then hands the host a fence. The host can do its own CPU work before calling `wait_async()`.
 
-The async API enables:
-- Command buffer batching for improved GPU utilization
-- Custom frame pacing and timing systems  
-- Integration with advanced Vulkan features like timeline semaphores
-- Overlapping CPU preparation with GPU execution
-
-**Usage Pattern:**
 ```cpp
-// Record command buffer (returns fence for tracking)
-auto fence = chain.render_async(input, target, frame);
-// Submit with custom timing and wait for completion
-chain.submit_and_wait(fence, acquireSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+auto fence = chain.render_async(input, target, frame);   // does not block on the GPU
+// ... the host's own work ...
+chain.wait_async(*fence);                                  // before the output is consumed
 ```
 
-### Device Lost Recovery (M4.06)
+**Limits.** At most one async frame may be in flight per chain: the frame's texture bindings are written in place into the chain's shared descriptor sets, so a second frame cannot be recorded while the first is still executing. `render_async()` drains the previous frame first; the host still gets real CPU/GPU overlap between the two calls. Command-buffer pooling, timeline semaphores and multiple frames in flight per chain are **not** implemented.
 
-The library now provides automatic recovery from Vulkan device lost scenarios:
+### Device-lost recovery (M4.06)
 
-- **Detection**: `render()` automatically detects `VK_ERROR_DEVICE_LOST` during submission
-- **Recovery**: Attempts to reset command pools and clear pending operations
-- **Retry**: Automatically retries submission after successful recovery
-- **Error Handling**: Provides `Errc::device_lost_recovery_failed` for recovery failures
+A Vulkan device can be lost (driver crash, GPU reset, hardware failure). The library can rebuild it:
 
-This mechanism handles device loss due to driver crashes, GPU resets, or hardware failures while maintaining application state where possible.
+- **Detection** — a `VK_ERROR_DEVICE_LOST` result surfaces as `Errc::vk_device_lost` (mapped in `vk::VkErrorCode`), so the chain recognises it from the error code alone.
+- **`Device::recover()`** — recreates the `VkDevice`, its command pool and the library's allocator from the same instance and physical device. `Device::generation()` returns a counter bumped by every successful recovery, so objects can tell that the device they were built on is gone. An adopted device stays the host's to recreate and is reported as `unsupported_feature`.
+- **`Preset::rebuildLuts(Device&)`** — re-uploads the preset's LUT textures on the new device (a const operation: the preset's pass data survives a device loss).
+- **`Chain::rebuild()`** — recreates the chain's GPU resources from its preset.
+- **Automatic path** — `Chain::render()` detects the loss, rebuilds the device, the preset's textures and the chain, and then reports `vk_device_lost` to the host **without retrying the frame**: the host's own images died with the old device and the library cannot recreate them. The chain is left rebuilt and ready; the host recreates its images and renders again.
+- **Release before replacement** — the device keeps a registry of the objects created on it and releases them before swapping the device, so they are destroyed while they still belong to a live device. Objects remember the generation they were created on and forget their handles rather than destroying them through the new device; `Image::update()` reports `vk_device_lost` instead of using stale handles.
+
+Recovery is best-effort: a driver that lost the device may also refuse to hand out a new one, in which case the host is expected to re-create the whole `Device`.
 - `passOutputSize` exposes the currently-allocated FBO geometry of a pass (host OSD/debugging; also what `Offscreen` target sizing should match for a byte-exact final blit).
 
 ### 5.5 Frame types

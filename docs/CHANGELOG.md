@@ -5,60 +5,116 @@ slang shader presets — are documented in this file.
 
 Milestones follow the M-series plan in [PLAN.md §11](PLAN.md) (`M0` → `M5`).
 Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
-`M0` … `M4.05`. Format adapted from
+`M0` … `M4.06`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [M4.06] — 2026-06-18
+## [M4.06] — 2026-10-21
 
-Async rendering and device lost recovery phase: addresses the robustness
-findings from the codebase audit by adding command buffer batching capabilities
-and automatic Vulkan device recovery mechanisms.
+The robustness wave: the two Medium findings from the codebase audit land as
+code. The frame path is split into record / submit / wait so a host can hold
+a frame in flight, and a lost Vulkan device can be rebuilt — together with the
+presets and chains that lived on it — instead of ending the process.
 
 ### Added
 
-- **Async rendering API** (`Chain::render_async` + `Chain::submit_and_wait`) —
-  enables command buffer batching and custom submission timing. The existing
-  `Chain::render` method remains synchronous for backward compatibility, while
-  `render_async()` records command buffers and returns a fence for external
-  submission. `submit_and_wait()` handles the actual submission and completion
-  waiting. This enables:
-  - Command buffer batching for improved GPU utilization
-  - Custom frame pacing and timing systems
-  - Integration with advanced Vulkan features like timeline semaphores
-  - Overlapping CPU preparation with GPU execution
+- **Async render path** (`Chain::render_async` + `Chain::wait_async`) — the
+  frame path is split into *record*, *submit* and *wait*, so a host can keep a
+  frame in flight while it does its own CPU work.
+
+  - `render_async(input, target, frame)` records and submits the frame, then
+    returns a fence. It does not block on the GPU.
+  - `wait_async(fence)` blocks until the frame retires, then releases the
+    frame's fence and command buffer. The host must call it before the
+    frame's output is consumed.
+  - `Chain::render()` is now `render_async()` + `wait_async()` — one
+    recording implementation serves both entry points, so existing callers
+    are unaffected.
 
   ```cpp
-  // Record but don't submit
   auto fence = chain.render_async(input, target, frame);
-  // Submit with custom timing
-  chain.submit_and_wait(fence, acquireSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+  // ... the host's own work ...
+  chain.wait_async(*fence);   // before the output is presented or read back
   ```
 
-- **Device lost recovery** (`Device::Impl::RecoverFromDeviceLost`) — automatic
-  recovery from VK_ERROR_DEVICE_LOST during rendering. When a Vulkan device is
-  lost due to driver crashes or hardware failures, the render method now:
-  1. Detects VK_ERROR_DEVICE_LOST during command buffer submission
-  2. Attempts recovery by resetting command pools and clearing pending operations
-  3. Retries the submission with recovered resources
-  4. Provides descriptive error messages for failed recovery attempts
+  At most **one async frame may be in flight per chain**: the frame's texture
+  bindings are written in place into the chain's shared descriptor sets, so a
+  second frame cannot be recorded while the first is still executing.
+  `render_async()` drains the previous frame first.
 
-  The recovery process includes command pool reset, state cleanup, and automatic
-  retry logic. Added `Errc::device_lost_recovery_failed` error code for recovery
-  failures.
+- **Device-lost recovery** (`Device::recover`, `Device::generation`) — a lost
+  Vulkan device can be rebuilt. `recover()` recreates the `VkDevice`, its
+  command pool and the library's memory allocator from the same instance and
+  physical device; `generation()` returns a counter that is bumped by every
+  successful recovery, so objects can tell that the device they were built on
+  is gone. An adopted device (`Device::adopt`) stays the host's to recreate
+  and is reported as `unsupported_feature`.
 
-- **CI optimization** — GitHub Actions workflow now includes a gate that skips
-  CI builds for commits containing only .md files (documentation-only changes).
-  This reduces CI resource usage and speeds up documentation updates.
+  - `Preset::rebuildLuts(Device&)` re-uploads the preset's LUT textures on
+    the new device. It is a const operation — the preset's pass data and
+    parameters survive a device loss and are not reloaded.
+  - `Chain::rebuild()` recreates the chain's pipelines, render passes,
+    framebuffers, descriptor sets, UBOs and pass targets from its preset.
+  - `Chain::render()` detects a device loss, rebuilds the device, the
+    preset's textures and the chain, and then reports `vk_device_lost` to the
+    host **without retrying the frame**: the host's own images died with the
+    old device and the library cannot recreate them. The chain is left
+    rebuilt; the host recreates its images and renders again.
+  - The device keeps a registry of the objects created on it (chains,
+    presets, images) and releases them **before** swapping the device, so
+    they are destroyed while they still belong to a live device. Objects
+    remember the generation they were created on and forget their handles
+    rather than destroying them through the new device.
+
+  Recovery is best-effort: a driver that lost the device may also refuse to
+  hand out a new one.
+
+- **Precise device-loss detection** (`vk::VkErrorCode`) — a
+  `VK_ERROR_DEVICE_LOST` result now surfaces as `Errc::vk_device_lost` at
+  every call site, instead of the previous approach of sniffing the error
+  *message* for the string "VK_ERROR_DEVICE_LOST" (which missed device losses
+  surfacing as a generic `VkResult`). `Errc::device_lost_recovery_failed` was
+  added for a failed recovery attempt.
+
+- **C API**: `slangvk_device_recover()` mirrors `Device::recover()`, and
+  `SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED` keeps `slangvk_result` aligned
+  with `slv::Errc` (the C enum mirrors it code-for-code).
+
+- **CI gate** — the GitHub Actions workflow skips the build jobs for commits
+  that only touch documentation, using the `tj-actions/changed-files` action.
+  This reduces CI resource usage and speeds up documentation-only updates.
+
+### Changed
+
+- `SubmitAndWait()` frees its own command buffer instead of calling
+  `vkResetCommandPool`: a pool-wide reset would also free command buffers
+  that are still in flight on an async submission.
+- The feedback double-buffer flip moved from "after the frame completed" to
+  "after the frame was recorded", so the recorded commands and the next
+  frame's descriptor writes agree on which buffer holds frame T-N.
+- `Chain::create` documents that the preset it borrows must outlive the
+  chain and must not be moved while the chain exists.
+- Version bumped to 0.2.0.
 
 ### Fixed
 
-- **ROB-33**: Synchronous render contract limitation — now addressed with async API
-- **ROB-35**: Limited error recovery for device lost scenarios — now with automatic recovery
+- **ROB-33** — synchronous render contract limitation: closed by the async
+  render path.
+- **ROB-35** — limited error recovery for device-lost scenarios: closed by
+  `Device::recover()` and the automatic rebuild.
+
+### Tests
+
+- `tests/test_runner_async.cpp` — the async path: byte-identical output
+  against the synchronous render, four back-to-back async frames, and
+  `wait_async()`'s error contract.
+- `tests/test_runner_recovery.cpp` — the recovery path: device replacement,
+  the chain rebuilding itself, byte-identical output afterwards, further
+  recoveries, and the release of stale objects.
 
 ### Audited
 
-- Codebase audit findings updated: ROB-33 and ROB-35 moved from open to implemented
-  status in [audit.md](audit.md), with implementation details recorded in [deltas.md](deltas.md)
+- The two findings are removed from [audit.md](audit.md) and recorded in
+  [deltas.md](deltas.md) with what actually shipped.
 
 ## [M4.05] — 2026-10-18/20
 
@@ -190,6 +246,9 @@ the public header's only external dependency on the Vulkan headers.
 - M5 (1.0): API freeze, packaging, `docs/API.md`.
 - The 21 ledger-FAIL presets are upstream-broken or malformed (see M4.03) —
   no library action planned; they stay pinned as FAIL in the baseline.
+- Command-buffer pooling and more than one async frame in flight per chain
+  (the descriptor sets are currently written in place, which limits the async
+  path to a single frame at a time).
 
 ## [M4.04] — 2026-10-18/19
 

@@ -17,8 +17,8 @@ divergences documented in [PROVENANCE.md](PROVENANCE.md)). The format contract
 is [docs/SPEC.md](docs/SPEC.md); the project plan with milestones, API sketch
 and risk register is [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M4.06 — async rendering and device recovery in progress.** All library-side M0–M4
-gates are green: 26/26 ctest, byte-exact goldens, zero validation-layer
+**Status: M4.06 — async rendering and device-lost recovery.** All library-side M0–M4
+gates are green: 29/29 ctest, byte-exact goldens, zero validation-layer
 errors on lavapipe. The M0 core suite is joined by the M1 runner skeleton
 (Device adopt/create, offscreen `Chain::render`, golden blit round-trips), the
 M2 execution contract (history rings `OriginalHistory#`, feedback
@@ -29,8 +29,11 @@ acquired swapchain image with the letterbox rect and orientation handled by
 the library (plan §8 output mode (a)). M4.05 adds the pure-C API
 ([`include/slangvk/c.h`](include/slangvk/c.h) — [C API](#c-api)) and the
 single-submit per-frame upload path (`Device::createMappedBuffer` +
-`InputFrame::pixelBuffer`). M4.06 introduces async rendering support with
-`render_async()`/`submit_and_wait()` methods and automatic device lost recovery.
+`InputFrame::pixelBuffer`). M4.06 splits the frame path into record / submit
+/ wait, so a host can keep a frame in flight
+(`Chain::render_async()` + `Chain::wait_async()`), and adds device-lost
+recovery (`Device::recover()`, with the preset's textures and the chain
+rebuilt automatically).
 Per-item implementation status, audited against the plan: [docs/CHECKLIST.md](docs/CHECKLIST.md);
 notable changes per milestone: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
@@ -55,6 +58,7 @@ exit gate.
 ## Contents
 
 - [Quickstart](#quickstart)
+  - [Async frames and device-lost recovery](#async-frames-and-device-lost-recovery)
 - [Shader demo](#shader-demo)
 - [Consuming](#consuming)
 - [Vulkan runner](#vulkan-runner-m1--m2--m3--m4)
@@ -96,6 +100,27 @@ chain->render(inputFrame, outputTarget, {});   // once per frame
 
 The same runner speaks C too — [`include/slangvk/c.h`](include/slangvk/c.h)
 is an `extern "C"` mirror of the C++ surface (see [C API](#c-api)).
+
+### Async frames and device-lost recovery
+
+`render()` waits for the frame to retire. A host that would rather keep a
+frame in flight can split it:
+
+```cpp
+auto fence = chain->render_async(inputFrame, outputTarget, {});  // returns immediately
+// ... the host's own work for this frame ...
+chain->wait_async(*fence);                                       // before the output is used
+```
+
+At most one async frame may be in flight per chain — the frame's texture
+bindings live in the chain's shared descriptor sets — but the host still gets
+real CPU/GPU overlap between the two calls.
+
+If the Vulkan device is lost (driver crash, GPU reset), the chain rebuilds it,
+the preset's textures and itself, and reports `slv::Errc::vk_device_lost`:
+the host's own images died with the device too, so recreate them and render
+again. Hosts can also drive the recovery themselves with
+`Device::recover()`.
 
 ## Shader demo
 
@@ -320,6 +345,10 @@ single-threaded chains, resize before render after an extent change;
 destroy order chains → presets → images → device). `slangvk.hpp` pulls the
 header in and both `slangvk` and `slangvk-shared` build the adapter, so the
 CMake consuming story is unchanged.
+
+The C surface mirrors the C++ one, including the device-lost path:
+`slangvk_device_recover()` rebuilds a lost device (and
+`SLANGVK_ERR_DEVICE_LOST_RECOVERY_FAILED` reports a failed recovery).
 [`tests/test_c_api.cpp`](tests/test_c_api.cpp) consumes only the C header
 and drives the full loop — device create, image create/update, preset load
 + parameter metadata + live override, identity/gain chains, resize, error
@@ -571,6 +600,10 @@ header.
   status, audited against the plan.
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — notable changes per milestone
   (M0 → current) plus the unreleased roadmap.
+- [audit.md](audit.md) — the codebase audit: the open findings, their
+  severity and the recommended fixes.
+- [deltas.md](deltas.md) — the closed findings: what each one was, what
+  actually shipped, and how it was verified.
 - [corpus/baseline-ledger.txt](corpus/baseline-ledger.txt) — the pinned
   per-preset corpus baseline (revision, totals, LOAD/FAIL per preset).
 - [PROVENANCE.md](PROVENANCE.md) — upstream provenance, documented
