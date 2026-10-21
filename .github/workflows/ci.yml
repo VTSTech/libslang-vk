@@ -78,39 +78,40 @@ jobs:
         run: |
           # Handle edge cases for git object references
           if [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
-            # This is a new branch or push to new branch - check all files in the commit
-            if git rev-parse HEAD^ >/dev/null 2>&1; then
-              changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD)
-            else
-              # Initial commit - get all files in the commit
-              changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT /dev/null HEAD)
-            fi
+            # New branch - get files from the commit
+            changed_files=$(git --no-pager diff --name-only --diff-filter=ACMRT HEAD^ HEAD 2>/dev/null || git diff --name-only --diff-filter=ACMRT /dev/null HEAD 2>/dev/null || echo "")
           elif [[ "${{ github.event.before }}" == "${{ github.sha }}" ]]; then
-            # No changes detected (empty push or rebase)
+            # No changes detected
             changed_files=""
           else
-            # Normal diff between two commits
+            # Normal diff between commits
             changed_files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.before }} ${{ github.sha }} 2>/dev/null || echo "")
           fi
+          
+          # Debug output
+          echo "Debug: github.event.before = ${{ github.event.before }}"
+          echo "Debug: github.sha = ${{ github.sha }}"
+          echo "Debug: changed_files = '$changed_files'"
           
           # Check if all changed files are .md files
           md_only=true
           if [[ -n "$changed_files" ]]; then
+            echo "Analyzing $changed_files"
             for file in $changed_files; do
+              echo "Checking file: $file"
               if [[ "$file" != *.md ]]; then
+                echo "Non-.md file found: $file"
                 md_only=false
                 break
               fi
             done
           else
-            # No changed files detected - don't skip CI (run it normally)
+            echo "No changed files detected"
             md_only=false
           fi
           
           echo "should-skip=$md_only" >> $GITHUB_OUTPUT
           echo "Only .md files changed: $md_only"
-          echo "Changed files:"
-          echo "$changed_files"
 
   linux:
     name: linux-x64 (${{ matrix.build_type }})
