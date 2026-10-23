@@ -1,0 +1,9 @@
+# libslang-vk runner regression (field round 5): push block ending with
+# "...Size"-suffixed float parameters (crt-beans calculate_widths shape).
+# Pins the parameter fall-through and the block-fill size clamp — the old
+# suffix branch zeroed these params and overflowed the staging buffer.
+shaders = 1
+shader0 = shaders/sizeparam.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0

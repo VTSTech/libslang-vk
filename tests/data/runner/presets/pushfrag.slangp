@@ -1,0 +1,9 @@
+# libslang-vk runner regression: stock libretro shader shape (global MVP UBO
+# + push-constant block read by the fragment stage). Pins the two-binding
+# set 1/set 3 pipeline layouts — the field bug was "pass pipeline:
+# VK_ERROR_INVALID_SHADER_NV" on AMD for every shader using this shape.
+shaders = 1
+shader0 = shaders/pushfrag.slang
+scale_type0 = source
+scale_x0 = 1.0
+scale_y0 = 1.0
