@@ -162,7 +162,9 @@ real pipeline compilation, lavapipe does not.
   iteration: `ParsePreset` opens it once per call
   (`src/core/preset_parser.cpp:317`); `TranslateSlang` opens it twice —
   once to translate, once to re-read and hash the bytes
-  (`src/core/slang_translate.cpp:152`, `:1498`, `:1607`). On Windows
+  (`src/core/slang_translate.cpp:152`, `:1498`, `:1607` — line numbers of
+  the measured build; the second read has since been removed, see the
+  optimization note below). On Windows
   every open pays NTFS path resolution plus the Defender filter port —
   roughly 0.1 ms (the parser row's 104 µs vs 5.15 µs, where a warm
   Linux open is 1–2 µs, is mostly this tax). These rows measure
@@ -176,11 +178,13 @@ real pipeline compilation, lavapipe does not.
   lavapipe's in-process queue. The wall columns are the meaningful
   cross-machine metric.
 
-**Optimization note found by this run:** `TranslateSlang`'s per-call
-double read costs ~0.2 ms/iteration on Windows for an operation that
-takes 84 µs of CPU on Linux. A buffer-based overload (read the file
-once, hash the bytes already in memory) would remove one open and the
-redundant read on every host, not just Windows.
+**Optimization note found by this run — fixed since:** `TranslateSlang`
+used to open the shader file a second time per call purely for the
+source fingerprint (~0.2 ms/iteration on Windows for an operation that
+takes 84 µs of CPU on Linux). It now reads the file once: the include
+walk captures the raw top-level bytes and the fingerprint is computed
+from that capture, with byte-for-byte parity verified across LF, CRLF,
+include-resolved and failure-path cases.
 
 ## Changes in this iteration (vs the original M0 drop)
 
@@ -278,8 +282,5 @@ export VK_ICD_FILENAMES=<root>/usr/share/vulkan/icd.d/lvp_icd.json
   Remaining environment gaps: a Ubuntu-VM lavapipe run as a third
   reference column.
 - From-memory variants of the parse/translate/compile benches would
-  split the Windows file-open tax from library CPU (see the RX 560
-  section) and make cross-toolchain numbers comparable.
-- A buffer-based `TranslateSlang` overload (read once, hash the bytes
-  already in memory) would remove the per-call double read on every
-  host — flagged by the RX 560 numbers.
+  split the remaining Windows file-open tax from library CPU (see the
+  RX 560 section) and make cross-toolchain numbers comparable.

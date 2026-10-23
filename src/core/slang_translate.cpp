@@ -15,6 +15,7 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -133,7 +134,8 @@ int DiagSizeToInt(size_t size)
  */
 bool ResolveIncludes(const std::string &path, int depth, int &stage,
     std::set<std::string> *visited /* 3 buckets */, std::vector<std::string> &active,
-    std::string &out, std::string &error)
+    std::string &out, std::string &error,
+    std::optional<std::string> *rawTopLevelBytes /* top-level frame only */ = nullptr)
 {
         constexpr int kMaxDepth = 24;
         if (depth > kMaxDepth) {
@@ -168,6 +170,11 @@ bool ResolveIncludes(const std::string &path, int depth, int &stage,
         std::ostringstream ss;
         ss << stream.rdbuf();
         std::string content = ss.str();
+        // Raw bytes (pre-\r-strip) are the source-fingerprint input; only the
+        // top-level frame captures (recursive calls leave the pointer null), so
+        // TranslateSlangImpl can hash without a second file read.
+        if (rawTopLevelBytes)
+                *rawTopLevelBytes = content;
         content.erase(std::remove(content.begin(), content.end(), '\r'), content.end());
 
         std::string dir = std::filesystem::path(path).parent_path().string();
@@ -1490,25 +1497,6 @@ unsigned Fnv1a32(const std::string &data)
         return hash;
 }
 
-/** @brief Whole-file bytes for fingerprinting (binary-safe); capped at
- * kMaxShaderFileBytes (ROB-20) - oversize files report false and the
- * fingerprint is skipped. */
-bool ReadWholeFileBytes(const std::string &path, std::string &out)
-{
-        std::ifstream in(path, std::ios::binary);
-        if (!in)
-                return false;
-        in.seekg(0, std::ios::end);
-        const std::streamoff fileBytes = in.tellg();
-        in.seekg(0, std::ios::beg);
-        if (fileBytes < 0 || fileBytes > kMaxShaderFileBytes)
-                return false;
-        std::ostringstream buffer;
-        buffer << in.rdbuf();
-        out = buffer.str();
-        return true;
-}
-
 /** @brief Non-overlapping substring count. */
 int CountOccurrences(const std::string &text, const char *needle)
 {
@@ -1591,20 +1579,25 @@ bool TranslateSlangImpl(const std::string &shaderPath, const std::unordered_set<
 
         std::string error;
         std::string merged;
+        std::optional<std::string> rawTopLevel; // captured by ResolveIncludes' single read
         int includeStage = 0; // Mirrors SplitStages: 0 shared, 1 vertex, 2 fragment.
         std::set<std::string> includeVisited[3];
         std::vector<std::string> includeActive;
-        if (!ResolveIncludes(shaderPath, 0, includeStage, includeVisited, includeActive, merged, error)) {
+        if (!ResolveIncludes(shaderPath, 0, includeStage, includeVisited, includeActive, merged, error,
+                &rawTopLevel)) {
                 out.error = error;
                 return false;
         }
         // Field diagnostics: fingerprint the raw file and the include-resolved
         // source so a remote log can be diffed against known shader-pack versions.
+        // The raw bytes come from ResolveIncludes' single read; the previous
+        // implementation re-opened the shader file here purely for the
+        // fingerprint (ReadWholeFileBytes) - measurable on hosts where a file
+        // open costs ~0.1 ms (Windows/Defender).
         {
-                std::string fileBytes;
-                if (ReadWholeFileBytes(shaderPath, fileBytes)) {
-                        out.sourceSize = DiagSizeToInt(fileBytes.size());
-                        out.sourceHash = Fnv1a32(fileBytes);
+                if (rawTopLevel) {
+                        out.sourceSize = DiagSizeToInt(rawTopLevel->size());
+                        out.sourceHash = Fnv1a32(*rawTopLevel);
                 }
                 out.mergedSize = DiagSizeToInt(merged.size());
                 out.mergedHash = Fnv1a32(merged);

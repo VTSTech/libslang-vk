@@ -8,6 +8,31 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 `M0` … `M4.06`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **`TranslateSlang` reads the shader file once per call** (perf). The
+  include-resolution walk now captures the raw top-level bytes it already
+  read, and the source fingerprint (`sourceSize`/`sourceHash`) is computed
+  from that capture — previously the file was opened a second time purely
+  for the fingerprint (`ReadWholeFileBytes`). Byte-for-byte parity of all
+  `SlangTranslation` fields verified across LF, CRLF, include-resolved and
+  failure-path cases (the fingerprint remains a hash of the *raw* file
+  bytes, CRLF included); the full test suite stays green. Most visible on
+  hosts where a file open costs ~0.1 ms (Windows with Defender filtering):
+  one open eliminated per translated shader — and per pass, since chain
+  creation translates every pass shader.
+
+### Fixed
+
+- Benchmark suite (details and numbers in `benchmarks/README.md`):
+  integrated into the main build behind `SLANGVK_BUILD_BENCHMARKS`
+  (FetchContent google/benchmark, machine-specific wiring removed), all
+  six benchmarks fixed to measure real work behind failure counters, and
+  the first real-GPU (RX 560 / Windows / MSVC) results recorded alongside
+  the lavapipe reference.
+
 ## [M4.07] — 2026-10-21
 
 The first M4.xx iteration after the M4.06 pre-release: the two Low findings
