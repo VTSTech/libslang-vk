@@ -5,12 +5,42 @@ slang shader presets — are documented in this file.
 
 Milestones follow the M-series plan in [PLAN.md §11](PLAN.md) (`M0` → `M5`).
 Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
-`M0` … `M4.06`. Format adapted from
+`M0` … `M4.08`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [M4.08] — 2026-10-24
+
+The first iteration measured by its own benchmark suite: this release
+ships a real benchmarking framework (google/benchmark, six executables,
+built in-tree behind one flag), and the framework immediately paid for
+itself — its first real-GPU run surfaced a double file-read in
+`TranslateSlang`, fixed here and measured at **−18% per call on
+Windows**. Two more audit findings close on the cheap: the preset
+parser's edge-case contract is now pinned by tests, and the
+thread-safety guarantees are stated in the public headers.
+
 ### Added
+
+- **The benchmark framework** (closes the framework half of TEST-12):
+  six google/benchmark v1.9.1 executables built with the library behind
+  `-DSLANGVK_BUILD_BENCHMARKS=ON` — preset parse, slang translate, slang
+  compile, chain create+destroy, blit render, FXAA render. The original
+  suite (M0) had machine-specific build wiring and never produced a
+  valid measurement outside its author's workstation; the rework links
+  the in-tree `slangvk::slangvk` target (transitive glslang), fetches
+  google/benchmark pinned via FetchContent, uses repo-relative data
+  roots, wires in the orphaned `bench_vk_render_fxaa.cpp`, and makes
+  every bench count its failures and print first-failure diagnostics
+  instead of silently timing error paths. Runner scripts for Windows
+  (VS2022/MSVC) and Linux ship in `benchmarks/scripts/`.
+  [benchmarks/README.md](../benchmarks/README.md) documents the
+  measurement contract and carries the first numbers: the lavapipe
+  reference (2 vCPU sandbox, GCC 14.2) and the first real-GPU run —
+  **RX 560 / Windows 11 / MSVC 19.44, where an FXAA frame completes
+  end-to-end in 411 µs (~2,400 FPS ceiling, 13.1× the software
+  rasterizer) and blit presentation in 225 µs (5.1×)**.
 
 - **Preset-parser edge-case tests** (audit ROB-36, test half): 23 checks
   pinning the parse contract on adversarial inputs — empty files
@@ -19,39 +49,56 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
   comment forms including quoted `#` literals, missing `#reference`
   targets, self/two-file reference cycles, the 9-vs-10-file
   `#reference` depth boundary, and the 8 MiB size cap (ROB-20).
+
 - **Thread-safety contract in the public headers** (audit ARCH-04,
-  documentation half): a contract block at the top of `runner.hpp` and
-  `@par Thread safety` notes on `Device`, `Image` and `Preset`
-  (single-threaded per Device by design; distinct Devices independent;
-  core layer stateless apart from the shader-root global; concurrent
-  `CompileSlang` supported).
-
-### Changed
-
-- `audit.md` status refresh: TEST-12 closed (the benchmark framework it
-  asked for shipped this week), ARCH-04 closed as "documented", ROB-36
-  test half closed (parser refactor remains).
-
-- **`TranslateSlang` reads the shader file once per call** (perf). The
-  include-resolution walk now captures the raw top-level bytes it already
-  read, and the source fingerprint (`sourceSize`/`sourceHash`) is computed
-  from that capture — previously the file was opened a second time purely
-  for the fingerprint (`ReadWholeFileBytes`). Byte-for-byte parity of all
-  `SlangTranslation` fields verified across LF, CRLF, include-resolved and
-  failure-path cases (the fingerprint remains a hash of the *raw* file
-  bytes, CRLF included); the full test suite stays green. Most visible on
-  hosts where a file open costs ~0.1 ms (Windows with Defender filtering):
-  one open eliminated per translated shader — and per pass, since chain
-  creation translates every pass shader.
+  documentation half): the full contract block at the top of
+  `runner.hpp` and `@par Thread safety` notes on `Device`, `Image` and
+  `Preset` — the library is single-threaded per Device by design;
+  distinct Devices (separate Vulkan devices/queues) are independent and
+  may be used concurrently; the core layer keeps no shared mutable state
+  apart from the shader-root global (set it once at startup); glslang's
+  process initialization is internally mutex-guarded, so concurrent
+  `CompileSlang` calls are supported. The existing `Chain` and
+  `SetShaderRootDir` notes predate this and now have company.
 
 ### Fixed
 
-- Benchmark suite (details and numbers in `benchmarks/README.md`):
-  integrated into the main build behind `SLANGVK_BUILD_BENCHMARKS`
-  (FetchContent google/benchmark, machine-specific wiring removed), all
-  six benchmarks fixed to measure real work behind failure counters, and
-  the first real-GPU (RX 560 / Windows / MSVC) results recorded alongside
-  the lavapipe reference.
+- **`TranslateSlang` reads the shader file once per call** — the first
+  optimization surfaced by the benchmark suite above (the translate
+  bench on Windows was paying for two file opens per call). The
+  include-resolution walk now captures the raw top-level bytes it
+  already read, and the source fingerprint (`sourceSize`/`sourceHash`)
+  is computed from that capture — previously the file was opened a
+  second time purely for the fingerprint (`ReadWholeFileBytes`).
+  Measured: **1,364 → 1,119 µs per call on the RX 560 box (−18%)**,
+  84.4 → 81.6 µs on the lavapipe sandbox (where a read costs ~1 µs).
+  Byte-for-byte parity of all `SlangTranslation` fields verified across
+  LF, CRLF, include-resolved and failure-path cases (the fingerprint
+  remains a hash of the *raw* file bytes, CRLF included). The saving
+  applies per translated shader — and per pass, since chain creation
+  translates every pass shader.
+
+### Audited
+
+- [audit.md](../audit.md) status refresh (2026-10-24): **TEST-12
+  closed** (the benchmark framework above; CI wiring is the one
+  outstanding slice), **ARCH-04 closed as "documented"** (the header
+  contract above), **ROB-36 test half closed** (the 23-check slice
+  above; the parser refactor remains open). Five findings remain fully
+  open, all Low: PERF-08 (SPIR-V host-side cache), MAINT-22, MAINT-23,
+  FEAT-06, TEST-11.
+
+### Validation
+
+- ctest **22/22 green** (sandbox: GCC 14.2, lavapipe), including the new
+  parser checks; translate bench re-measured 82.6 µs (within noise of
+  the 81.6 µs post-fix reference).
+- The translate fix was verified with a dedicated parity probe over
+  LF / CRLF / include-resolved / failure-path fixtures: identical
+  `SlangTranslation` fields before and after the change.
+- Windows: MSVC 19.44 Release build clean; all six benchmarks ran on the
+  RX 560; the translate bench re-run after the fix produced the 1,119 µs
+  figure above (640 iterations, 890 items/s).
 
 ## [M4.07] — 2026-10-21
 
