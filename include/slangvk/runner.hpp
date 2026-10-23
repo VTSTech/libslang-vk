@@ -27,6 +27,20 @@
 // (Rotation uniform + rotated presentation), the fit-and-center present path
 // for final passes that do not resolve to the output target size, and
 // Image::update for per-frame host uploads.
+//
+// Thread safety (the ARCH-04 contract, stated once here): the library is
+// single-threaded per Device by design (plan §5). A Device and everything
+// created from it (Image, Preset, Chain, command submission) must be
+// created, used and destroyed by one thread at a time — hosts that reach
+// the same object from several threads provide the external
+// synchronization. Distinct Device instances (separate Vulkan devices and
+// queues) are independent and may be used concurrently from separate
+// threads. The core layer (ParsePreset, TranslateSlang, CompileSlang)
+// keeps no shared mutable state apart from the shader-root global
+// (SetShaderRootDir — set it once at startup, before other threads parse;
+// see preset_parser.hpp), and the one-time glslang process initialization
+// is internally mutex-guarded, so concurrent CompileSlang calls are
+// supported.
 
 #include <cstdint>
 #include <expected>
@@ -102,6 +116,11 @@ struct DeviceOptions {
  * Owns the VMA allocator and the command machinery the runner needs. All
  * other objects (Preset, Chain, Image) reference a Device and must be
  * destroyed before it.
+ *
+ * @par Thread safety
+ * Not thread-safe: create, use and destroy a Device (and everything
+ * created from it) on one thread at a time. Distinct Device instances
+ * are independent and may be used concurrently.
  */
 class Device {
 public:
@@ -224,6 +243,9 @@ struct ImageDesc {
  * @brief An owning 2D image + view allocated through the Device's VMA
  * allocator. Convenience for hosts/tests without their own allocator:
  * input frames, offscreen targets, LUTs and golden-image readbacks.
+ *
+ * @par Thread safety
+ * Follows its creating Device's single-threaded contract.
  */
 class Image {
 public:
@@ -322,6 +344,11 @@ struct ParameterInfo {
  * @brief A parsed + translated + SPIR-V-compiled preset. Immutable after
  * load; shareable across Chains. Compilation is synchronous here (plan §5:
  * glslang-only, no disk cache).
+ *
+ * @par Thread safety
+ * Immutable after load — const access (rendering from Chains that share
+ * it) is safe from multiple threads; loading follows its Device's
+ * single-threaded contract.
  */
 class Preset {
 public:

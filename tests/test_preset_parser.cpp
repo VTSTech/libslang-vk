@@ -381,6 +381,139 @@ int main()
                 std::filesystem::remove_all(root);
         }
 
+        // --- ROB-36 edge-case slice: pin the parse contract on malformed and
+        // adversarial inputs (empty files, garbage lines, duplicates, CRLF,
+        // comment forms, broken/cyclic/deep #reference chains, oversized
+        // files) so the state machine's behavior stays observable while the
+        // refactor recommended by the audit remains open. ---
+        {
+                const std::filesystem::path root = MakeTempRoot("libslang_vk_test_rob36");
+                SetShaderRootDir(root.string());
+                WriteText(root / "p.slang", "#pragma name p\n");
+                Preset preset;
+                std::string error;
+
+                // Empty file: rejected as a TOP-LEVEL preset ("preset has no
+                // shader passes") but legal as a #reference target — the
+                // 9-file chain below relies on exactly that asymmetry.
+                WriteText(root / "empty.slangp", "");
+                error.clear();
+                Check(!ParsePreset((root / "empty.slangp").string(), preset, error),
+                    "rob36: empty preset rejected at top level");
+                Check(error.find("preset has no shader passes") != std::string::npos,
+                    "rob36: empty-preset error is named");
+
+                // Lines without '=' are skipped; the surrounding keys parse.
+                WriteText(root / "garbage.slangp",
+                    "this is not a key value pair\n"
+                    "!!!\n"
+                    "\n"
+                    "shader0=\"p.slang\"\n"
+                    "=novalue\n");
+                Check(ParsePreset((root / "garbage.slangp").string(), preset, error),
+                    "rob36: garbage lines skipped");
+                Check(preset.passes.size() == 1, "rob36: garbage preset keeps its one pass");
+
+                // Unknown keys are ignored silently (the format has harmless
+                // extras — forward-compat contract).
+                WriteText(root / "extras.slangp", "shader0=\"p.slang\"\nfuture_key=\"whatever\"\n");
+                Check(ParsePreset((root / "extras.slangp").string(), preset, error),
+                    "rob36: unknown keys ignored");
+
+                // Duplicate key: last declaration wins.
+                WriteText(root / "dup.slangp", "shader0=\"a.slang\"\nshader0=\"p.slang\"\n");
+                Check(ParsePreset((root / "dup.slangp").string(), preset, error)
+                        && preset.passes.size() == 1
+                        && preset.passes[0].shaderPath == "p.slang",
+                    "rob36: duplicate shader0 — last wins");
+
+                // CRLF line endings (Windows-authored presets) parse like LF.
+                WriteText(root / "crlf.slangp", "shader0=\"p.slang\"\r\nfilter_linear0=\"true\"\r\n");
+                Check(ParsePreset((root / "crlf.slangp").string(), preset, error),
+                    "rob36: CRLF preset parses");
+                Check(preset.passes.size() == 1 && preset.passes[0].filter == FilterMode::Linear,
+                    "rob36: CRLF values land clean (no trailing CR)");
+
+                // Comment forms: full-line, trailing, and a line-opening '#'
+                // that is NOT #reference all strip.
+                WriteText(root / "comments.slangp",
+                    "# full line comment\n"
+                    "shader0=\"p.slang\" # trailing comment\n"
+                    "#notreference \"x\"\n");
+                Check(ParsePreset((root / "comments.slangp").string(), preset, error),
+                    "rob36: comment forms stripped");
+                Check(preset.passes.size() == 1, "rob36: comment preset keeps one pass");
+
+                // A '#' inside double quotes is a literal, not a comment.
+                WriteText(root / "hashname.slangp", "shader0=\"we#ird.slang\"\n");
+                Check(ParsePreset((root / "hashname.slangp").string(), preset, error)
+                        && preset.passes.size() == 1
+                        && preset.passes[0].shaderPath == "we#ird.slang",
+                    "rob36: quoted '#' is a literal, not a comment");
+
+                // Missing #reference target: named failure with the cause chain.
+                WriteText(root / "orphan.slangp", "#reference \"missing.slangp\"\nshader0=\"p.slang\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "orphan.slangp").string(), preset, error),
+                    "rob36: missing reference target fails");
+                Check(error.find("referenced preset failed") != std::string::npos
+                        && error.find("cannot open preset file") != std::string::npos,
+                    "rob36: missing reference error names the cause chain");
+
+                // Self-reference cycle: terminates via the reference depth cap.
+                WriteText(root / "self.slangp", "#reference \"self.slangp\"\nshader0=\"p.slang\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "self.slangp").string(), preset, error),
+                    "rob36: self-reference cycle rejected");
+                Check(error.find("depth limit exceeded") != std::string::npos,
+                    "rob36: self-reference hits the depth cap");
+
+                // Two-file cycle: same named termination.
+                WriteText(root / "cyc_a.slangp", "#reference \"cyc_b.slangp\"\nshader0=\"p.slang\"\n");
+                WriteText(root / "cyc_b.slangp", "#reference \"cyc_a.slangp\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "cyc_a.slangp").string(), preset, error),
+                    "rob36: two-file cycle rejected");
+                Check(error.find("depth limit exceeded") != std::string::npos,
+                    "rob36: two-file cycle hits the depth cap");
+
+                // Legal deep chain: 9 files = depth 8 at the deepest (cap
+                // rejects depth > 8) parses; the deepest file's pass survives
+                // the merge (last parent with a non-empty chain wins).
+                {
+                        for (int i = 0; i < 8; ++i)
+                                WriteText(root / ("chain" + std::to_string(i) + ".slangp"),
+                                    "#reference \"chain" + std::to_string(i + 1) + ".slangp\"\n");
+                        WriteText(root / "chain8.slangp", "shader0=\"p.slang\"\n");
+                        Check(ParsePreset((root / "chain0.slangp").string(), preset, error),
+                            "rob36: 9-file reference chain (depth 8) parses");
+                        Check(!preset.passes.empty()
+                                && preset.passes[0].shaderPath.find("p.slang") != std::string::npos,
+                            "rob36: deep chain keeps the deepest file's pass");
+                }
+                // One more level (depth 9) exceeds the cap with a named error.
+                WriteText(root / "chain9.slangp", "#reference \"chain0.slangp\"\n");
+                error.clear();
+                Check(!ParsePreset((root / "chain9.slangp").string(), preset, error),
+                    "rob36: 10-file reference chain (depth 9) rejects");
+                Check(error.find("depth limit exceeded") != std::string::npos,
+                    "rob36: depth-cap error is named");
+
+                // ROB-20 boundary: a preset above 8 MiB fails with the named
+                // size error before any slurp allocation.
+                {
+                        const std::string big(9 * 1024 * 1024, 'x');
+                        WriteText(root / "big.slangp", big);
+                        error.clear();
+                        Check(!ParsePreset((root / "big.slangp").string(), preset, error),
+                            "rob36: oversized preset rejected (ROB-20)");
+                        Check(error.find("preset file too large") != std::string::npos,
+                            "rob36: oversized error names the limit");
+                }
+
+                std::filesystem::remove_all(root);
+        }
+
         std::printf("\n%s (%d failures)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures);
         return failures == 0 ? 0 : 1;
 }

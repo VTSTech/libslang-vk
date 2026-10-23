@@ -34,7 +34,9 @@ This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, tran
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
-The most impactful remaining findings are the SPIR-V cache (PERF-08 — the library now supplies the key, the host-side store and the in-process memo remain) and the lack of a performance benchmarking framework (TEST-12), which is what would catch the next regression of the kind PERF-09 was.
+The most impactful remaining finding is the SPIR-V cache (PERF-08 — the library now supplies the key, the host-side store and the in-process memo remain).
+
+**Status update (2026-10-24):** TEST-12 is closed — the in-tree benchmarking framework (six google/benchmark executables behind `-DSLANGVK_BUILD_BENCHMARKS=ON`, documented in `benchmarks/README.md`) exists and already caught and guided a real optimization (the `TranslateSlang` single-read fix, measured −18% per call on Windows). ARCH-04's documentation half is closed (thread-safety contract stated in the public headers) and ROB-36's test half is closed (23 pinned parser edge-case checks); the remaining halves and the other Low findings stay open. CI wiring for the benchmarks is the one outstanding slice of TEST-12's recommendation.
 
 ---
 
@@ -89,6 +91,15 @@ The preset parser implements a complex state machine for handling .slangp files 
 **Current behavior:** The parser handles the libretro preset format correctly but uses intricate logic for path normalization, include resolution, and parameter validation. Some edge cases (like deeply nested includes or malformed preset files) may produce unexpected error messages.
 
 **Recommendation:** Consider refactoring the parser into smaller, more focused components with clearer separation of concerns. Add more comprehensive unit tests for edge cases and error conditions.
+
+**Resolution (2026-10-24, test half):** An edge-case slice (23 checks) now
+pins the parse contract in `tests/test_preset_parser.cpp`: empty files
+(rejected at top level, legal as `#reference` targets), garbage lines
+without `=`, unknown-key tolerance, duplicate-key last-wins, CRLF
+inputs, comment forms (including quoted `#` literals), missing
+`#reference` targets, self- and two-file reference cycles (named
+depth-cap errors), the 9-vs-10-file reference-chain depth boundary, and
+the ROB-20 8 MiB size cap. The refactor recommendation stays open.
 
 **Impact:** Would improve maintainability and reduce the risk of subtle parsing bugs in edge cases.
 
@@ -193,6 +204,17 @@ The library is designed as single-threaded per device, which limits its use in m
 
 **Recommendation:** Add thread safety annotations and consider adding optional multi-threaded support for scenarios where concurrent access is needed. Document the current thread-safety guarantees clearly.
 
+**Resolution (2026-10-24, documentation half):** The contract is now
+stated in the public headers — a full-contract block at the top of
+`include/slangvk/runner.hpp` (single-threaded per Device by design;
+distinct Devices independent; core layer stateless apart from the
+shader-root global; glslang init mutex-guarded, concurrent
+`CompileSlang` supported) plus `@par Thread safety` notes on `Device`,
+`Image` and `Preset` (the existing `Chain` and `SetShaderRootDir` notes
+predate this). Annotations and optional multi-threaded support remain
+non-goals for a single-threaded-by-design runner; the item closes as
+"documented".
+
 **Impact:** Would enable the library to be used in multi-threaded applications while maintaining the simple single-threaded API for most use cases.
 
 ---
@@ -231,6 +253,15 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 
 **Recommendation:** Add a benchmarking framework that can measure key metrics like compile time, render time, memory usage, and frame rates. Include it in CI to catch performance regressions.
 
+**Resolution (2026-10-24):** A benchmarking framework now ships in-tree:
+six google/benchmark (v1.9.1) executables behind
+`-DSLANGVK_BUILD_BENCHMARKS=ON` covering preset parsing, slang
+translation, glslang compilation, chain creation, and the blit/FXAA
+render paths — with failure counters, repo-relative data roots, and a
+documented measurement contract (`benchmarks/README.md`, including
+lavapipe reference numbers and first real-GPU RX 560 results). Wiring
+it into CI is the remaining slice of this recommendation.
+
 **Impact:** Would enable systematic performance optimization and provide data-driven insights for improvement decisions.
 
 ---
@@ -240,7 +271,8 @@ The library lacks a dedicated performance benchmarking framework to track perfor
 | Timeline | Findings |
 |----------|----------|
 | **Short term (v0.4.x)** | PERF-08 (SPIR-V caching) |
-| **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, TEST-12, ROB-36, ARCH-04 |
+| **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, ROB-36 (parser refactor) |
+| **Closed (2026-10-24)** | TEST-12 (benchmark framework; CI wiring outstanding), ARCH-04 (thread-safety docs), ROB-36 (edge-case test slice) |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience

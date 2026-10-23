@@ -10,7 +10,27 @@ Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
 
 ## [Unreleased]
 
+### Added
+
+- **Preset-parser edge-case tests** (audit ROB-36, test half): 23 checks
+  pinning the parse contract on adversarial inputs — empty files
+  (rejected at top level, legal as `#reference` targets), lines without
+  `=`, unknown-key tolerance, duplicate keys (last wins), CRLF inputs,
+  comment forms including quoted `#` literals, missing `#reference`
+  targets, self/two-file reference cycles, the 9-vs-10-file
+  `#reference` depth boundary, and the 8 MiB size cap (ROB-20).
+- **Thread-safety contract in the public headers** (audit ARCH-04,
+  documentation half): a contract block at the top of `runner.hpp` and
+  `@par Thread safety` notes on `Device`, `Image` and `Preset`
+  (single-threaded per Device by design; distinct Devices independent;
+  core layer stateless apart from the shader-root global; concurrent
+  `CompileSlang` supported).
+
 ### Changed
+
+- `audit.md` status refresh: TEST-12 closed (the benchmark framework it
+  asked for shipped this week), ARCH-04 closed as "documented", ROB-36
+  test half closed (parser refactor remains).
 
 - **`TranslateSlang` reads the shader file once per call** (perf). The
   include-resolution walk now captures the raw top-level bytes it already
