@@ -80,13 +80,15 @@ thread-safety guarantees are stated in the public headers.
 
 ### Audited
 
-- [audit.md](../audit.md) status refresh (2026-10-24): **TEST-12
-  closed** (the benchmark framework above; CI wiring is the one
-  outstanding slice), **ARCH-04 closed as "documented"** (the header
-  contract above), **ROB-36 test half closed** (the 23-check slice
-  above; the parser refactor remains open). Five findings remain fully
-  open, all Low: PERF-08 (SPIR-V host-side cache), MAINT-22, MAINT-23,
-  FEAT-06, TEST-11.
+- **TEST-12 and ARCH-04 are removed from [audit.md](../audit.md) and
+  recorded in [deltas.md](../deltas.md)** (the M4.07 closure
+  convention): TEST-12 for the benchmark framework above (CI wiring is
+  the one outstanding slice), ARCH-04 for the header contract above.
+  **ROB-36 is half-closed the same way**: its test half (the 23-check
+  slice above) is recorded in deltas.md as a partial entry, while the
+  parser refactor keeps the finding in audit.md. Six findings remain
+  open, all Low: ROB-36 (refactor half), PERF-08 (SPIR-V host-side
+  cache), MAINT-22, MAINT-23, FEAT-06, TEST-11.
 
 ### Validation
 

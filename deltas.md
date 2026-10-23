@@ -4,7 +4,7 @@
 
 **Repository:** https://github.com/VTSTech/libslang-vk  
 **Baseline audit:** [audit.md](audit.md) @ commit 249734b  
-**Date:** 2026-10-21
+**Date:** 2026-10-21 (updated 2026-10-24 — M4.08 closures)
 
 This ledger tracks findings that have been **fixed and verified**. Each entry preserves the
 original audit finding (title, severity, location) and records the resolution actually shipped:
@@ -12,8 +12,10 @@ what changed, in which files, and how it was verified. Once an entry appears her
 from `audit.md` entirely — its master table, priority matrix, and counts list only the
 open findings; this ledger is the single record of closures.
 
-Five findings are closed: the three Medium ones from the robustness wave (ROB-33, ROB-34,
-ROB-35) and two Low ones (SEC-07, PERF-09).
+Seven findings are closed: the three Medium ones from the robustness wave (ROB-33, ROB-34,
+ROB-35) and four Low ones (SEC-07, PERF-09, plus the M4.08 wave: TEST-12, ARCH-04). One
+further finding is **partially** closed and keeps its `audit.md` entry: ROB-36 (the
+test half shipped; the parser refactor remains open).
 
 | ID | Severity | Category | Title | Closed |
 |----|----------|----------|-------|--------|
@@ -22,6 +24,8 @@ ROB-35) and two Low ones (SEC-07, PERF-09).
 | ROB-35 | Medium | Robustness | Limited error recovery for Vulkan device lost scenarios | 2026-10-21 |
 | SEC-07 | Low | Security | C API lacks input validation for null handles | 2026-10-21 |
 | PERF-09 | Low | Performance | Per-frame allocations in render path | 2026-10-21 |
+| TEST-12 | Low | Testing | No performance benchmarking framework | 2026-10-24 |
+| ARCH-04 | Low | Architecture | Single-threaded design limits concurrent use cases | 2026-10-24 |
 
 ---
 
@@ -370,5 +374,150 @@ compile.
   (The other reference implementation, **Chocolate-Doom-VK**, is engine-locked
   to 35 FPS, so it exercises the shader path but its frame rate says nothing
   about the shader cost.)
+
+---
+
+### Architecture
+
+#### ARCH-04: Single-threaded design limits concurrent use cases
+
+| Property | Value |
+|----------|-------|
+| **Severity** | Low |
+| **Category** | Architecture |
+| **File(s)** | `include/slangvk/runner.hpp`, `src/vk/device.cpp` |
+
+**Original finding.** The library is designed as single-threaded per device, which limits its use in multi-threaded applications. While this simplifies the implementation, it prevents concurrent operations on the same device.
+
+**Current behavior:** All operations on a Device are assumed to be single-threaded. There's no synchronization for concurrent access to the same device from multiple threads.
+
+**Resolution.**
+- The contract is now **stated in the public headers** — a full-contract
+  block at the top of `include/slangvk/runner.hpp`: the library is
+  single-threaded per Device *by design* (plan §5); a Device and
+  everything created from it (Image, Preset, Chain, command submission)
+  must be created, used and destroyed by one thread at a time, with any
+  cross-thread synchronization supplied by the host; distinct Device
+  instances (separate Vulkan devices/queues) are independent and may be
+  used concurrently.
+- `@par Thread safety` notes on **`Device`**, **`Image`** and
+  **`Preset`** carry the per-class slice of the contract. `Preset` adds
+  the nuance that it is immutable after load, so const access — chains
+  rendering from a shared preset — is safe from multiple threads. The
+  existing `Chain` and `SetShaderRootDir` notes predate this entry.
+- The **core layer** is documented as stateless apart from the
+  shader-root global (`g_shaderRootDir`): concurrent `ParsePreset`,
+  `TranslateSlang` and `CompileSlang` calls are fine once the root is
+  set; `SetShaderRootDir` must not race with parses (its existing note
+  already says so).
+
+**Contract and limits (stated rather than glossed over).**
+- Nothing gained locks: the guarantee is exactly "one thread at a time
+  per Device subtree". Hosts sharing an object across threads still
+  need their own synchronization — the headers now say so instead of
+  leaving it to be discovered.
+- The claims were written after a statics audit of the core layer: the
+  only cross-call statics in `slang_translate.cpp` / `slang_compile.cpp`
+  are `const` (regex tables, type maps — thread-safe after init) or the
+  mutex-guarded one-time `glslang::InitializeProcess()`. Concurrent
+  `CompileSlang` calls are therefore supported, and the header says so.
+- Thread-safety **annotations** (e.g. `guarded_by` attributes) and
+  optional multi-threaded support were considered and are **non-goals**
+  for a single-threaded-by-design runner; this closure is "documented",
+  not "made thread-safe".
+
+**Verification.**
+- Docs-only change on top of the verified M4.07 code: the full test
+  suite (22/22) stays green.
+- The statics audit above was performed by reading every `static`
+  declaration in `src/core/slang_translate.cpp` and
+  `src/core/slang_compile.cpp` before writing the contract text.
+
+---
+
+### Testing
+
+#### TEST-12: No performance benchmarking framework
+
+| Property | Value |
+|----------|-------|
+| **Severity** | Low |
+| **Category** | Testing |
+| **File(s)** | `benchmarks/`, `CMakeLists.txt` |
+
+**Original finding.** The library lacks a dedicated performance benchmarking framework to track performance regressions and measure optimization effectiveness. While the conformance tests include timing, they're focused on correctness rather than performance.
+
+**Current behavior:** Performance is measured informally through conformance test timing and manual testing, but there's no systematic way to track performance over time or measure the impact of changes.
+
+**Resolution.**
+- Six google/benchmark (v1.9.1, pinned FetchContent) executables build
+  with the library behind `-DSLANGVK_BUILD_BENCHMARKS=ON`: preset parse,
+  slang translate, slang compile, chain create+destroy, blit render,
+  FXAA render. The original M0 suite had machine-specific wiring and
+  never produced a valid measurement off its author's workstation; the
+  rework links the in-tree `slangvk::slangvk` target (transitive
+  glslang), uses repo-relative data roots, wires in the orphaned
+  `bench_vk_render_fxaa.cpp`, and gives every bench failure counters +
+  first-failure diagnostics — so an environment problem reads as an
+  error, not as a suspiciously fast number.
+- Runner scripts for Windows (VS2022/MSVC, no Vulkan SDK needed) and
+  Linux ship in `benchmarks/scripts/`.
+- [benchmarks/README.md](benchmarks/README.md) documents the measurement
+  contract and carries the reference numbers: lavapipe (2 vCPU sandbox,
+  GCC 14.2) and the first real-GPU run (RX 560 / Windows 11 / MSVC
+  19.44) — an FXAA frame completes end-to-end in **411 µs (~2,400 FPS
+  ceiling, 13.1× the software rasterizer)**, blit presentation in
+  **225 µs (5.1×)**.
+- The framework's first catch is already part of this release: its
+  cross-platform numbers surfaced the `TranslateSlang` double
+  file-read, fixed in M4.08 (see the changelog).
+
+**Verification.**
+- All six benchmarks run green on both reference environments and
+  produce stable numbers across rebuilds (translate 82.6 µs vs the
+  81.6 µs post-fix reference on the sandbox).
+- The suite builds clean under MSVC 19.44 / VS2022 and ran end-to-end
+  on the RX 560 host.
+
+**Limits (stated rather than glossed over).** CI wiring — running the
+CPU benches on a CI runner and failing on regression thresholds — is
+the one outstanding slice of the original recommendation; the
+Vulkan-device benches stay local runs by nature.
+
+---
+
+### Robustness (partial — ROB-36 remains open)
+
+#### M4.08 delivered for ROB-36: the parser edge-case test slice
+
+ROB-36 ("preset parser has complex state machine with edge cases") is
+**not closed** — the recommended refactor into smaller components is
+untouched — but the finding's other half, "add more comprehensive unit
+tests for edge cases and error conditions", is now done, and the
+parser's contract on hostile input is pinned instead of folklore.
+
+**What shipped.** 23 checks in `tests/test_preset_parser.cpp`
+(`rob36:` labels), written after reading the parser so they pin
+*actual* behavior, not wishes: empty files (rejected at top level with
+the named "preset has no shader passes" error, yet legal as
+`#reference` targets — the asymmetry the deep-chain merge relies on);
+lines without `=` skipped; unknown keys inert; duplicate keys
+last-wins; CRLF inputs identical to LF; comment forms (full-line,
+trailing, non-`#reference` line-opening `#`) with a quoted `#` literal
+surviving; missing `#reference` targets failing with the full
+"referenced preset failed → cannot open preset file" cause chain;
+self- and two-file reference cycles terminating in the named
+"preset #reference depth limit exceeded" error; the depth boundary
+itself (a 9-file chain parses, a 10-file chain rejects); and the
+ROB-20 8 MiB size cap rejecting before any large allocation.
+
+**What stays open.** The refactor recommendation: `preset_parser.cpp`
+is still one ~960-line state machine. The new tests are the safety net
+that will make that refactor reviewable when it happens.
+
+**Verification.** The parser test binary reports ALL PASS (23 new
+checks; 22/22 ctest overall) and the translate bench is unchanged
+(82.6 µs, within noise of the 81.6 µs reference) — the tests pin
+behavior without perturbing it.
 
 ---

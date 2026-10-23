@@ -19,7 +19,6 @@
   - [Maintainability](#maintainability)
   - [Performance](#performance)
   - [New Features](#new-features)
-  - [Architecture](#architecture)
   - [Testing](#testing)
 - [Priority Matrix](#priority-matrix)
 - [Architecture Strengths](#architecture-strengths)
@@ -30,13 +29,13 @@
 
 This audit covers libslang-vk, a C++23 library (~15,000 lines) that parses, translates, and compiles libretro shader presets (.slangp/.slang) with a full Vulkan execution path. The audit examined the core parsing layer, Vulkan runner implementation, C API surface, build system, test suite, and examples.
 
-**Total findings: 8** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. All 3 Medium severity findings (ROB-33, ROB-34, ROB-35) and 2 Low findings (SEC-07, PERF-09) have been closed; the 8 remaining findings are Low severity, spanning maintainability, performance, feature and testing.
+**Total findings: 8** across 7 categories. No High severity findings were identified — the codebase demonstrates strong security practices with proper error handling, input validation, and clean-room implementation against RetroArch. All 3 Medium severity findings (ROB-33, ROB-34, ROB-35) and 4 Low findings (SEC-07, PERF-09, TEST-12, ARCH-04) have been closed and recorded in [deltas.md](deltas.md); the 6 remaining findings are Low severity, spanning robustness, maintainability, performance, features and testing.
 
 Key strengths include excellent error handling with std::expected, clean separation of concerns between core and Vulkan layers, comprehensive test coverage with golden image comparisons, and robust build system with dependency pinning. The codebase successfully avoids RetroArch code contamination through the provenance gate and demonstrates mature Vulkan resource management patterns.
 
 The most impactful remaining finding is the SPIR-V cache (PERF-08 — the library now supplies the key, the host-side store and the in-process memo remain).
 
-**Status update (2026-10-24):** TEST-12 is closed — the in-tree benchmarking framework (six google/benchmark executables behind `-DSLANGVK_BUILD_BENCHMARKS=ON`, documented in `benchmarks/README.md`) exists and already caught and guided a real optimization (the `TranslateSlang` single-read fix, measured −18% per call on Windows). ARCH-04's documentation half is closed (thread-safety contract stated in the public headers) and ROB-36's test half is closed (23 pinned parser edge-case checks); the remaining halves and the other Low findings stay open. CI wiring for the benchmarks is the one outstanding slice of TEST-12's recommendation.
+**Status update (2026-10-24, M4.08):** TEST-12 and ARCH-04 are closed and recorded in [deltas.md](deltas.md) — the benchmark framework shipped in M4.08 already caught and guided a real optimization (the `TranslateSlang` single-read fix, −18% per call on Windows), and the thread-safety contract is stated in the public headers. ROB-36's test half shipped there too (23 pinned parser edge-case checks, recorded as a partial entry in deltas.md); the parser refactor keeps this finding open.
 
 ---
 
@@ -59,9 +58,7 @@ The most impactful remaining finding is the SPIR-V cache (PERF-08 — the librar
 | MAINT-23 | Low | Maintainability | C API and C++ API have different lifetime rules |
 | PERF-08 | Low | Performance | No caching of compiled SPIR-V shaders |
 | FEAT-06 | Low | New Features | No shader hot-reloading during runtime |
-| ARCH-04 | Low | Architecture | Single-threaded design limits concurrent use cases |
 | TEST-11 | Low | Testing | Limited integration testing for full pipeline |
-| TEST-12 | Low | Testing | No performance benchmarking framework |
 
 Severity levels:
 - **High** — Affects correctness, security, or data integrity. Fix soon.
@@ -92,14 +89,10 @@ The preset parser implements a complex state machine for handling .slangp files 
 
 **Recommendation:** Consider refactoring the parser into smaller, more focused components with clearer separation of concerns. Add more comprehensive unit tests for edge cases and error conditions.
 
-**Resolution (2026-10-24, test half):** An edge-case slice (23 checks) now
-pins the parse contract in `tests/test_preset_parser.cpp`: empty files
-(rejected at top level, legal as `#reference` targets), garbage lines
-without `=`, unknown-key tolerance, duplicate-key last-wins, CRLF
-inputs, comment forms (including quoted `#` literals), missing
-`#reference` targets, self- and two-file reference cycles (named
-depth-cap errors), the 9-vs-10-file reference-chain depth boundary, and
-the ROB-20 8 MiB size cap. The refactor recommendation stays open.
+**Status (2026-10-24):** the finding's test half shipped — 23 pinned
+edge-case checks in `tests/test_preset_parser.cpp`, recorded as a
+partial entry in [deltas.md](deltas.md). The refactor recommendation
+below stays open.
 
 **Impact:** Would improve maintainability and reduce the risk of subtle parsing bugs in edge cases.
 
@@ -188,37 +181,6 @@ The library doesn't support hot-reloading shader files during runtime. Once a pr
 
 ---
 
-### Architecture
-
-#### ARCH-04: Single-threaded design limits concurrent use cases
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Low |
-| **Category** | Architecture |
-| **File(s)** | `include/slangvk/runner.hpp`, `src/vk/device.cpp` |
-
-The library is designed as single-threaded per device, which limits its use in multi-threaded applications. While this simplifies the implementation, it prevents concurrent operations on the same device.
-
-**Current behavior:** All operations on a Device are assumed to be single-threaded. There's no synchronization for concurrent access to the same device from multiple threads.
-
-**Recommendation:** Add thread safety annotations and consider adding optional multi-threaded support for scenarios where concurrent access is needed. Document the current thread-safety guarantees clearly.
-
-**Resolution (2026-10-24, documentation half):** The contract is now
-stated in the public headers — a full-contract block at the top of
-`include/slangvk/runner.hpp` (single-threaded per Device by design;
-distinct Devices independent; core layer stateless apart from the
-shader-root global; glslang init mutex-guarded, concurrent
-`CompileSlang` supported) plus `@par Thread safety` notes on `Device`,
-`Image` and `Preset` (the existing `Chain` and `SetShaderRootDir` notes
-predate this). Annotations and optional multi-threaded support remain
-non-goals for a single-threaded-by-design runner; the item closes as
-"documented".
-
-**Impact:** Would enable the library to be used in multi-threaded applications while maintaining the simple single-threaded API for most use cases.
-
----
-
 ### Testing
 
 #### TEST-11: Limited integration testing for full pipeline
@@ -239,40 +201,12 @@ While the library has comprehensive unit tests and golden image comparisons, it 
 
 ---
 
-#### TEST-12: No performance benchmarking framework
-
-| Property | Value |
-|----------|-------|
-| **Severity** | Low |
-| **Category** | Testing |
-| **File(s)** | `tests/` |
-
-The library lacks a dedicated performance benchmarking framework to track performance regressions and measure optimization effectiveness. While the conformance tests include timing, they're focused on correctness rather than performance.
-
-**Current behavior:** Performance is measured informally through conformance test timing and manual testing, but there's no systematic way to track performance over time or measure the impact of changes.
-
-**Recommendation:** Add a benchmarking framework that can measure key metrics like compile time, render time, memory usage, and frame rates. Include it in CI to catch performance regressions.
-
-**Resolution (2026-10-24):** A benchmarking framework now ships in-tree:
-six google/benchmark (v1.9.1) executables behind
-`-DSLANGVK_BUILD_BENCHMARKS=ON` covering preset parsing, slang
-translation, glslang compilation, chain creation, and the blit/FXAA
-render paths — with failure counters, repo-relative data roots, and a
-documented measurement contract (`benchmarks/README.md`, including
-lavapipe reference numbers and first real-GPU RX 560 results). Wiring
-it into CI is the remaining slice of this recommendation.
-
-**Impact:** Would enable systematic performance optimization and provide data-driven insights for improvement decisions.
-
----
-
 ## Priority Matrix
 
 | Timeline | Findings |
 |----------|----------|
 | **Short term (v0.4.x)** | PERF-08 (SPIR-V caching) |
 | **Medium term (v0.5.0+)** | MAINT-22, MAINT-23, FEAT-06, TEST-11, ROB-36 (parser refactor) |
-| **Closed (2026-10-24)** | TEST-12 (benchmark framework; CI wiring outstanding), ARCH-04 (thread-safety docs), ROB-36 (edge-case test slice) |
 
 Guidelines for timeline assignment:
 - **Near term** — Medium severity findings that impact core functionality and developer experience
