@@ -37,6 +37,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(SLANGVK_BUILD_TESTS "Build the unit test suite" ON)
 option(SLANGVK_BUILD_EXAMPLES "Build the example programs" ON)
+option(SLANGVK_BUILD_BENCHMARKS "Build the benchmark suite (FetchContent google/benchmark)" OFF)
 option(SLANGVK_BUILD_SHARED "Also build the shared library variant" ON)
 option(SLANGVK_ENABLE_VK "Build the Vulkan runner (src/vk; needs Vulkan-Headers + volk + VMA, fetched automatically)" ON)
 option(SLANGVK_SYSTEM_GLSLANG "Link a system-installed glslang (find_package CONFIG) instead of the pinned FetchContent copy (risk-3 size lever)" OFF)
@@ -157,6 +158,10 @@ endif()
 
 if(SLANGVK_BUILD_EXAMPLES)
         add_subdirectory(examples)
+endif()
+
+if(SLANGVK_BUILD_BENCHMARKS)
+        add_subdirectory(benchmarks)
 endif()
 
 install(TARGETS slangvk
