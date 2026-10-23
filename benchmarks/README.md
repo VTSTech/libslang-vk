@@ -143,7 +143,7 @@ Release binaries from `build/benchmarks/Release/`.
 | Benchmark | Reference sandbox (lavapipe) | RX 560 / Windows | Reading |
 |---|---|---|---|
 | `BM_PresetParser` | 5.15 µs | 104 µs | dominated by per-iteration file-open tax (see below) |
-| `BM_SlangTranslate` | 84.4 µs | 1,364 µs | file-open tax (×2 opens) + MSVC codegen; profile follow-up flagged |
+| `BM_SlangTranslate` | 84.4 µs | 1,119 µs (1,364 µs pre-fix) | one file open left (was two — see optimization note below); remainder = open tax + MSVC codegen |
 | `BM_SlangCompile` | 1,046 µs | 3,831 µs | ~3.6× ≈ MSVC vs GCC on glslang-heavy code (I/O amortized) |
 | `BM_VkChainCreate` | 1,341 µs | 2,514 µs | AMD Windows PSO compile heavier than lavapipe's; one-time per chain |
 | `BM_VkRenderIteration` | CPU 21.7 µs, wall 1,150 µs | CPU 75.0 µs, wall **225 µs** | wall 5.1× faster — real GPU executes the pass |
@@ -160,11 +160,12 @@ real pipeline compilation, lavapipe does not.
 - **The parse/translate/compile benches hand the library a file path**
   inside the timed loop, and the library re-reads the file every
   iteration: `ParsePreset` opens it once per call
-  (`src/core/preset_parser.cpp:317`); `TranslateSlang` opens it twice —
-  once to translate, once to re-read and hash the bytes
+  (`src/core/preset_parser.cpp:317`). `TranslateSlang` used to open it
+  twice — once to translate, once to re-read and hash the bytes
   (`src/core/slang_translate.cpp:152`, `:1498`, `:1607` — line numbers of
-  the measured build; the second read has since been removed, see the
-  optimization note below). On Windows
+  the pre-fix build); the second read has been removed and the post-fix
+  re-run is recorded in the table above, see the optimization note
+  below. On Windows
   every open pays NTFS path resolution plus the Defender filter port —
   roughly 0.1 ms (the parser row's 104 µs vs 5.15 µs, where a warm
   Linux open is 1–2 µs, is mostly this tax). These rows measure
@@ -185,6 +186,14 @@ takes 84 µs of CPU on Linux). It now reads the file once: the include
 walk captures the raw top-level bytes and the fingerprint is computed
 from that capture, with byte-for-byte parity verified across LF, CRLF,
 include-resolved and failure-path cases.
+
+Confirmed on this RX 560 box, same day, only change being the fix:
+`bench_slang_translate` measured **1,364 µs** pre-fix → **1,119 µs**
+post-fix (−245 µs, −18%; 640 iterations, 890 items/s). That is one
+open+read+close cycle eliminated per call. Desktop runs are
+uncontrolled for Defender/cache state, so treat the exact delta as
+±run noise; the direction matches the Linux sandbox measurement
+(84.4 → 81.6 µs, where a read is ~1–2 µs).
 
 ## Changes in this iteration (vs the original M0 drop)
 
