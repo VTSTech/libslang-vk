@@ -5,7 +5,8 @@ preset parsing, slang→GLSL translation, glslang→SPIR-V compilation, Vulkan
 chain creation and per-frame rendering (plain and FXAA). Written by VTSTech
 (Nigel Todman); tested, fixed and documented against the M4.07 tree in a
 clean-room container (GCC 14.2, Debian 13, no Vulkan driver installed — the
-Vulkan numbers below are lavapipe/CPU).
+original Vulkan numbers below are lavapipe/CPU; a first real-GPU run is
+recorded further down).
 
 ---
 
@@ -130,6 +131,57 @@ of the heavier chain; the wall delta is the shader cost.
 Raw JSON for this run is archived alongside the project docs
 (`download/bench/*.json` in the working copy that produced this README).
 
+## Results — real GPU (first hardware run)
+
+Radeon RX 560, Windows 11, 8 threads @ 3.6 GHz, VS2022 BuildTools
+(MSVC 19.44, Release /O2), google/benchmark v1.9.1 — run by VTSTech,
+2026-10-23. First numbers from a real driver + GPU; every prior run was
+lavapipe. The FXAA log confirms the device
+(`Device created: Radeon RX 560 Series`) and the render benches run on
+Release binaries from `build/benchmarks/Release/`.
+
+| Benchmark | Reference sandbox (lavapipe) | RX 560 / Windows | Reading |
+|---|---|---|---|
+| `BM_PresetParser` | 5.15 µs | 104 µs | dominated by per-iteration file-open tax (see below) |
+| `BM_SlangTranslate` | 84.4 µs | 1,364 µs | file-open tax (×2 opens) + MSVC codegen; profile follow-up flagged |
+| `BM_SlangCompile` | 1,046 µs | 3,831 µs | ~3.6× ≈ MSVC vs GCC on glslang-heavy code (I/O amortized) |
+| `BM_VkChainCreate` | 1,341 µs | 2,514 µs | AMD Windows PSO compile heavier than lavapipe's; one-time per chain |
+| `BM_VkRenderIteration` | CPU 21.7 µs, wall 1,150 µs | CPU 75.0 µs, wall **225 µs** | wall 5.1× faster — real GPU executes the pass |
+| `BM_VkRenderFXAA` | CPU 27.3 µs, wall 5,394 µs | CPU 59.4 µs, wall **411 µs** | wall **13.1× faster** (~2,400 FPS ceiling incl. fence sync) |
+
+Headline: an FXAA frame completes end-to-end (submit + execute + fence
+wait) in **411 µs** on the RX 560 — a ~2,400 FPS ceiling for the shader
+pass itself, versus 5.4 ms on a software rasterizer. Chain creation
+being *slower* than lavapipe is expected: the Windows AMD driver does
+real pipeline compilation, lavapipe does not.
+
+### Why the CPU-side rows differ so much (read before comparing)
+
+- **The parse/translate/compile benches hand the library a file path**
+  inside the timed loop, and the library re-reads the file every
+  iteration: `ParsePreset` opens it once per call
+  (`src/core/preset_parser.cpp:317`); `TranslateSlang` opens it twice —
+  once to translate, once to re-read and hash the bytes
+  (`src/core/slang_translate.cpp:152`, `:1498`, `:1607`). On Windows
+  every open pays NTFS path resolution plus the Defender filter port —
+  roughly 0.1 ms (the parser row's 104 µs vs 5.15 µs, where a warm
+  Linux open is 1–2 µs, is mostly this tax). These rows measure
+  I/O + parse together, and the tax is a Windows-environment cost, not
+  a library regression.
+- **Toolchain gap:** the cleanest codegen-only estimate is the compile
+  row (glslang-dominated, I/O amortized): ~3.6× MSVC vs GCC.
+  Cross-OS CPU numbers are orientation only — compare like with like.
+- **Render CPU per frame is higher on Windows** (75.0/59.4 µs vs
+  21.7/27.3 µs): WDDM's user-mode submit path is heavier than
+  lavapipe's in-process queue. The wall columns are the meaningful
+  cross-machine metric.
+
+**Optimization note found by this run:** `TranslateSlang`'s per-call
+double read costs ~0.2 ms/iteration on Windows for an operation that
+takes 84 µs of CPU on Linux. A buffer-based overload (read the file
+once, hash the bytes already in memory) would remove one open and the
+redundant read on every host, not just Windows.
+
 ## Changes in this iteration (vs the original M0 drop)
 
 The original suite (commit `6ea23c4`) had machine-specific build wiring and
@@ -222,6 +274,12 @@ export VK_ICD_FILENAMES=<root>/usr/share/vulkan/icd.d/lvp_icd.json
   teardown would isolate pipeline compile from resource allocation.
 - Render benches are synchronous-path only; the M4.06+ async
   (`render_async`/`wait_async`, `framesInFlight`) path is unbenchmarked.
-- Hardware numbers (the DevilutionX fork's RX 560 field environment) are
-  the real target; the submit-side columns here should carry over, the
-  wall columns will not.
+- Hardware numbers: the first RX 560 run is recorded above (2026-10-23).
+  Remaining environment gaps: a Ubuntu-VM lavapipe run as a third
+  reference column.
+- From-memory variants of the parse/translate/compile benches would
+  split the Windows file-open tax from library CPU (see the RX 560
+  section) and make cross-toolchain numbers comparable.
+- A buffer-based `TranslateSlang` overload (read once, hash the bytes
+  already in memory) would remove the per-call double read on every
+  host — flagged by the RX 560 numbers.
