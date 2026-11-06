@@ -344,6 +344,13 @@ typedef struct slangvk_input_frame {
         uint32_t width;
         uint32_t height;
         uint32_t rotation; /**< SLANGVK_ROTATION_*. */
+        VkBuffer pixel_buffer; /**< Optional single-submit upload: a TRANSFER_SRC host-visible buffer
+                                    holding the frame's tightly-packed pixels (width*height*texel).
+                                    When non-NULL the chain copies it into `image` inside its own
+                                    command buffer (the separate slangvk_image_update submit + fence
+                                    wait disappears; the buffer must stay mapped and untouched until
+                                    render() returns). Keep NULL to feed `image` via
+                                    slangvk_image_update as before. */
 } slangvk_input_frame;
 
 /** @brief Per-frame inputs (values written into the params UBO). */

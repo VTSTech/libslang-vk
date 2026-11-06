@@ -149,6 +149,7 @@ slv::InputFrame InputFrom(const slangvk_input_frame *input)
         out.width = input->width;
         out.height = input->height;
         out.rotation = static_cast<slv::Rotation>(input->rotation);
+        out.pixelBuffer = input->pixel_buffer;
         return out;
 }
 
