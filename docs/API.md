@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.06 (2026-10-21). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
+| **Status** | **Draft — pre-freeze.** Documents the delivered public API as of M4.10 (2026-11-06). The API freeze is the M5 gate (PLAN §11): until then, names/semantics may still change; this document is the review baseline for the freeze. |
 | **Audience** | Host-application authors consuming libslang-vk; maintainers reviewing the M5 freeze. |
 | **Companion docs** | [SPEC.md](SPEC.md) (preset-format contract) · [PLAN.md](PLAN.md) (design rationale, §6 sketch → this document) · [CHECKLIST.md](CHECKLIST.md) (implementation status) · [CHANGELOG.md](CHANGELOG.md) |
 | **Header of record** | Everything here is generated from the headers under `include/slangvk/`; if code and this file disagree, the headers win and this file gets fixed. |
@@ -22,6 +22,8 @@ libslang-vk parses, translates and compiles **libretro slang shader presets** (`
 | **Core** — preset data model, `.slangp` parsing, `.slang` → per-stage GLSL translation, glslang → SPIR-V compilation | `slv::preset` | `slangvk/core/types.hpp`, `preset_parser.hpp`, `slang_translate.hpp`, `slang_compile.hpp` | No (`vulkan.h` never included) |
 | **Runner** — Vulkan device management, chain execution, presentation, host image helpers | `slv` | `slangvk/runner.hpp` | Yes (runtime loader via volk; no link-time dependency) |
 
+A third surface rides on the runner layer: `slangvk/c.h` — a pure-`extern "C"` binding over the same runner for C and FFI hosts (M4.05, extended M4.07–M4.10). It declares no semantics of its own; every contract below applies to it verbatim (§5.6).
+
 Build-time switches that affect what the umbrella header pulls in:
 
 - `SLANGVK_ENABLE_VK` (CMake option, default `ON`) builds the runner. `OFF` gives a core-only library.
@@ -36,8 +38,8 @@ The load-bearing boundary: the core layer never touches Vulkan. It consumes shad
 - **Export macro:** every public symbol is annotated `SLANGVK_API` (`slangvk/export.h`). Static builds need no annotation; shared builds export/import annotated symbols (`SLANGVK_BUILDING_SHARED` / `SLANGVK_SHARED`).
 - **ABI contract:** the API uses C++23 vocabulary types (`std::expected`, `std::span`, `std::string_view`, `std::variant`) — **ABI stability across toolchains is explicitly not promised**. Shared builds are distributed per platform/toolchain as CI-built artifacts, the way the reference host's releases are. Static linking per toolchain is the recommended consumption.
 - **Vulkan at link time:** none. The runner loads the Vulkan library at runtime through volk internally; consumers need no Vulkan SDK to link — only the Vulkan headers that ship alongside `runner.hpp` for the handle types. `Device::create` fails with `vk_init_failed` when no loader/runtime is present.
-- **Version macros:** `SLANGVK_VERSION_MAJOR/MINOR/PATCH` (currently 0/1/0). Pre-1.0, expect surface changes; the freeze commits to semver post-1.0.
-- **C++ standard:** C++23. No C API and no non-C++ bindings in v1 (PLAN §2 non-goal).
+- **Version macros:** `SLANGVK_VERSION_MAJOR/MINOR/PATCH` (currently 0/4/6, `slangvk/export.h`). Pre-1.0, expect surface changes; the freeze commits to semver post-1.0.
+- **C++ standard:** C++23 for the native API. Since M4.05 the runner also ships a pure-C ABI (`include/slangvk/c.h`) — opaque handles, POD structs, status codes, no `std::` types at the boundary — consumable from C and any FFI language (§5.6). The core layer stays C++-only.
 
 ## 3. Error handling: `std::expected` + the failure contract
 
@@ -312,7 +314,7 @@ One call runs parse → translate (per pass, with `#pragma name` seeding done fo
 2. `spirvCache.load(key)` is called — a hit means the compile is **skipped**;
 3. on a miss the library compiles and calls `spirvCache.store(key, spirv)`.
 
-The host therefore needs no knowledge of glslang, the translation, or the include graph — only the key and the bytes. The C surface mirrors this (`slangvk_spirv_cache`, §"C ABI" in `c.h`).
+The host therefore needs no knowledge of glslang, the translation, or the include graph — only the key and the bytes. The C surface mirrors this (`slangvk_spirv_cache`, §5.6).
 
 `ParameterInfo { name, description, defaultValue, minimum, maximum, step }` is the UI-facing merged view: `#pragma parameter` metadata with preset-file overrides applied to the default.
 
@@ -390,6 +392,20 @@ public:
     auto wait_async(VkFence fence) -> std::expected<void, Error>;
 
     /**
+     * @brief Waits for EVERY in-flight chain frame to complete (M4.10).
+     *
+     * Blocks until all of the chain's submitted (not yet retired) frames
+     * have signalled their fences, then reclaims each frame's fence and
+     * command buffer. No-op when nothing is in flight. The host calls
+     * this before consuming any chain output it did not already fence on
+     * its own (screenshot readbacks, unstructured teardown-time reads),
+     * or before overwriting host-owned buffers a submitted frame reads
+     * (e.g. an InputFrame::pixelBuffer staging write with no per-frame
+     * slot of its own).
+     */
+    auto wait_idle() -> std::expected<void, Error>;
+
+    /**
      * @brief Rebuilds the chain's GPU resources (ROB-35).
      *
      * Releases the chain's pipelines, render passes, framebuffers, descriptor
@@ -409,6 +425,7 @@ public:
 
 - Owns pipelines (cached per format), FBOs, sampler cache (2 filters × 3 wraps × 2 mip modes, lazily created), history rings, feedback buffers, descriptor sets and per-pass UBOs. The descriptor sets and UBOs are **per frame slot** (see `ChainOptions::framesInFlight`), so concurrent frames never overwrite each other's parameters or texture bindings.
 - **`render` is synchronous:** records + submits one command buffer and waits for the frame to retire. It is implemented as `render_async()` + `wait_async()`, so both entry points share one recording implementation. Single-threaded per `Chain` — documented API behavior, not an oversight (PLAN §5.3).
+- **The async fence is chain-owned:** `render_async()` hands out a fence the chain reuses across frames — never destroy it and never wait on it directly; retire it with `wait_async(fence)`, the next `render`/`render_async` call, or `wait_idle()` (M4.10), all of which reclaim it exactly like the sync path does internally.
 - **The host's SPIR-V cache** (`PresetLoadOptions::spirvCache`): before compiling a pass, the library asks the host for the pass's SPIR-V (by the library's content key) and hands the freshly compiled bytes back afterwards. The key is a digest of the exact GLSL handed to glslang plus the compiler's version and target, so it changes exactly when the compiled output would — a host caching by it cannot serve a stale shader, not even when the preset includes other files. The library keeps no disk cache; the host owns the bytes.
 - **The render path does not allocate per frame:** the command buffer belongs to the frame slot (reset, not reallocated), the uniform blocks are filled in place in their mapped UBOs, the per-frame vectors are chain scratch, and the data that only changes on a rebuild (the LUT sizes, the merged parameter overrides) is cached.
 - **`render`/`render_async` take the preset's chain by reference:** the chain borrows its preset (a `Preset` must outlive every `Chain` made from it, and must not be moved while the chain exists) so a device-lost recovery can rebuild the chain from the preset's pass data and re-upload the preset's textures.
@@ -416,18 +433,23 @@ public:
 - **The history ring and the feedback buffers are indexed by a logical frame index**, not by the completion order, so `OriginalHistoryN` and the feedback reader stay correct when frames overlap. The history ring holds `depth + framesInFlight` slots.
 - `resize` stores a new output target size (zero width/height is an `invalid_argument`) and touches no GPU resources. Render reacts to size drift lazily: pass FBO sizes derive from the per-frame `InputFrame` size plus the stored target, and pass targets, the history ring and the mip copy are (re)created at render when the allocated sizes no longer match. A swapchain extent change must be followed by `resize()` with the new extent before the next render (§8).
 
-### Async rendering (M4.06)
+### Async rendering (M4.06, extended M4.10)
 
 The chain offers a synchronous and an asynchronous entry point:
 
 - **Synchronous (`render`)** — records, submits, and waits for the frame to retire.
 - **Asynchronous (`render_async` + `wait_async`)** — records and submits the frame, then hands the host a fence. The host can do its own CPU work before calling `wait_async()`.
+- **Drain (`wait_idle`, M4.10)** — waits for every in-flight frame to retire (fence + command buffer reclaimed); no-op when nothing is in flight.
 
 ```cpp
 auto fence = chain.render_async(input, target, frame);   // does not block on the GPU
 // ... the host's own work ...
 chain.wait_async(*fence);                                  // before the output is consumed
+// ... or, at a screenshot/teardown boundary:
+chain.wait_idle();                                         // retire everything in flight
 ```
+
+**Presenting an async swapchain frame (M4.10).** A same-queue host may enqueue `vkQueuePresentKHR` of the target image right after `render_async` returns, without waiting the fence first: the presentation engine consumes the image only after the render reaches the front of the queue. The chain's own backpressure keeps this safe — a frame slot is reused only after its previous fence retires, so with `framesInFlight = 1` there is never more than one chain submission in flight, and the *next* async render blocks until the previous frame finished on the GPU. Because the submit now overlaps the host's next-frame work, any host-owned buffer the chain reads (`InputFrame::pixelBuffer`) must be double-buffered, and the chain's output/input images must not be touched from the host until `wait_idle()` (or the frame's own `wait_async`) retires it — screenshot readbacks included.
 
 **Limits.** The number of frames in flight is `ChainOptions::framesInFlight` (1..8, default 1). With 1 the chain drains the previous frame first, so the host still gets real CPU/GPU overlap between the two calls; with more, several frames are outstanding on the GPU at once and each has its own uniform buffers and descriptor sets. Command-buffer pooling and timeline semaphores are **not** implemented.
 
@@ -463,6 +485,17 @@ struct InputFrame {                // the chain's input texture (host-owned)
     VkFormat    format = VK_FORMAT_R8G8B8A8_UNORM;
     uint32_t    width, height;
     Rotation    rotation = Rotation::None;  // fills the Rotation uniform (0..3 = 0/90/180/270°)
+    VkBuffer    pixelBuffer = VK_NULL_HANDLE;
+                                   // optional single-submit upload (M4.05; C mirror M4.09):
+                                   // a TRANSFER_SRC host-mapped buffer (created via
+                                   // Device::createMappedBuffer) holding width*height
+                                   // tightly packed texels of `format`; the chain records
+                                   // the copy at the top of its own frame submit, before
+                                   // the history blits and passes. Requires `image` set;
+                                   // host must not rewrite the buffer until render()
+                                   // returns (async frames: until the fence retires —
+                                   // double-buffer it). Leave null to render without
+                                   // an in-frame upload.
 };
 
 struct Offscreen {                 // output variant: host composites (headless/CI)
@@ -490,15 +523,43 @@ enum class Rotation : uint32_t { None = 0, Cw90 = 1, Cw180 = 2, Cw270 = 3 };
 using OutputTarget = std::variant<SwapchainFrame, Offscreen>;
 ```
 
-Layout rules after `render` returns: the input image is untouched (back in `SHADER_READ_ONLY_OPTIMAL`); an `Offscreen` target image is in `SHADER_READ_ONLY_OPTIMAL` (ready to sample/composite); a `SwapchainFrame` image is in `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` (ready for `vkQueuePresentKHR`).
+Layout rules after `render` returns: the input image is untouched (back in `SHADER_READ_ONLY_OPTIMAL`); an `Offscreen` target image is in `SHADER_READ_ONLY_OPTIMAL` (ready to sample/composite); a `SwapchainFrame` image is in `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` (ready for `vkQueuePresentKHR`). Under the async path these states hold once the frame's fence has retired (§5.4) — same-queue presenters may rely on queue order instead (§8).
+
+### 5.6 The C ABI — `slangvk/c.h` (M4.05; extended M4.07–M4.10)
+
+A drop-in pure-C binding over the runner for C and C++ games, SDL2/SDL3 hosts and FFI languages: opaque handles, POD structs, status codes, no `std::` types at the boundary. The umbrella header pulls it in behind the same gate as `runner.hpp`; both `slangvk` and `slangvk-shared` build the adapter (`src/c_api.cpp`). It declares no semantics of its own — every contract in §5 applies verbatim; this section maps the surface.
+
+| C construct | Mirrors | Notes |
+|---|---|---|
+| `slangvk_result` | `slv::Errc` | Code-for-code (`SLANGVK_OK`, `SLANGVK_ERR_PRESET_PARSE` … `SLANGVK_ERR_VK_ERROR`); `slangvk_result_name()` returns the short name for logs |
+| `slangvk_last_error()` | `Error::message` | Thread-local; valid until the next slangvk call on the same thread; never NULL (empty string after a success) |
+| `slangvk_device` / `_image` / `_preset` / `_chain` | `Device` / `Image` / `Preset` / `Chain` | Opaque handles; destroyed with the matching `slangvk_*_destroy()` |
+| `slangvk_device_options` | `DeviceOptions` | May be NULL (defaults); extension lists are `(const char* const*, count)` pairs |
+| `slangvk_device_info` / `slangvk_device_get_info` | `Device::properties()` | Fixed-size fields (`device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE]`, ids) for host logs/UI |
+| `slangvk_device_get_handles` / `_wait_idle` / `_recover` / `_read_pixels` | same-name C++ methods | `read_pixels` takes a caller-allocated buffer + byte size |
+| `slangvk_image_options` / `_create` / `_update` / `_get_handles` | `Image::CreateInfo` / `create` / `update` / accessors | 0-valued `format`/`usage`/`final_layout` select the C++ defaults |
+| `slangvk_spirv` / `slangvk_spirv_cache` | `PassSpirv` / `SpirvCache` | Function pointers + `user_data` instead of `std::function`; both callbacks may be NULL; `load` returns non-zero on a hit (sizes 0 on a miss) |
+| `slangvk_preset_options` / `_load` / `_pass_count` / `_parameter_count` / `_parameter` | `PresetLoadOptions` / `Preset` | `slangvk_parameter` carries fixed `name[128]` / `description[256]` buffers (the merged pragma+preset view) |
+| `slangvk_chain_create` / `_create_ex` | `Chain::create` | `_ex` adds `slangvk_chain_options` (`frames_in_flight`, `0 = 1`) |
+| `slangvk_chain_resize` / `_set_parameter` / `_pass_output_size` | same-name C++ methods | |
+| `slangvk_input_frame` | `InputFrame` | incl. `pixel_buffer` (M4.09) — the C mirror of `InputFrame::pixelBuffer`; `rotation` is a `SLANGVK_ROTATION_*` uint |
+| `slangvk_frame_info` / `slangvk_swapchain_frame` / `slangvk_offscreen` / `slangvk_rect` | `FrameInfo` / `SwapchainFrame` / `Offscreen` / `Rect` | |
+
+Render entry points:
+
+- `slangvk_chain_render_swapchain` / `slangvk_chain_render_offscreen` — the synchronous `render` for the two output variants.
+- `slangvk_chain_render_swapchain_async` (M4.10) — the async path for the swapchain target: `*out_fence` receives the submission's completion fence. The fence is **chain-owned** — never destroy it, never wait it yourself; the next render (async or sync) and `slangvk_chain_wait_idle()` reclaim it. Same-queue hosts may enqueue the present right after the call (§5.4, "Presenting an async swapchain frame"). The C surface has no offscreen async variant — C++ `render_async` covers both targets via `OutputTarget`.
+- `slangvk_chain_wait_idle` (M4.10) — drains every in-flight chain frame; call before host reads of chain output or host writes of chain input a submitted frame may still touch (screenshot readbacks, single-buffered `pixel_buffer` rewrites).
+
+Error behavior at the boundary: every entry point validates its handles and PODs and reports failures as a `slangvk_result` plus the thread-local message — the C host never sees an exception. `NULL` handles and out-of-range arguments (`rotation > SLANGVK_ROTATION_CW270`, `VK_NULL_HANDLE` views, `NULL` `out_fence`) come back as `SLANGVK_ERR_INVALID_ARGUMENT` with the offending field named in the message.
 
 ## 6. Object lifetimes and threading
 
 - **Creation order:** `Device` → `Preset` (needs `Device&`) → `Chain` (needs `Device&` + `Preset&`). `Image` needs `Device&`.
 - **Destruction order** is the reverse: `Chain`/`Image` before `Preset` before `Device`. The **`Preset` must outlive every `Chain` created from it** — LUT texture views are borrowed from the preset's uploads (M3). In adopt mode the host's `VkInstance`/`VkDevice` must outlive everything created through the `Device`.
-- **Threading:** one thread per `Chain`; `Preset::load` may run concurrently with other loads on other threads (glslang is process-globally guarded); `SetShaderRootDir` is startup-only; sampler/pipeline caches are per-`Chain` and not shared.
+- **Threading (the ARCH-04 contract, stated in the public headers since M4.08):** the library is single-threaded per `Device` by design — a `Device` and everything created from it must be created, used and destroyed by one thread at a time, and hosts reaching the same object from several threads provide the external synchronization. **Distinct `Device` instances are independent** and may be used concurrently from separate threads. A loaded `Preset` is immutable, so const access (chains rendering from a shared preset) is safe from multiple threads. `Preset::load` may run concurrently with other loads (glslang's frontend is serialized by a process-global mutex, §4.4); `SetShaderRootDir` is startup-only; sampler/pipeline caches are per-`Chain` and not shared.
 - **The `Preset` is borrowed, not owned** (M4.06): a `Chain` keeps a reference to the `Preset` it was built from, because a device-lost recovery rebuilds the chain from the preset's pass data and re-uploads the preset's textures. The same rule as above applies: the preset must outlive the chain **and must not be moved while the chain exists** (a move would leave the chain's reference dangling).
-- **The async path borrows its frame's resources** (M4.06): the input image and the output target are borrowed for the duration of the frame, so frames that overlap in time need one input image and one output target each. `wait_async` (or the next `render_async`) releases the frame.
+- **The async path borrows its frame's resources** (M4.06): the input image and the output target are borrowed for the duration of the frame, so frames that overlap in time need one input image and one output target each. `wait_async`, the next `render`/`render_async`, or `wait_idle()` (M4.10) releases a frame; a host-owned buffer the chain reads (`InputFrame::pixelBuffer`) must be double-buffered across async frames.
 - **The host's SPIR-V cache callbacks are called on the loading thread** (M4.07), inside `Preset::load`, once per pass. They must not call back into the library.
 - All public types are move-only (`Device`, `Preset`, `Chain`, `Image`); no copies, no `clone()`.
 
@@ -556,8 +617,10 @@ Per frame, with the host owning acquire/present:
 
 1. Host creates window + surface, enables the surface + `VK_KHR_swapchain` extensions (via `DeviceOptions` in create mode, or by passing an instance that already has them to `adopt`).
 2. Host acquires the next image (`vkAcquireNextImageKHR`), optionally signaling a semaphore it hands to `SwapchainFrame::acquireSemaphore`.
-3. Host calls `chain->render(in, SwapchainFrame{...}, frameInfo)` — the final pass draws into the acquired image's view (letterbox `outputRect`; zero rect = fit and center), leaving it in `PRESENT_SRC_KHR`.
-4. Host presents — no wait semaphore needed (`render` is synchronous/fenced).
+3. Host calls `chain->render(in, SwapchainFrame{...}, frameInfo)` — the final pass draws into the acquired image's view (letterbox `outputRect`; zero rect = fit and center), leaving it in `PRESENT_SRC_KHR`. The async variant (`render_async` in C++, `slangvk_chain_render_swapchain_async` in C, M4.10) returns after the submit instead of the fence: a same-queue host may then enqueue the present immediately — the presentation engine consumes the image only after the render reaches the front of the queue (§5.4).
+4. Host presents — no wait semaphore needed: the sync `render` is fenced, and the async submit is queue-ordered ahead of the present.
+
+A host read of chain output under the async path (screenshot of the rendered swapchain image, teardown readback) must be preceded by retiring the frame — `wait_async(fence)`, or `wait_idle()`/`slangvk_chain_wait_idle()` to drain everything (§5.4).
 
 **Extent changes (window resize / `VK_SUBOPTIMAL_KHR`):** the host must call `chain->resize(newWidth, newHeight)` with the new extent before the next render — rendering with a `SwapchainFrame` whose size differs from the stored target is a hard `invalid_argument` (`render: swapchain size changed; call resize() with the new extent`). `resize()` stores the target only; FBO re-derivation happens lazily at the next render (§5.4).
 
@@ -567,8 +630,8 @@ The chain's internal FBOs keep rendering at their preset-derived sizes; only the
 
 The full format-level list is SPEC §6/§7; these affect API consumers directly:
 
-- **Synchronous everything.** `Preset::load` compiles with glslang inline; `Chain::render` fences. Cold-load cost on huge presets is real (hardware worst measured ~4 s) — warm `Preset` objects ahead of need if load-time UX matters, or serve the bytes from a host cache (`PresetLoadOptions::spirvCache`, §5.3: the library supplies the key, the host owns the store; the library keeps no disk cache of its own).
-- **The async path is one frame deep by default.** `Chain::render` waits for the frame; `render_async` returns a fence and `wait_async` retires it. `ChainOptions::framesInFlight` (1..8) raises the limit — each extra frame costs a set of framebuffers, uniform buffers and descriptor sets per pass. Frames that overlap in time need one input image and one output target each (the chain borrows both for the frame's duration).
+- **Synchronous load, pipelined render.** `Preset::load` compiles with glslang inline — cold-load cost on huge presets is real (hardware worst measured ~4 s) — warm `Preset` objects ahead of need if load-time UX matters, or serve the bytes from a host cache (`PresetLoadOptions::spirvCache`, §5.3: the library supplies the key, the host owns the store; the library keeps no disk cache of its own). Rendering has the async path (`render_async`/`wait_async`/`wait_idle`, §5.4) with `framesInFlight` pipelining; the C ABI's async entry covers the swapchain target only (§5.6).
+- **The async path is one frame deep by default.** `Chain::render` waits for the frame; `render_async` returns a fence and `wait_async` retires it; `wait_idle` (M4.10) drains every in-flight frame at once. `ChainOptions::framesInFlight` (1..8) raises the limit — each extra frame costs a set of framebuffers, uniform buffers and descriptor sets per pass. Frames that overlap in time need one input image and one output target each (the chain borrows both for the frame's duration).
 - **No reload.** Preset switching is replace-and-recreate; no `Preset::reload()` (PLAN §13.2 open question).
 - **Parameters are not preprocessor macros.** `#if`/`#ifdef` on a parameter name is always dead code (SPEC §4.2, M4.03 note) — pack authors porting RetroArch-conditional shaders must define the gate themselves.
 - **Vertex-stage textures, sampler arrays, > 1 UBO per stage, unsized arrays** — hard translate errors; zero corpus exposure (SPEC §7.9).
@@ -579,7 +642,7 @@ The full format-level list is SPEC §6/§7; these affect API consumers directly:
 
 ## 10. Versioning and the M5 freeze
 
-`SLANGVK_VERSION_MAJOR/MINOR/PATCH` (0.4.06 pre-freeze). The freeze is not imminent: M4.xx keeps iterating until the surface is ready, so names and signatures may still change between minor versions. When a freeze is in scope, the M5 gate (PLAN §11) commits to: API freeze against this document, CMake package config + pkg-config, a tagged release and the example app — and from that tag, semver. Freeze-review checklist for maintainers:
+`SLANGVK_VERSION_MAJOR/MINOR/PATCH` (0.4.06 pre-freeze; the macro has not tracked the M4.07–M4.10 milestones). The freeze is not imminent: M4.xx keeps iterating until the surface is ready, so names and signatures may still change between minor versions. When a freeze is in scope, the M5 gate (PLAN §11) commits to: API freeze against this document, CMake package config + pkg-config, a tagged release and the example app — and from that tag, semver. Freeze-review checklist for maintainers:
 
 1. Every public name in `include/slangvk/` is documented here (audit the headers against §4/§5).
 2. Every documented lifetime/threading rule (§6) has a test or PROVENANCE note.
