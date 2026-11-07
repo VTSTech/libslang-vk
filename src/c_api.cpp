@@ -507,6 +507,39 @@ slangvk_result slangvk_chain_render_swapchain(slangvk_chain *chain, const slangv
         return Check(chain->chain.render(InputFrom(input), frame, FrameInfoFrom(frame_info)));
 }
 
+slangvk_result slangvk_chain_render_swapchain_async(slangvk_chain *chain, const slangvk_input_frame *input,
+    const slangvk_swapchain_frame *target, const slangvk_frame_info *frame_info, VkFence *out_fence)
+{
+        if (chain == nullptr || input == nullptr || target == nullptr || out_fence == nullptr)
+                return SetInvalid("chain, input, target and out_fence must be non-NULL");
+        if (input->view == VK_NULL_HANDLE)
+                return SetInvalid("input->view is VK_NULL_HANDLE");
+        if (target->swapchain_image_view == VK_NULL_HANDLE)
+                return SetInvalid("target->swapchain_image_view is VK_NULL_HANDLE");
+        if (input->rotation > SLANGVK_ROTATION_CW270)
+                return SetInvalid("rotation must be a SLANGVK_ROTATION_* value");
+        slv::SwapchainFrame frame;
+        frame.swapchainImageView = target->swapchain_image_view;
+        frame.format = target->format;
+        frame.width = target->width;
+        frame.height = target->height;
+        frame.outputRect = slv::Rect { target->output_rect.x, target->output_rect.y,
+                target->output_rect.width, target->output_rect.height };
+        frame.acquireSemaphore = target->acquire_semaphore;
+        auto rendered = chain->chain.render_async(InputFrom(input), frame, FrameInfoFrom(frame_info));
+        if (!rendered)
+                return Fail(rendered.error());
+        *out_fence = *rendered;
+        return SLANGVK_OK;
+}
+
+slangvk_result slangvk_chain_wait_idle(slangvk_chain *chain)
+{
+        if (chain == nullptr)
+                return SetInvalid("chain is NULL");
+        return Check(chain->chain.wait_idle());
+}
+
 slangvk_result slangvk_chain_render_offscreen(slangvk_chain *chain, const slangvk_input_frame *input,
     const slangvk_offscreen *target, const slangvk_frame_info *frame_info)
 {

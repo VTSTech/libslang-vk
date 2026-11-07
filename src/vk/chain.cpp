@@ -3145,4 +3145,20 @@ auto Chain::wait_async(VkFence fence) -> std::expected<void, Error>
             "wait_async: the fence is not one of this chain's frames in flight"));
 }
 
+auto Chain::wait_idle() -> std::expected<void, Error>
+{
+        Impl &impl = *impl_;
+        // Retire every slot with a live fence (wait + reclaim). Slots without
+        // a fence hold nothing in flight. Device-loss recovery is the caller's
+        // business here, same as wait_async: the error surfaces as-is.
+        for (Chain::Impl::FrameSlot &slot : impl.frameSlots) {
+                if (slot.fence == VK_NULL_HANDLE)
+                        continue;
+                auto drained = impl.WaitSlotFrame(slot);
+                if (!drained)
+                        return std::unexpected(drained.error());
+        }
+        return {};
+}
+
 } // namespace slv

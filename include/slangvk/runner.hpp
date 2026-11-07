@@ -624,6 +624,20 @@ public:
          */
         SLANGVK_API auto wait_async(VkFence fence) -> std::expected<void, Error>;
 
+        /**
+         * @brief Waits for EVERY in-flight chain frame to complete.
+         *
+         * Blocks until all of the chain's submitted (not yet retired) frames
+         * have signalled their fences, then reclaims each frame's fence and
+         * command buffer. No-op when nothing is in flight. The host calls
+         * this before consuming any chain output it did not already fence on
+         * its own (screenshot readbacks, unstructured teardown-time reads),
+         * or before overwriting host-owned buffers a submitted frame reads
+         * (e.g. an InputFrame::pixelBuffer staging write with no per-frame
+         * slot of its own).
+         */
+        SLANGVK_API auto wait_idle() -> std::expected<void, Error>;
+
         /// @cond internal
         auto impl() const -> Impl & { return *impl_; }
         /// @endcond

@@ -442,6 +442,39 @@ slangvk_result slangvk_chain_set_parameter(slangvk_chain *chain, const char *id,
 slangvk_result slangvk_chain_render_swapchain(slangvk_chain *chain, const slangvk_input_frame *input,
     const slangvk_swapchain_frame *target, const slangvk_frame_info *frame_info);
 
+/**
+ * @brief Renders one frame into an acquired swapchain image WITHOUT waiting
+ * for the GPU.
+ *
+ * Records and submits the chain's command buffer and returns immediately;
+ * *out_fence receives the submission's completion fence. The fence is owned
+ * by the chain — never destroy it, and do not wait it yourself: the next
+ * render (async or sync) and slangvk_chain_wait_idle() reclaim it, exactly
+ * like the sync entry point does internally.
+ *
+ * Same-queue hosts may enqueue the present of the target image right after
+ * this call — the presentation engine consumes it only after the render
+ * reaches the front of the queue. Host backpressure: the next render reuses
+ * the frame slot only after its fence retires, so with frames_in_flight = 1
+ * there is never more than one chain submission in flight, and the NEXT
+ * async render blocks until the previous frame finished on the GPU.
+ *
+ * Because the submit is now concurrent with the host's next-frame work, any
+ * host-owned buffer the chain reads (InputFrame::pixelBuffer) must be
+ * double-buffered by the host, and the chain's output/input images must not
+ * be touched from the host until slangvk_chain_wait_idle() (or the next
+ * frame's implicit slot wait) retires the frame — that includes screenshot
+ * readbacks of the rendered swapchain image.
+ */
+slangvk_result slangvk_chain_render_swapchain_async(slangvk_chain *chain, const slangvk_input_frame *input,
+    const slangvk_swapchain_frame *target, const slangvk_frame_info *frame_info, VkFence *out_fence);
+
+/** @brief Waits for every in-flight chain frame to retire (fence + command
+ *  buffer reclaimed). Blocks until the GPU has finished all chain work;
+ *  no-op when nothing is in flight. Call before host reads of chain output
+ *  or host writes of chain input that a submitted frame may still touch. */
+slangvk_result slangvk_chain_wait_idle(slangvk_chain *chain);
+
 /** @brief Renders one frame synchronously into a host-composited view. */
 slangvk_result slangvk_chain_render_offscreen(slangvk_chain *chain, const slangvk_input_frame *input,
     const slangvk_offscreen *target, const slangvk_frame_info *frame_info);
