@@ -1,6 +1,7 @@
 # libslang-vk
 
 [![ci](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml/badge.svg)](https://github.com/VTSTech/libslang-vk/actions/workflows/ci.yml)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/xQXpH5Nj5)
 
 Parse, translate and compile **libretro slang shader presets** (`.slangp` /
 `.slang`) as an embeddable C++23 library — pure-C binding included — with a
