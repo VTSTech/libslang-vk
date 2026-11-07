@@ -5,10 +5,93 @@ slang shader presets — are documented in this file.
 
 Milestones follow the M-series plan in [PLAN.md §11](PLAN.md) (`M0` → `M5`).
 Each milestone corresponds to the matching `M*` commit(s) on `main`, tagged
-`M0` … `M4.08`. Format adapted from
+`M0` … `M4.10`. Format adapted from
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [M4.10] — 2026-11-06
+
+The async path reaches the C ABI: the swapchain target gets a
+record-and-submit entry point that hands the host the submission's fence
+and returns before the GPU retires the frame, and both APIs gain a
+chain-level drain (`wait_idle`) for the boundaries where the host does
+not hold — or does not want — a specific fence. No new machinery: the C
+entry points wrap the C++ `render_async` frame-slot path M4.06
+delivered. What is new is the C host's ability to overlap its next-frame
+CPU work with the chain's GPU work and to present without a wait
+semaphore on a same-queue host. `docs/API.md` was refreshed to M4.10 in
+the same wave (status header, the chain-owned-fence rule, the
+present-without-wait contract, the ARCH-04 threading statements, and a
+new §5.6 mapping the whole C surface).
+
+### Added
+
+- **`slangvk_chain_render_swapchain_async`** — the C mirror of
+  `Chain::render_async` for the swapchain output variant: records and
+  submits the chain's command buffer, returns immediately, and sets
+  `*out_fence` to the submission's completion fence. The fence is
+  chain-owned — the host never destroys it and never waits it directly;
+  the next render (async or sync) and `slangvk_chain_wait_idle()`
+  reclaim it, exactly like the sync entry point does internally.
+  Same-queue hosts may enqueue `vkQueuePresentKHR` of the target image
+  right after the call — the presentation engine consumes it only after
+  the render reaches the front of the queue. Host backpressure is
+  unchanged from the C++ path: a frame slot is reused only after its
+  fence retires, so with `frames_in_flight = 1` there is never more than
+  one chain submission in flight and the *next* async render blocks
+  until the previous frame finished on the GPU. Because the submit now
+  overlaps the host's next-frame work, any host-owned buffer the chain
+  reads (`slangvk_input_frame.pixel_buffer`) must be double-buffered,
+  and chain output/input images must not be touched from the host until
+  the frame retires — screenshot readbacks included. Entry-point
+  validation rejects `NULL` handles, a `NULL` `out_fence`,
+  `VK_NULL_HANDLE` views and out-of-range rotations with
+  `SLANGVK_ERR_INVALID_ARGUMENT`. The C surface has no offscreen async
+  variant; C++ `render_async` covers both targets via `OutputTarget`.
+- **`slangvk_chain_wait_idle` / `Chain::wait_idle()`** — waits for every
+  in-flight chain frame to retire (fence + command buffer reclaimed);
+  no-op when nothing is in flight. The host calls it before consuming
+  chain output it did not already fence on its own (screenshot readbacks,
+  unstructured teardown-time reads), or before overwriting host-owned
+  buffers a submitted frame reads (a `pixel_buffer` staging write with
+  no per-frame slot of its own). Implemented as a loop of the same
+  per-slot wait+reclaim primitive `wait_async` uses (`WaitSlotFrame`),
+  so device-loss errors surface as-is and slots without a live fence are
+  skipped.
+
+### Validation
+
+- No new tests in this wave: `Chain::wait_idle` reuses the exact
+  per-slot primitive the M4.06 async suites exercise
+  (`tests/test_runner_async.cpp`, `tests/test_runner_pipeline.cpp`), and
+  the two C entry points are thin adapters over the already-tested C++
+  path (`src/c_api.cpp` maps them 1:1). Dedicated C-ABI coverage of the
+  async entries is still open.
+
+## [M4.09] — 2026-11-06
+
+A one-field release that closes the C host's last per-frame
+submit+fence-drain penalty: the single-submit upload path M4.05 built
+for C++ hosts (`Device::createMappedBuffer` + `InputFrame::pixelBuffer`)
+was unreachable from C, because `slangvk_input_frame` had no
+`pixel_buffer` member.
+
+### Added
+
+- **`slangvk_input_frame.pixel_buffer`** — the C mirror of
+  `InputFrame::pixelBuffer` (M4.05): an optional `TRANSFER_SRC`
+  host-visible buffer holding the frame's tightly packed pixels
+  (`width*height*texel`). When non-NULL the chain copies it into
+  `image` inside its own command buffer — the separate
+  `slangvk_image_update` submit + fence wait disappears; the buffer must
+  stay mapped and untouched until `render()` returns. Keep it NULL to
+  feed `image` via `slangvk_image_update` as before. `InputFrom()`
+  forwards the field 1:1, so the C++ contracts carry over verbatim
+  (requires `image` set; with async frames, double-buffer it). C hosts
+  doing their own per-frame upload now allocate one persistently mapped
+  staging buffer per frame size and memcpy into it every frame: one
+  command buffer, one submit, one fence wait, zero staging churn.
 
 ## [M4.08] — 2026-10-24
 
