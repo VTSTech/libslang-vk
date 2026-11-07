@@ -8,10 +8,11 @@ and the tools; [docs/EXAMPLES.md](EXAMPLES.md) is the API by example.
 
 ## Where the project is
 
-**M4.07** — async rendering, frame pipelining, device-lost recovery, an
-allocation-free render path and a SPIR-V cache enabler. All library-side
-M0–M4 gates are green: **31/31 ctest**, byte-exact goldens, zero
-validation-layer errors on lavapipe.
+**M4.10** — async rendering, frame pipelining, device-lost recovery, an
+allocation-free render path, a SPIR-V cache enabler and a benchmark
+framework. All library-side M0–M4 gates are green: **22/22 ctest**
+(sandbox, GCC 14.2, lavapipe — the M4.08 count), byte-exact goldens,
+zero validation-layer errors.
 
 The M0 core suite is joined by the M1 runner skeleton (Device
 adopt/create, offscreen `Chain::render`, golden blit round-trips), the M2
@@ -24,7 +25,19 @@ by the library (plan §8 output mode (a)). M4.05 adds the pure-C API and
 the single-submit per-frame upload path. M4.06 splits the frame path into
 record / submit / wait, lets several frames be pipelined at once, and adds
 device-lost recovery. M4.07 removes the per-frame allocations from the
-render path and adds the SPIR-V cache enabler.
+render path and adds the SPIR-V cache enabler. M4.08 ships the benchmark
+framework (six google/benchmark executables behind
+`-DSLANGVK_BUILD_BENCHMARKS=ON`) and spends its first measurement on a
+real fix — `TranslateSlang` reads the shader file once per call, −18%
+per call on Windows — plus the parser edge-case tests and the
+thread-safety contract stated in the public headers. M4.09 gives the C
+ABI the single-submit per-frame upload path
+(`slangvk_input_frame.pixel_buffer`, the mirror of
+`InputFrame::pixelBuffer`). M4.10 brings the async path to the C ABI —
+`slangvk_chain_render_swapchain_async` plus a chain-level drain
+(`slangvk_chain_wait_idle` / `Chain::wait_idle()`) — and refreshes
+`docs/API.md` to M4.10, including a new §5.6 that maps the whole C
+surface.
 
 Per-item implementation status, audited against the plan:
 [docs/CHECKLIST.md](CHECKLIST.md). Notable changes per milestone:
@@ -42,7 +55,8 @@ commitment, and the review will be redone against the then-current headers.
 ## The reference implementations
 
 Two hosts consume the library; both were exercised against the M4.07
-build.
+build (the M4.08–M4.10 wave that followed was benchmarks, C-ABI
+additions and docs — no execution-semantics change).
 
 ### DevilutionX-libslang-vk
 
@@ -131,6 +145,21 @@ blocks are filled in place in their mapped UBOs; the per-frame vectors are
 chain scratch; the LUT sizes and the merged parameter overrides are cached —
 and adds the SPIR-V cache enabler.
 
+M4.08 measures instead of guessing: the six-executable benchmark suite
+(preset parse, slang translate, slang compile, chain create+destroy,
+blit render, FXAA render) whose first real-GPU run surfaced and fixed a
+double file-read in `TranslateSlang` (−18% per call on Windows).
+
+M4.09 and M4.10 complete the C ABI's reach: `slangvk_input_frame.pixel_buffer`
+(M4.09) makes the single-submit per-frame upload path reachable from C,
+and M4.10 adds `slangvk_chain_render_swapchain_async` (the C mirror of
+`Chain::render_async` for the swapchain target) plus a chain-level
+drain, `slangvk_chain_wait_idle` / `Chain::wait_idle()` — so a C host
+can overlap its next-frame CPU work with the chain's GPU work, present
+without a wait semaphore on a same-queue host, and retire everything at
+screenshot/teardown boundaries. The C async entry covers the swapchain
+target only; C++ `render_async` covers both targets via `OutputTarget`.
+
 ---
 
 ## Corpus verdict (M4.03)
@@ -159,6 +188,9 @@ each is enumerated in the changelog.
 | **M4.05** | The pure-C API, the per-frame upload path, the freeze review. |
 | **M4.06** | Async rendering, frame pipelining, device-lost recovery. |
 | **M4.07** | An allocation-free render path, the C API's null-handle contract, the SPIR-V cache enabler. |
+| **M4.08** | The benchmark framework, the `TranslateSlang` single-read fix (−18%/call on Windows), parser edge-case tests, the thread-safety contract in the public headers. |
+| **M4.09** | The C ABI's `pixel_buffer` — the single-submit upload path reachable from C. |
+| **M4.10** | Async swapchain render + `wait_idle` in the C ABI; `docs/API.md` refreshed to M4.10 (new §5.6, the C ABI). |
 
 The plan itself — milestones, the API sketch, the risk register — is
 [docs/PLAN.md](PLAN.md).
@@ -177,7 +209,11 @@ compiles with glslang inline and `Chain::render` fences; the async path
 (`render_async` / `wait_async`, `ChainOptions::framesInFlight`) is what a
 host opts into when it wants to keep frames on the GPU. A frame borrows
 its input image and output target for its duration, so overlapping frames
-need one of each.
+need one of each. `wait_idle` (M4.10) drains every in-flight frame for
+the boundaries where the host does not hold — or does not want — a
+specific fence; the C ABI mirrors the async path for the swapchain
+target (`slangvk_chain_render_swapchain_async`), where a same-queue
+host may enqueue the present right after the submit.
 
 **No disk cache in the library.** The reference host already keeps one
 (`shaders/cache/`), and two caches would disagree. What the library
@@ -236,5 +272,11 @@ that affect an API consumer directly:
   llvmpipe goldens and 20/20 byte-exact on-device after regeneration.
 - **Hardware field log**: the DevilutionX sessions (Windows RX 560, Linux
   llvmpipe) are in [PROVENANCE.md](../PROVENANCE.md).
+- **Benchmarks (M4.08):** six executables behind
+  `-DSLANGVK_BUILD_BENCHMARKS=ON`; first real-GPU run — RX 560 / Windows
+  11 / MSVC 19.44 — FXAA end-to-end 411 µs (~2,400 FPS ceiling, 13.1×
+  the software rasterizer), blit presentation 225 µs (5.1×). The
+  measurement contract and the lavapipe reference numbers:
+  [benchmarks/README.md](../benchmarks/README.md).
 - **Downstream hosts**: the M4.07 build on DevilutionX-libslang-vk (140+
   FPS with FXAA.slangp) and on Chocolate-Doom-VK.

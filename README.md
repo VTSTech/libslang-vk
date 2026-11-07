@@ -26,7 +26,9 @@ chain->render(inputFrame, outputTarget, {});   // once per frame
 
 ## Reference implementations
 
-Two hosts consume the library; both were exercised against the M4.07 build.
+Two hosts consume the library; both were exercised against the M4.07
+build (the M4.08–M4.10 wave that followed was benchmarks, C-ABI
+additions and docs — no execution-semantics change).
 
 | Host | What it is |
 |---|---|
@@ -35,11 +37,14 @@ Two hosts consume the library; both were exercised against the M4.07 build.
 
 ## Status
 
-**M4.07** — async rendering, frame pipelining, device-lost recovery, an
-allocation-free render path and a SPIR-V cache enabler. All library-side
-M0–M4 gates are green: **31/31 ctest**, byte-exact goldens, zero
-validation-layer errors on lavapipe. The corpus sweep loads 2,637 of the
-2,658 libretro presets (21 upstream-broken, zero regressions).
+**M4.10** — async rendering, frame pipelining, device-lost recovery, an
+allocation-free render path, a SPIR-V cache enabler, a six-executable
+benchmark framework, and a C ABI that now carries the whole runner
+surface (single-submit per-frame upload, async swapchain render, a
+chain-level `wait_idle`). All library-side M0–M4 gates are green:
+**22/22 ctest** (sandbox, lavapipe), byte-exact goldens, zero
+validation-layer errors. The corpus sweep loads 2,637 of the 2,658
+libretro presets (21 upstream-broken, zero regressions).
 
 The freeze is **not** imminent — M4.xx keeps iterating until the surface is
 ready. The full status, the milestone history, the design trade-offs and the
